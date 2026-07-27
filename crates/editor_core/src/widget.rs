@@ -27,6 +27,14 @@ pub trait TextEditorWidget {
     /// `ui()` call, iced only re-runs app code in response to a message.
     fn poll_highlighting(&mut self);
 
+    /// The cursor's current (line, column) - saved by the app shell when a
+    /// tab is deselected, so `move_cursor_to` can put it back on reselect.
+    fn cursor_position(&self) -> (usize, usize);
+
+    /// Moves the cursor to the given (line, column), clamping to the
+    /// nearest valid position if the document has since gotten shorter.
+    fn move_cursor_to(&mut self, line: usize, column: usize);
+
     /// Whether this editor is still waiting on a grammar load - used by the
     /// app shell to decide whether the highlighting-poll subscription needs
     /// to stay active.

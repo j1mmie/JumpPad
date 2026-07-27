@@ -1,0 +1,203 @@
+# AGENTS.md
+
+Working notes for an AI agent operating on this codebase. See `README.md`
+for the human-facing pitch; this file is the architecture map, the
+"why is it built this way," and the list of things that will bite you if
+you don't know about them going in.
+
+## What this is, in one paragraph
+
+xizor is a lightweight plaintext editor built on `iced` (Rust, Elm-style
+GUI framework). It targets config files, notes, and structured data
+(YAML/XML/CSV/etc.) - not source code. The overriding design constraint is
+low idle memory footprint; every feature (rendering backend, syntax
+highlighting) is built so it costs nothing until actually used, and can be
+turned off entirely without touching the rest of the app.
+
+The app was originally built on `egui` and ported to `iced`. Some comments
+in the codebase still reference `egui` behavior for contrast (e.g. "unlike
+egui's `ctx.request_repaint()`") - that's this history, not a mistake.
+
+## Workspace layout
+
+```
+crates/
+  xizor/            the application shell: iced::Program, tabs, menus, file I/O, theming
+  editor_core/       the abstraction boundary between the shell and the actual text widget
+  iced_text_editor/  the one TextEditorWidget impl today, wrapping iced::widget::text_editor
+  syntax_registry/   loads/caches/refcounts tree-sitter WASM grammars; no iced dependency
+  xizor_config/      config.toml loading + defaults; no iced dependency
+syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
+```
+
+Dependency direction is one-way: `xizor` depends on everything;
+`editor_core`, `syntax_registry`, and `xizor_config` depend on nothing
+inside this workspace. `iced_text_editor` depends on `editor_core` (to
+implement its trait) and `syntax_registry` (to drive highlighting), but
+not on `xizor`. This is deliberate - see `editor_core::widget::TextEditorWidget`'s
+doc comment: a future non-iced or non-text_editor-based editor widget
+should be a new crate implementing that trait, not a rewrite of `xizor`.
+
+## The `TextEditorWidget` boundary
+
+`editor_core::widget::TextEditorWidget` (view / update / text / set_text /
+poll_highlighting / has_pending_highlighting) is the entire contract
+between the app shell and "the thing that actually renders and edits
+text." `EditorMessage` is a concrete enum, not generic over the widget
+implementation - there's only ever one editor implementation live at a
+time, so there's no need to thread a generic `Message` type through the
+whole app for it.
+
+`Tab` (`editor_core::tab::Tab`) owns one `Box<dyn TextEditorWidget>` plus
+tab metadata (path, dirty flag, id). `XizorApp` in `crates/xizor/src/app.rs`
+holds `Vec<Tab>` and an `active: usize` index; only the active tab's
+`.view()` is ever placed in the widget tree, one tab at a time.
+
+`poll_highlighting()` exists because iced, unlike egui, doesn't re-run
+application code every frame - it only reacts to messages. `XizorApp`'s
+`subscription()` runs a 50ms timer (`Message::PollHighlighting`) *only*
+while some tab has a grammar load in flight, and stops it once nothing is
+pending, so there's no permanent background timer once everything's
+settled.
+
+## Syntax highlighting (`syntax_registry`)
+
+- Grammars are tree-sitter parsers compiled to WASM, run through
+  `wasmtime` - not loaded as native shared libraries. This trades some
+  speed for sandboxing untrusted grammar code and for being trivially
+  removable (delete the `.wasm`, the feature just isn't there for that
+  file type - no code path notices or cares).
+- Grammars load **lazily and asynchronously**: nothing loads at startup;
+  the first tab that opens a file of a given type spawns a background
+  thread (`SyntaxRegistry::acquire` -> `finish_load`) to find and compile
+  the matching `.wasm`. A tab's content is never blocked waiting on this -
+  it just renders unhighlighted until the grammar resolves.
+- Grammars are cached and refcounted by *grammar name*, not file
+  extension (`yaml`/`yml` share one grammar). Dropping the last `Handle`
+  referencing a grammar evicts it. Injection targets (e.g. embedded YAML
+  inside Markdown, via `<grammar>.injections.scm`) are just more grammars
+  acquired recursively through the same path.
+- **Gotcha - compile serialization:** `SyntaxRegistry.compile_lock`
+  serializes the actual wasmtime compile step across all background
+  loader threads. This was not a defensive guess - concurrent first-time
+  compiles through the same `wasmtime::Engine` were reproduced to hang
+  indefinitely. Grammars can still be *requested* concurrently (refcounting
+  in `state` is independent), only the compile itself is serialized.
+- **Gotcha - lock reentrancy on eviction:** `SyntaxRegistry::release` drops
+  the removed `Grammar` (which cascades into releasing any injected
+  grammars' `Handle`s, which calls back into `release`) only *after*
+  releasing its own mutex guard. Freeing it while still holding the lock
+  self-deadlocks the moment any grammar with injections is evicted - also
+  reproduced directly, not theoretical.
+- Highlight categories (`HighlightCategory`) are a small fixed set (String,
+  Comment, Number, Keyword, Heading, Emphasis, Link, Quote, Code) chosen to
+  cover both code-like and markup-like grammars without a full
+  scope/theme system. Don't expect fine-grained scopes here.
+
+## Rendering backend
+
+`xizor_config::RendererConfig` chooses between `TinySkia` (default, pure
+software, ~22MB idle vs. ~146MB for `wgpu` in this app), `Wgpu`, or `Auto`
+(try `wgpu`, fall back to `tiny-skia` on failure). Both renderers are
+compiled in via iced's Cargo features, so this is a runtime choice.
+
+**Timing gotcha:** the backend is selected by setting the `ICED_BACKEND`
+env var (iced has no `Settings` field for this) and it must happen
+*before* the first `iced::application(...)` window is created - so
+`main()` sets it, before `XizorApp::new` or anything else runs. If you
+refactor startup, this ordering constraint has to move with it.
+
+## Known upstream rendering bug (tiny-skia + tab switching)
+
+`iced`'s tiny-skia compositor skips presenting a frame it thinks looks
+identical to the last one (a damage-tracking optimization). Its equality
+check for a `text_editor`'s rendered content
+(`iced_graphics::text::editor::Internal::eq`, in the `iced` crate itself,
+confirmed still present as of iced 0.14.0) only compares font, bounds, and
+line metrics - **never the actual text**. Switching xizor's active tab
+lands on a different editor with identical font/bounds/metrics (same
+pane), so the compositor concludes nothing changed and skips the repaint -
+the old tab's text stays on screen until some unrelated redraw (hovering
+a button, resizing the window) happens to touch that region for real.
+
+There is no `redraw()`/`invalidate()`/dirty-flag hook exposed to
+`Program::update` or `view` for this specific per-widget check - but there
+*is* a coarser, application-reachable bypass one level up. Before
+`iced_tiny_skia` even runs the per-widget check above, it compares the
+whole frame's reported background color against last frame's
+(`surface.background_color == background_color` in
+`iced_tiny_skia::window::compositor::present`); if that differs at all, it
+skips the per-widget check entirely and repaints the *entire* viewport.
+That's the lever xizor actually uses (see below). This was also not fixed
+by switching to `wgpu`-only (that backend has no damage-tracking at all
+and isn't a real option here anyway - `tiny-skia`'s memory footprint is
+the whole point of this project, see `README.md`).
+
+**The fix in place:** `XizorApp::redraw_nudge: bool` flips every time the
+active tab changes (`switch_active`, `crates/xizor/src/app.rs`).
+`XizorApp::theme()` checks it: when set, it returns the app's real theme
+run through `nudge_background`, which nudges the palette's background
+alpha by `0.001` and rebuilds it as `Theme::custom(...)`. That's an
+`f32` difference big enough for `Color`'s `==` to see, but small enough
+to be invisible - the background quad it's drawn as blends against a
+backdrop the compositor already cleared to that same base color moments
+earlier, and mixing a color with itself at less than full opacity still
+produces that same color. The result: switching tabs reliably forces a
+full repaint, at the cost of one recomputed `Palette`/`Extended` per
+switch - not per frame.
+
+Two things were tried and found insufficient before landing on this,
+worth knowing so they aren't re-attempted as if untested:
+- A per-tab `bool` toggling one pixel of container padding on the active
+  editor (changing its `Internal.bounds`, one of the three fields the
+  per-widget check *does* compare) - worked, but visibly janky (a
+  perceptible 1px shift each switch).
+- Re-focusing the editor on switch (`iced::advanced::widget::operation::focusable::focus_next`,
+  still done today - see below for why) on the theory that it reproduces
+  what a real click does - confirmed insufficient on its own; content
+  still went stale.
+
+**Also in `switch_active`, for an unrelated reason:** it saves the
+outgoing tab's cursor position (`Tab::last_cursor`) and restores the
+incoming tab's, then runs `focus_next` to re-focus the editor. This is
+needed regardless of the redraw bug above, because of the `keyed_column`
+(keyed by `Tab::id`, not `Vec` index) around the active editor in
+`view()` - it makes a freshly switched-to tab's editor widget state start
+completely fresh (unfocused, no highlighter/click/drag state left over)
+rather than silently reusing the previous tab's, so without restoring
+focus/cursor by hand, the caret would simply be invisible and typing
+would resume from the document start instead of wherever the user left
+off.
+
+## Config (`xizor_config`)
+
+`config.toml` is looked for next to the running executable first, then
+in the current directory (a `cargo run` convenience). If nothing is
+found, built-in defaults are written to the first location. A malformed
+config file logs an error and falls back to in-memory defaults rather
+than failing to start - a broken config should never be able to prevent
+the editor from opening. Config sections (`syntaxes`, `renderer`, `theme`)
+are independently defaulted so old config files stay valid as new
+sections get added.
+
+## Where the grammar files live
+
+`syntaxes/` at the repo root holds the `.wasm` grammars and
+`.injections.scm` queries actually used by this checkout - currently
+untracked in git (present on disk, not yet committed). `default_search_dirs()`
+in `crates/xizor/src/app.rs` looks next to the executable first, then
+`./syntaxes` for `cargo run` convenience - mirroring `config_paths()`'s
+search order in `xizor_config`.
+
+## Miscellaneous things worth knowing before you "fix" them
+
+- `main.rs` has `windows_subsystem = "windows"` (which hides the console
+  window on release builds) temporarily disabled, with a comment saying
+  why: an in-progress Windows highlighting bug needed console output to
+  debug. Don't silently re-enable it as a "cleanup" without checking
+  whether that investigation is actually finished.
+- The workspace `Cargo.toml` comment about `iced`'s default features
+  (wgpu + tiny-skia both compiled in) predates `RendererConfig` being a
+  runtime choice - both backends being compiled in is now load-bearing,
+  not just convenient, since `Auto`/`Wgpu`/`TinySkia` all need to exist in
+  the same binary.

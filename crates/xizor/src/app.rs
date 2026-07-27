@@ -3,8 +3,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use editor_core::{EditorFactory, EditorMessage, Tab};
-use iced::widget::{button, column, container, row, scrollable, text};
-use iced::{Element, Fill, Subscription, Task, Theme, keyboard};
+use iced::advanced::widget::{operate, operation};
+use iced::widget::{button, column, container, keyed_column, row, scrollable, text};
+use iced::{Center, Color, Element, Fill, Subscription, Task, Theme, keyboard};
 
 pub struct XizorApp {
     tabs: Vec<Tab>,
@@ -13,6 +14,9 @@ pub struct XizorApp {
     error: Option<String>,
     editor_factory: EditorFactory,
     theme: Theme,
+    /// Flips every time the active tab changes. See `theme()` for what
+    /// this actually does - it's not a display preference.
+    redraw_nudge: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -80,28 +84,61 @@ impl XizorApp {
             error: None,
             editor_factory,
             theme: resolve_theme(&config.theme),
+            redraw_nudge: false,
         };
-        app.new_tab();
-        (app, Task::none())
+        let task = app.new_tab();
+        (app, task)
     }
 
-    fn new_tab(&mut self) {
+    fn new_tab(&mut self) -> Task<Message> {
         let id = self.next_id;
         self.next_id += 1;
         self.tabs.push(Tab::untitled(id, &self.editor_factory));
-        self.active = self.tabs.len() - 1;
+        self.switch_active(self.tabs.len() - 1)
     }
 
-    fn close_tab(&mut self, index: usize) {
+    fn close_tab(&mut self, index: usize) -> Task<Message> {
         if index >= self.tabs.len() {
-            return;
+            return Task::none();
         }
         self.tabs.remove(index);
         if self.tabs.is_empty() {
-            self.new_tab();
+            self.new_tab()
         } else if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
+            self.switch_active(self.tabs.len() - 1)
+        } else {
+            Task::none()
         }
+    }
+
+    /// Switches the active tab, carrying each tab's cursor position across
+    /// the switch: the previously active tab's cursor is saved, and the
+    /// newly active tab's remembered cursor (if any - a never-visited tab
+    /// just has the document-start default) is restored. Also re-focuses
+    /// the editor, since a freshly switched-to tab's widget state starts
+    /// unfocused (see the `keyed_column` comment in `view`) - without it,
+    /// the caret would just be invisible until the user clicked.
+    ///
+    /// Focusing alone was tried as a fix for the tiny-skia stale-content
+    /// bug (AGENTS.md) on the theory that it reproduces what a real click
+    /// does - confirmed insufficient in practice, content still went
+    /// stale. `redraw_nudge` (flipped here, consumed by `theme()`) is the
+    /// actual fix for that; it's independent of the cursor/focus handling
+    /// above and would still be needed even if this method didn't exist.
+    fn switch_active(&mut self, index: usize) -> Task<Message> {
+        if index >= self.tabs.len() || index == self.active {
+            return Task::none();
+        }
+        if let Some(previous) = self.tabs.get_mut(self.active) {
+            previous.last_cursor = previous.editor.cursor_position();
+        }
+        self.active = index;
+        self.redraw_nudge = !self.redraw_nudge;
+        if let Some(tab) = self.tabs.get_mut(index) {
+            let (line, column) = tab.last_cursor;
+            tab.editor.move_cursor_to(line, column);
+        }
+        operate(operation::focusable::focus_next())
     }
 
     fn save_active_tab(&self, force_dialog: bool) -> Task<Message> {
@@ -118,18 +155,14 @@ impl XizorApp {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::NewTab => {
-                self.new_tab();
-                Task::none()
-            }
+            Message::NewTab => self.new_tab(),
             Message::OpenFile => Task::perform(open_and_read(), Message::FileOpened),
             Message::FileOpened(Ok((path, contents))) => {
                 let id = self.next_id;
                 self.next_id += 1;
                 self.tabs
                     .push(Tab::from_file(id, path, &contents, &self.editor_factory));
-                self.active = self.tabs.len() - 1;
-                Task::none()
+                self.switch_active(self.tabs.len() - 1)
             }
             Message::FileOpened(Err(OpenError::DialogClosed)) => Task::none(),
             Message::FileOpened(Err(OpenError::Io { path, kind })) => {
@@ -157,20 +190,9 @@ impl XizorApp {
                 }
                 Task::none()
             }
-            Message::SelectTab(index) => {
-                if index < self.tabs.len() {
-                    self.active = index;
-                }
-                Task::none()
-            }
-            Message::CloseTab(index) => {
-                self.close_tab(index);
-                Task::none()
-            }
-            Message::CloseActiveTab => {
-                self.close_tab(self.active);
-                Task::none()
-            }
+            Message::SelectTab(index) => self.switch_active(index),
+            Message::CloseTab(index) => self.close_tab(index),
+            Message::CloseActiveTab => self.close_tab(self.active),
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -193,51 +215,72 @@ impl XizorApp {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
-        let toolbar = row![
-            button("New Tab").on_press(Message::NewTab),
-            button("Open...").on_press(Message::OpenFile),
-            button("Save").on_press(Message::SaveFile),
-            button("Save As...").on_press(Message::SaveFileAs),
-            button("Close Tab").on_press(Message::CloseActiveTab),
-        ]
-        .spacing(6)
-        .padding(6);
+        let tab_chips = self.tabs.iter().enumerate().map(|(index, tab)| {
+            let is_active = index == self.active;
 
-        let tabs = self.tabs.iter().enumerate().map(|(index, tab)| {
-            row![
-                button(text(tab.title())).style(if index == self.active {
-                    button::primary
-                } else {
-                    button::secondary
-                }).on_press(Message::SelectTab(index)),
-                button("x").on_press(Message::CloseTab(index)),
-            ]
-            .spacing(2)
-            .into()
+            let title = button(text(tab.title()))
+                .padding([6, 10])
+                .style(move |theme, status| tab_title_style(theme, status, is_active))
+                .on_press(Message::SelectTab(index));
+
+            let close = button(text("x").size(12))
+                .padding([6, 8])
+                .style(move |theme, status| tab_close_style(theme, status, is_active))
+                .on_press(Message::CloseTab(index));
+
+            // The frame is the *only* thing that paints this tab's
+            // background - title and close are both styled fully
+            // transparent at rest (see tab_title_style/tab_close_style).
+            // Letting each button paint its own background instead (the
+            // previous approach) meant two independently-sized rectangles
+            // side by side, and any mismatch between them (e.g. the close
+            // button's smaller font shrinking its own box) showed up as a
+            // visible seam. With the frame owning the shape, future
+            // additions to a tab (an icon, a dirty-dot) just join the row
+            // and get centered - they can't reintroduce that seam.
+            container(row![title, close].spacing(0).align_y(Center))
+                .style(move |theme| tab_frame_style(theme, is_active))
+                .into()
         });
-        let tab_bar = scrollable(
-            row(tabs.chain(std::iter::once(
-                button("+").on_press(Message::NewTab).into(),
-            )))
-            .spacing(6)
-            .padding(6),
+
+        let new_tab_button = button(text("+"))
+            .padding([6, 10])
+            .style(new_tab_style)
+            .on_press(Message::NewTab);
+
+        let tabs_row = row(tab_chips.chain(std::iter::once(new_tab_button.into())))
+            .spacing(0)
+            .align_y(Center);
+
+        let tab_bar: Element<'_, Message> = container(
+            scrollable(tabs_row).direction(scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new(),
+            )),
         )
-        .direction(scrollable::Direction::Horizontal(
-            scrollable::Scrollbar::new(),
-        ));
+        .width(Fill)
+        .style(tab_bar_style)
+        .into();
 
         let editor: Element<'_, Message> = if let Some(tab) = self.tabs.get(self.active) {
             let index = self.active;
-            tab.editor.view().map(move |message| Message::Editor(index, message))
+            let tab_id = tab.id;
+            let view = tab
+                .editor
+                .view()
+                .map(move |message| Message::Editor(index, message));
+            // Keyed by the tab's stable id (not its Vec index, which shifts
+            // as tabs close) so switching tabs is a *key* change at this
+            // tree position, not just a different `Content` behind the same
+            // widget instance. Without this, iced's widget-tree diffing
+            // reuses the previous tab's cached editor state in place and
+            // the text_editor keeps showing whatever it last rendered
+            // instead of the newly-selected tab's content.
+            keyed_column([(tab_id, view)]).width(Fill).height(Fill).into()
         } else {
             text("No open tabs").into()
         };
 
-        let mut content = column![
-            toolbar,
-            tab_bar,
-            container(editor).width(Fill).height(Fill),
-        ];
+        let mut content = column![tab_bar, editor];
 
         if let Some(error) = &self.error {
             content = content.push(
@@ -254,7 +297,11 @@ impl XizorApp {
     }
 
     pub fn theme(&self) -> Theme {
-        self.theme.clone()
+        if self.redraw_nudge {
+            nudge_background(&self.theme)
+        } else {
+            self.theme.clone()
+        }
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -285,6 +332,130 @@ fn handle_hotkey(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
         keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
         _ => None,
     }
+}
+
+/// Moves each RGB channel toward black by a fixed absolute amount (not a
+/// percentage of the channel's own value), clamped at 0. Deliberately not
+/// multiplicative: this project's default theme (Kanagawa Wave, background
+/// rgb(54,54,70) per config/config.toml) and several bundled dark themes
+/// have backgrounds too dark for a percentage-based step to produce a
+/// visible difference (0.94x of 54 is 51 - a 3/255 shift).
+fn darken(color: Color, amount: f32) -> Color {
+    Color {
+        r: (color.r - amount).max(0.0),
+        g: (color.g - amount).max(0.0),
+        b: (color.b - amount).max(0.0),
+        a: color.a,
+    }
+}
+
+const INACTIVE_TAB_DARKEN: f32 = 0.035; // ~9/255 per channel
+const TAB_ROW_DARKEN: f32 = 0.09; // ~23/255 per channel
+
+/// The (background, text) pair for a tab chip - shared by the title button
+/// and the close button so they always agree exactly, rather than each
+/// computing it separately and risking drift.
+fn tab_chip_colors(theme: &Theme, is_active: bool) -> (Color, Color) {
+    let palette = theme.extended_palette();
+    let background = palette.background.base.color;
+    if is_active {
+        (background, palette.background.base.text)
+    } else {
+        (
+            darken(background, INACTIVE_TAB_DARKEN),
+            palette.background.base.text.scale_alpha(0.7),
+        )
+    }
+}
+
+/// A tab's title button: always transparent - the enclosing `tab_frame_style`
+/// container is what paints the tab's background, so title and close never
+/// have to agree on a box size to look like one continuous surface.
+fn tab_title_style(theme: &Theme, _status: button::Status, is_active: bool) -> button::Style {
+    let (_, text_color) = tab_chip_colors(theme, is_active);
+    button::Style {
+        background: None,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
+/// A tab's close button: transparent at rest (same reasoning as
+/// `tab_title_style`), with a faint highlight only on hover/press as the
+/// only background it ever paints itself.
+fn tab_close_style(theme: &Theme, status: button::Status, is_active: bool) -> button::Style {
+    let (_, text_color) = tab_chip_colors(theme, is_active);
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(text_color.scale_alpha(0.15).into())
+        }
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
+/// The frame behind a tab's title+close row - the only thing that paints a
+/// tab's background. Active tab matches the editor's own background
+/// (`tab_chip_colors`), so it reads as a seamless continuation of the
+/// document below it; inactive tabs get a darker background instead of a
+/// border to distinguish them.
+fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
+    let (background, _) = tab_chip_colors(theme, is_active);
+    container::Style::default().background(background)
+}
+
+/// The "+" new-tab button: transparent and dim at rest so it doesn't
+/// compete with the tabs themselves, brightening on hover/press as the
+/// only affordance that it's interactive.
+fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
+    let palette = theme.extended_palette();
+    let text_color = match status {
+        button::Status::Hovered | button::Status::Pressed => palette.background.base.text,
+        _ => palette.background.base.text.scale_alpha(0.4),
+    };
+    button::Style {
+        background: None,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
+/// The tab row's own background - darker than even an inactive tab, so any
+/// empty space past the last tab reads as a distinct "frame" the tabs sit
+/// in, not a transparent gap.
+fn tab_bar_style(theme: &Theme) -> container::Style {
+    let background = darken(theme.extended_palette().background.base.color, TAB_ROW_DARKEN);
+    container::Style::default().background(background)
+}
+
+/// Nudges `theme`'s background alpha by an amount too small to see, but
+/// large enough that `Color`'s `==` (which iced's tiny-skia compositor
+/// uses to decide whether a repaint is even necessary) reports a
+/// difference from last frame. See AGENTS.md's "Known upstream rendering
+/// bug" section: without this, switching tabs can leave stale content on
+/// screen because the compositor's own per-widget damage check has a gap
+/// for text editors specifically. A background color mismatch bypasses
+/// that check entirely and forces a full repaint - this makes one happen
+/// deliberately, exactly when a tab switches.
+///
+/// The nudge is invisible because it's blended against a backdrop the
+/// compositor itself just cleared to that same base color a moment
+/// earlier - mixing a color with itself at less than full opacity still
+/// produces that same color, regardless of how much less.
+///
+/// Uses `Theme::custom` because the built-in named variants (`Theme::Light`,
+/// `Theme::KanagawaWave`, ...) don't have a way to override one color -
+/// `Theme::palette()` returns a plain, adjustable `Palette` regardless of
+/// which named variant produced it, so this works uniformly for all of
+/// them without matching on the specific variant.
+fn nudge_background(theme: &Theme) -> Theme {
+    let mut palette = theme.palette();
+    palette.background.a -= 0.001;
+    Theme::custom("xizor (redraw nudge)".to_string(), palette)
 }
 
 /// Matches a config-file theme name against `Theme::ALL` by display name

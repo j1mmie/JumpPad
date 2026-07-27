@@ -116,6 +116,29 @@ impl TextEditorWidget for IcedTextEditor {
     fn has_pending_highlighting(&self) -> bool {
         matches!(self.highlighting, Highlighting::Pending(_))
     }
+
+    fn cursor_position(&self) -> (usize, usize) {
+        self.content.cursor_position()
+    }
+
+    fn move_cursor_to(&mut self, line: usize, column: usize) {
+        // No absolute "jump to (line, column)" action exists, so this walks
+        // there from the start: document start, then down `line` times,
+        // then right `column` times. Each step clamps at the nearest valid
+        // position rather than erroring, so a document that's gotten
+        // shorter since `line`/`column` were recorded just lands at the
+        // closest place instead of panicking or doing nothing.
+        self.content
+            .perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
+        for _ in 0..line {
+            self.content
+                .perform(text_editor::Action::Move(text_editor::Motion::Down));
+        }
+        for _ in 0..column {
+            self.content
+                .perform(text_editor::Action::Move(text_editor::Motion::Right));
+        }
+    }
 }
 
 /// The settings a [`TreeSitterHighlighter`] is built/updated from: the

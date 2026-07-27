@@ -28,6 +28,11 @@ pub struct Tab {
     pub document: Document,
     pub dirty: bool,
     pub editor: Box<dyn TextEditorWidget>,
+    /// Where the cursor was the last time this tab was the active one -
+    /// saved on deselect, restored on reselect (see `XizorApp`'s tab
+    /// switching). Starts at the document start, same as a freshly created
+    /// editor's actual cursor position.
+    pub last_cursor: (usize, usize),
 }
 
 impl Tab {
@@ -37,6 +42,7 @@ impl Tab {
             document: Document::default(),
             dirty: false,
             editor: factory("", None),
+            last_cursor: (0, 0),
         }
     }
 
@@ -48,6 +54,7 @@ impl Tab {
             document: Document { path: Some(path) },
             dirty: false,
             editor,
+            last_cursor: (0, 0),
         }
     }
 
