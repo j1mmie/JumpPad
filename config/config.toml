@@ -1,0 +1,15 @@
+# Valid Themes: Light, Dark, Dracula, Nord, Solarized Light, Solarized Dark,
+#               Gruvbox Light, Gruvbox Dark, Catppuccin Latte, Catppuccin Frappé,
+#               Catppuccin Macchiato, Catppuccin Mocha, Tokyo Night, Tokyo Night Storm,
+#               Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
+#               Moonfly, Nightfly, Oxocarbon, Ferra
+
+theme = "Kanagawa Wave"
+
+[syntaxes]
+markdown = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]
+yaml = ["yaml", "yml"]
+toml = ["toml", "tml"]
+json = ["json", "jsonc"]
+xml = ["xml", "xsl", "xsd", "svg"]
+dtd = ["dtd"]

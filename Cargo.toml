@@ -1,0 +1,35 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/editor_core",
+    "crates/iced_text_editor",
+    "crates/syntax_registry",
+    "crates/xizor",
+    "crates/xizor_config",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+# Default features (wgpu + tiny-skia) are kept on deliberately. Nothing in
+# this workspace imports `iced_wgpu`/`iced_renderer` directly or otherwise
+# depends on wgpu-specific types - only the top-level `iced` facade crate's
+# renderer-agnostic widget/application API is used - so dropping to
+# `default-features = false, features = ["tiny-skia"]` later (trading GPU
+# acceleration for a smaller binary) is a one-line change here, not a code
+# change.
+iced = "0.13"
+tree-sitter = { version = "0.26", features = ["wasm"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+editor_core = { path = "crates/editor_core" }
+iced_text_editor = { path = "crates/iced_text_editor" }
+syntax_registry = { path = "crates/syntax_registry" }
+xizor_config = { path = "crates/xizor_config" }
+
+[profile.release]
+strip = true
+panic = "abort"
+lto = true

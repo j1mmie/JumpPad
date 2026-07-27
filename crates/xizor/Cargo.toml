@@ -1,0 +1,13 @@
+[package]
+name = "xizor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["tokio"] }
+editor_core.workspace = true
+iced_text_editor.workspace = true
+syntax_registry.workspace = true
+xizor_config.workspace = true
+rfd = "0.15"
+tokio = { version = "1", features = ["fs"] }

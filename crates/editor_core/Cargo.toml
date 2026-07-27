@@ -1,0 +1,7 @@
+[package]
+name = "editor_core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+iced.workspace = true

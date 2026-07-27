@@ -1,2 +1,2 @@
-Hello World!
+Rust-based text editor
 
