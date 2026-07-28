@@ -69,11 +69,12 @@ asynchronously so that it does not block file loading or user input.
 
 ### Build syntax highlighter grammars:
 ```
-./scripts/build-grammars.sh
+./syntaxes/build-grammars.sh
 ```
 This clones each grammar's upstream source and compiles it to WASM into
-`syntaxes/` at the repo root, where the app looks for it. Requires `git`
-and `npx` (from Node.js) - see the script for the exact sources.
+`syntaxes/output`. The contents of this folder should be placed in a `syntaxes`
+folder, sibling to a xizor binary, so that it can detect the grammars.
+Requires `git` and `npm`.
 
 
 ### Build Xizor binaries:

@@ -1,28 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rebuilds every tree-sitter grammar `.wasm` file (plus the markdown
-# injection queries) into syntaxes/ at the repo root, from the upstream
-# sources listed below. syntax_registry loads these by grammar name (see
-# xizor_config's `syntaxes` table for the extension -> grammar mapping),
-# not by file extension directly.
+# Rebuilds every tree-sitter grammar `.wasm` file (plus injection queries)
+# into syntaxes/ at the repo root, from the upstream sources listed below.
 #
 # Requires `git` and a way to run the tree-sitter CLI - this uses
 # `npx tree-sitter-cli`, which npm downloads into its own cache on first
-# use, so no global install is needed.
+# use.
 #
 # These are the actual sources used for what's already committed in
-# syntaxes/, not a guess: rebuilding from these repos reproduced 12 of the
-# 13 files byte-for-byte, and the 13th (markdown.wasm) differed only in a
-# few bytes of embedded build metadata (checked with `cmp -l`), not in
-# behavior.
+# syntaxes/,
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="$root/syntaxes"
-work="$(mktemp -d)"
+out="output"
+work="tmp"
+
+echo "Building in $work"
+
 trap 'rm -rf "$work"' EXIT
 
-ts() { npx --yes tree-sitter-cli "$@"; }
+ts() {
+    npx --yes tree-sitter-cli "$@";
+}
 
 clone() {
     local repo="$1" dir="$2"
@@ -38,6 +37,7 @@ build() {
     ts build --wasm -o "$out/$name.wasm" "$src"
 }
 
+npm install
 mkdir -p "$out"
 
 clone "ikatyang/tree-sitter-toml" toml

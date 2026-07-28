@@ -1,2 +1,3 @@
 /target
-/syntaxes
+/syntaxes/output
+/syntaxes/node_modules
