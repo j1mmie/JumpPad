@@ -6,6 +6,14 @@
 
 theme = "Kanagawa Wave"
 
+[visor]
+# Drop-down "visor" mode: undecorated, always-on-top, hidden until summoned
+# by the global toggle hotkey (see keybinds.toml). Still a bit buggy on some
+# systems, so it's opt-in for now - leave this false for an ordinary window
+# with the default OS titlebar/frame (the global toggle hotkey is ignored in
+# that case).
+enabled = false
+
 [syntaxes]
 markdown = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]
 yaml = ["yaml", "yml"]

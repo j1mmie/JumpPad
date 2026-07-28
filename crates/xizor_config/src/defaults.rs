@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{Config, SyntaxesConfig};
+use crate::{Config, SyntaxesConfig, VisorConfig};
 
 /// Built-in defaults, written out as the config file on first run. Covers
 /// the grammars xizor ships `.wasm` builds for out of the box - anything
@@ -35,5 +35,6 @@ pub(crate) fn config() -> Config {
     Config {
         syntaxes: SyntaxesConfig(syntaxes),
         theme: "Light".to_string(),
+        visor: VisorConfig::default(),
     }
 }

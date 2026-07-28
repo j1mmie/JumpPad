@@ -56,6 +56,13 @@ pub struct XizorApp {
     /// `Message::AnimationTick` and `subscription()`'s gating of the
     /// animation timer on this.
     animation: Option<Animation>,
+    /// Mirrors `xizor_config::VisorConfig::enabled`. When `false`, the app
+    /// behaves as an ordinary window: `snap_to_monitor`/`toggle_visor` never
+    /// reposition or resize it (decorations and window level are set once,
+    /// up front, in `lib.rs`), and no global hotkey is registered at all -
+    /// see `new()` - so there's nothing for `HotkeyEvent` to match against
+    /// and the toggle keypress is silently ignored.
+    visor_enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -161,8 +168,18 @@ impl XizorApp {
             .unwrap_or_else(|| PathBuf::from("drafts"));
         let manifest = session::load_manifest(&session_candidates);
 
-        let keybinds = xizor_config::load_keybinds();
-        let hotkey = Hotkey::register(keybinds.toggle);
+        let visor_enabled = config.visor.enabled;
+        // Global hotkey registration is skipped entirely when visor mode is
+        // off, rather than registered-then-ignored: that's what makes the
+        // toggle keypress a no-op (ignored, not just invisible) system-wide,
+        // and avoids claiming the combo with the OS for a feature that isn't
+        // in use.
+        let hotkey = if visor_enabled {
+            let keybinds = xizor_config::load_keybinds();
+            Hotkey::register(keybinds.toggle)
+        } else {
+            None
+        };
 
         let mut app = Self {
             tabs: Vec::new(),
@@ -178,6 +195,7 @@ impl XizorApp {
             hotkey,
             visor_visible: false,
             animation: None,
+            visor_enabled,
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
@@ -544,6 +562,12 @@ impl XizorApp {
     /// at startup (`Message::WindowReady`); see `toggle_visor` for the
     /// per-toggle re-snap that also covers a monitor change mid-session.
     fn snap_to_monitor(&mut self) -> Task<Message> {
+        if !self.visor_enabled {
+            // An ordinary window: leave it wherever the OS placed it, at
+            // the size `lib.rs`'s `window_size` requested, rather than
+            // shrinking it to visor proportions and parking it off-screen.
+            return Task::none();
+        }
         let Some(id) = self.window else {
             return Task::none();
         };
@@ -563,6 +587,14 @@ impl XizorApp {
     /// layout is different than it was at the last toggle" - but only ever
     /// tweens `y` (see `visor::Animation`), never width/height/x.
     fn toggle_visor(&mut self) -> Task<Message> {
+        // Unreachable in practice: with visor mode off, `new()` never
+        // registers a hotkey, so `HotkeyEvent` (this method's only caller)
+        // never matches `self.hotkey` and this never gets called. Guarded
+        // anyway so the invariant doesn't depend on staying in sync with
+        // that registration logic.
+        if !self.visor_enabled {
+            return Task::none();
+        }
         let Some(id) = self.window else {
             return Task::none();
         };

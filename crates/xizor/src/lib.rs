@@ -15,6 +15,7 @@ use app::XizorApp;
 /// choice to make here, unlike when both were compiled into one binary.
 pub fn run() -> iced::Result {
     let config = xizor_config::load();
+    let visor_enabled = config.visor.enabled;
 
     // iced 0.14 moved the boot/init closure to `application`'s first
     // argument (previously supplied last, via `.run_with(...)`) and moved
@@ -25,18 +26,26 @@ pub fn run() -> iced::Result {
     iced::application(move || XizorApp::new(config.clone()), XizorApp::update, XizorApp::view)
         .title("xizor")
         .window_size(iced::Size::new(900.0, 600.0))
-        // No native titlebar/frame on any platform - winit's `decorations`
-        // setting is what each OS's window server keys off of, so this one
-        // call covers Windows/macOS/Linux alike. The app has no
-        // replacement titlebar (drag region, custom min/max/close) yet, so
-        // for now the window can only be moved/resized/closed via OS
-        // window-manager shortcuts, not by dragging or clicking anything
-        // xizor draws itself.
-        .decorations(false)
+        // No native titlebar/frame while the visor is enabled - winit's
+        // `decorations` setting is what each OS's window server keys off
+        // of, so this one call covers Windows/macOS/Linux alike. The app
+        // has no replacement titlebar (drag region, custom min/max/close)
+        // yet, so in that mode the window can only be moved/resized/closed
+        // via OS window-manager shortcuts, not by dragging or clicking
+        // anything xizor draws itself. Visor mode is still a bit buggy on
+        // some systems (see `xizor_config::VisorConfig`), so with it off
+        // this instead behaves like an ordinary window, default OS
+        // titlebar/frame included.
+        .decorations(!visor_enabled)
         // The visor should render above whatever application currently has
         // focus while it's shown - it wouldn't be much of a drop-down
-        // console otherwise.
-        .level(iced::window::Level::AlwaysOnTop)
+        // console otherwise. An ordinary (non-visor) window has no reason
+        // to float above everything else.
+        .level(if visor_enabled {
+            iced::window::Level::AlwaysOnTop
+        } else {
+            iced::window::Level::Normal
+        })
         .subscription(XizorApp::subscription)
         .theme(XizorApp::theme)
         // Don't let iced auto-exit on the window's close button - the app
