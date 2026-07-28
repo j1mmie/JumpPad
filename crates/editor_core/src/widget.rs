@@ -50,6 +50,13 @@ pub trait TextEditorWidget {
 #[derive(Debug, Clone)]
 pub enum EditorMessage {
     Action(text_editor::Action),
+    /// Restore the most recent entry from this editor's own undo history -
+    /// see `iced_text_editor`'s `History`. Not a `text_editor::Action`
+    /// because `iced::widget::text_editor::Content` (as of iced 0.14) has no
+    /// undo/redo of its own to delegate to.
+    Undo,
+    /// Mirror of `Undo`, restoring the most recently undone entry.
+    Redo,
 }
 
 /// Constructs a boxed editor widget seeded with the given initial text and,
