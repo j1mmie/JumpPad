@@ -5061,6 +5061,7 @@ name = "xizor_config"
 version = "0.1.0"
 dependencies = [
  "global-hotkey",
+ "iced_core",
  "serde",
  "toml",
 ]
