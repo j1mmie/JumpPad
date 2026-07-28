@@ -2,6 +2,26 @@
 name = "xizor"
 version.workspace = true
 edition.workspace = true
+# Ambiguous otherwise: with two [[bin]] targets below, plain `cargo run`
+# would refuse to guess which one to launch.
+default-run = "xizor"
+
+[features]
+default = ["tiny-skia"]
+# Mutually exclusive per build - see the `xizor`/`xizor-gpu` bin entries
+# below, each gated to the matching feature via `required-features`.
+tiny-skia = ["iced/tiny-skia"]
+wgpu = ["iced/wgpu"]
+
+[[bin]]
+name = "xizor"
+path = "src/bin/xizor.rs"
+required-features = ["tiny-skia"]
+
+[[bin]]
+name = "xizor-gpu"
+path = "src/bin/xizor-gpu.rs"
+required-features = ["wgpu"]
 
 [dependencies]
 iced = { workspace = true, features = ["tokio"] }

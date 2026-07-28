@@ -6,16 +6,12 @@ mod app;
 
 use app::XizorApp;
 
-fn main() -> iced::Result {
+/// Shared entry point for both the `xizor` (tiny-skia) and `xizor-gpu`
+/// (wgpu) binaries - each compiles in exactly one iced compositor backend
+/// (see the `xizor` crate's `Cargo.toml`), so there's no runtime backend
+/// choice to make here, unlike when both were compiled into one binary.
+pub fn run() -> iced::Result {
     let config = xizor_config::load();
-
-    // Must happen before the iced runtime starts: the compositor backend is
-    // chosen the first time a window is created, reading `ICED_BACKEND`
-    // (iced has no `Settings` field for this) - `main` is the last point
-    // that's guaranteed to run before that.
-    if let Some(backend) = config.renderer.iced_backend_env_value() {
-        std::env::set_var("ICED_BACKEND", backend);
-    }
 
     iced::application("xizor", XizorApp::update, XizorApp::view)
         .window_size(iced::Size::new(900.0, 600.0))

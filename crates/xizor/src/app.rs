@@ -54,10 +54,9 @@ pub enum SaveError {
 }
 
 impl XizorApp {
-    /// Takes the already-loaded config rather than loading it itself: the
-    /// renderer backend (`config.renderer`) has to be known - and the
-    /// `ICED_BACKEND` env var set - before `main` starts the iced runtime,
-    /// which is before this constructor ever runs.
+    /// Takes the already-loaded config rather than loading it itself: `run()`
+    /// (in `lib.rs`) loads it before the iced runtime starts, which is
+    /// before this constructor ever runs.
     pub fn new(config: xizor_config::Config) -> (Self, Task<Message>) {
         let search_dirs = default_search_dirs();
         log_wasm_files_found(&search_dirs);

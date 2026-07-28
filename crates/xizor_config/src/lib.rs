@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 #[serde(default)]
 pub struct Config {
     pub syntaxes: SyntaxesConfig,
-    pub renderer: RendererConfig,
     /// The display name of an `iced::Theme` variant (e.g. `"Dracula"`,
     /// `"Solarized Light"`, matched case-insensitively) - kept as a plain
     /// string rather than an enum here so this crate doesn't need to depend
@@ -26,40 +25,6 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         defaults::config()
-    }
-}
-
-/// Which iced compositor backend to render with. Both are compiled in
-/// (`iced`'s `wgpu` and `tiny-skia` features are both enabled) so this can
-/// be a runtime choice - the tradeoff is that keeping both means the binary
-/// still carries wgpu's size cost even when `tiny-skia` is selected.
-///
-/// `tiny-skia` is the default: it's a pure-software rasterizer with a
-/// fraction of wgpu's idle memory footprint (measured ~22MB vs. ~146MB for
-/// this app), and a text editor has no real need for GPU-accelerated
-/// rendering. `Wgpu`/`Auto` are there for anyone who wants GPU acceleration
-/// back without recompiling.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum RendererConfig {
-    /// Let iced pick: tries `wgpu` first, only falls back to `tiny-skia` if
-    /// `wgpu` fails to initialize (e.g. no usable graphics adapter).
-    Auto,
-    Wgpu,
-    #[default]
-    TinySkia,
-}
-
-impl RendererConfig {
-    /// The value iced's `ICED_BACKEND` environment variable expects, or
-    /// `None` for `Auto` (leaving the variable unset, which is iced's own
-    /// try-wgpu-then-fall-back behavior).
-    pub fn iced_backend_env_value(self) -> Option<&'static str> {
-        match self {
-            RendererConfig::Auto => None,
-            RendererConfig::Wgpu => Some("wgpu"),
-            RendererConfig::TinySkia => Some("tiny-skia"),
-        }
     }
 }
 

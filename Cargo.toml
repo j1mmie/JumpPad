@@ -13,14 +13,13 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
-# Default features (wgpu + tiny-skia) are kept on deliberately. Nothing in
-# this workspace imports `iced_wgpu`/`iced_renderer` directly or otherwise
-# depends on wgpu-specific types - only the top-level `iced` facade crate's
-# renderer-agnostic widget/application API is used - so dropping to
-# `default-features = false, features = ["tiny-skia"]` later (trading GPU
-# acceleration for a smaller binary) is a one-line change here, not a code
-# change.
-iced = "0.13"
+# `wgpu`/`tiny-skia` (iced's two compositor backends) are deliberately left
+# out of this shared default feature set. `xizor`'s Cargo.toml picks exactly
+# one of them per binary target (see `xizor` and `xizor-gpu` there) - if a
+# library crate here requested one directly, Cargo's feature unification
+# would compile both backends into every binary regardless of what the
+# binary crate asked for, defeating the point of having two builds.
+iced = { version = "0.13", default-features = false, features = ["fira-sans", "auto-detect-theme"] }
 tree-sitter = { version = "0.26", features = ["wasm"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

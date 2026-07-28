@@ -96,16 +96,26 @@ settled.
 
 ## Rendering backend
 
-`xizor_config::RendererConfig` chooses between `TinySkia` (default, pure
-software, ~22MB idle vs. ~146MB for `wgpu` in this app), `Wgpu`, or `Auto`
-(try `wgpu`, fall back to `tiny-skia` on failure). Both renderers are
-compiled in via iced's Cargo features, so this is a runtime choice.
+Which iced compositor backend gets compiled in is a build-time choice, not
+a runtime one - `iced`'s `wgpu` and `tiny-skia` features are mutually
+exclusive per binary (see `crates/xizor/Cargo.toml`'s `[features]` and its
+two `[[bin]]` entries). This produces two binaries from the same
+`xizor` package:
 
-**Timing gotcha:** the backend is selected by setting the `ICED_BACKEND`
-env var (iced has no `Settings` field for this) and it must happen
-*before* the first `iced::application(...)` window is created - so
-`main()` sets it, before `XizorApp::new` or anything else runs. If you
-refactor startup, this ordering constraint has to move with it.
+- `xizor` - `tiny-skia` (default), pure software, ~22MB idle vs. ~146MB
+  for `wgpu` in this app.
+- `xizor-gpu` - `wgpu`, hardware-accelerated.
+
+Each `[[bin]]` has `required-features` set to the matching Cargo feature,
+so plain `cargo build`/`cargo run` (default features) only ever touches
+`xizor`; building `xizor-gpu` requires
+`--no-default-features --features wgpu` explicitly (see
+`scripts/build-release.sh`/`.ps1`). Since only one backend is ever
+compiled into a given binary, there's no `ICED_BACKEND` env var or other
+runtime selection to worry about - `iced_renderer` picks its `Renderer`
+type solely from which feature(s) are active (both features enabled at
+once, as in the old single-binary setup, would compile in a
+runtime-switchable fallback compositor instead - not the case here).
 
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
@@ -176,28 +186,36 @@ in the current directory (a `cargo run` convenience). If nothing is
 found, built-in defaults are written to the first location. A malformed
 config file logs an error and falls back to in-memory defaults rather
 than failing to start - a broken config should never be able to prevent
-the editor from opening. Config sections (`syntaxes`, `renderer`, `theme`)
-are independently defaulted so old config files stay valid as new
-sections get added.
+the editor from opening. Config sections (`syntaxes`, `theme`) are
+independently defaulted so old config files stay valid as new sections
+get added.
 
 ## Where the grammar files live
 
 `syntaxes/` at the repo root holds the `.wasm` grammars and
-`.injections.scm` queries actually used by this checkout - currently
-untracked in git (present on disk, not yet committed). `default_search_dirs()`
-in `crates/xizor/src/app.rs` looks next to the executable first, then
-`./syntaxes` for `cargo run` convenience - mirroring `config_paths()`'s
-search order in `xizor_config`.
+`.injections.scm` queries actually used by this checkout.
+`default_search_dirs()` in `crates/xizor/src/app.rs` looks next to the
+executable first, then `./syntaxes` for `cargo run` convenience -
+mirroring `config_paths()`'s search order in `xizor_config`.
+
+`syntaxes/` is gitignored, not committed - these are compiled binaries
+built from *other projects'* tree-sitter grammar sources, not something
+derived from code in this repo. Run `./scripts/build-grammars.sh` (needs
+`git` and `npx`) to populate it: it clones each upstream grammar repo
+listed in the script and compiles it with `tree-sitter build --wasm`. If
+a grammar ever needs updating (new file type, upstream fix), edit that
+script rather than hand-placing a `.wasm` file.
+
+The app still starts and runs fine with `syntaxes/` empty or missing
+entirely (see `log_wasm_files_found` in `app.rs`) - it just opens files
+unhighlighted, consistent with "highlighters are optional" in
+`README.md`. Don't mistake that startup diagnostic for a real error;
+only chase it if highlighting is actually expected to be working.
 
 ## Miscellaneous things worth knowing before you "fix" them
 
-- `main.rs` has `windows_subsystem = "windows"` (which hides the console
+- `lib.rs` has `windows_subsystem = "windows"` (which hides the console
   window on release builds) temporarily disabled, with a comment saying
   why: an in-progress Windows highlighting bug needed console output to
   debug. Don't silently re-enable it as a "cleanup" without checking
   whether that investigation is actually finished.
-- The workspace `Cargo.toml` comment about `iced`'s default features
-  (wgpu + tiny-skia both compiled in) predates `RendererConfig` being a
-  runtime choice - both backends being compiled in is now load-bearing,
-  not just convenient, since `Auto`/`Wgpu`/`TinySkia` all need to exist in
-  the same binary.
