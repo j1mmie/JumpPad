@@ -1,5 +1,6 @@
 mod history;
 
+use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -13,6 +14,47 @@ use iced::widget::text_editor::{Binding, Content, KeyPress, Motion, Status};
 use iced::{Border, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 
+/// A named editor-level action a `keybinds.toml` override can target - see
+/// `xizor_config::KeybindsConfig::overrides`'s doc comment. Deliberately a
+/// small, closed set (not every possible motion): these are the commands
+/// this crate already has custom logic for beyond iced's own stock
+/// `text_editor` defaults (copy/cut/paste/select-all/plain motions/etc,
+/// which stay non-configurable - nobody's asked to remap those, and they're
+/// already identical on every OS via iced's own `command()` gating).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditorCommand {
+    WordDeleteBackward,
+    WordDeleteForward,
+    DocumentStart,
+    SelectDocumentStart,
+    DocumentEnd,
+    SelectDocumentEnd,
+    Undo,
+    Redo,
+}
+
+/// The canonical `keybinds.toml` override name for each [`EditorCommand`] -
+/// the single source of truth both `key_binding`'s override lookup and
+/// `xizor_config::KeybindsConfig::overrides`'s doc comment point at.
+pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
+    ("word_delete_backward", EditorCommand::WordDeleteBackward),
+    ("word_delete_forward", EditorCommand::WordDeleteForward),
+    ("document_start", EditorCommand::DocumentStart),
+    ("select_document_start", EditorCommand::SelectDocumentStart),
+    ("document_end", EditorCommand::DocumentEnd),
+    ("select_document_end", EditorCommand::SelectDocumentEnd),
+    ("undo", EditorCommand::Undo),
+    ("redo", EditorCommand::Redo),
+];
+
+/// A user override's resolved chord, keyed by the same `(Modifiers,
+/// key::Code)` pair `key_binding` matches incoming presses against -
+/// physical-key based (layout-independent), unlike this crate's other,
+/// pre-existing hardcoded bindings below, which stay logical-key based
+/// (layout-dependent) exactly as already shipped. See the plan doc for why
+/// that inconsistency is deliberate and scoped rather than an oversight.
+pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorCommand>;
+
 /// A [`TextEditorWidget`] backed by `iced::widget::text_editor`, with
 /// optional tree-sitter/WASM syntax highlighting layered on top via a
 /// [`syntax_registry::SyntaxRegistry`].
@@ -25,6 +67,7 @@ pub struct IcedTextEditor {
     content: Content,
     highlighting: Highlighting,
     history: History,
+    overrides: Arc<EditorOverrides>,
 }
 
 enum Highlighting {
@@ -44,7 +87,12 @@ enum Highlighting {
 }
 
 impl IcedTextEditor {
-    pub fn new(text: &str, registry: &Arc<SyntaxRegistry>, extension: Option<&str>) -> Self {
+    pub fn new(
+        text: &str,
+        registry: &Arc<SyntaxRegistry>,
+        extension: Option<&str>,
+        overrides: Arc<EditorOverrides>,
+    ) -> Self {
         let highlighting = match extension {
             None => Highlighting::None,
             Some(ext) => Highlighting::Pending(registry.acquire(ext)),
@@ -53,16 +101,19 @@ impl IcedTextEditor {
             content: Content::with_text(text),
             highlighting,
             history: History::new(),
+            overrides,
         }
     }
 
     /// Builds an [`editor_core::EditorFactory`]-shaped closure that
-    /// captures a shared syntax registry once. This is the one line the
-    /// app shell changes to swap editor backends.
+    /// captures a shared syntax registry and the resolved keybind overrides
+    /// once. This is the one line the app shell changes to swap editor
+    /// backends.
     pub fn factory(
         registry: Arc<SyntaxRegistry>,
+        overrides: Arc<EditorOverrides>,
     ) -> impl Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget> {
-        move |text, extension| Box::new(Self::new(text, &registry, extension))
+        move |text, extension| Box::new(Self::new(text, &registry, extension, overrides.clone()))
     }
 
     fn grammar(&self) -> Option<Arc<Grammar>> {
@@ -99,13 +150,14 @@ impl TextEditorWidget for IcedTextEditor {
             source: self.content.text(),
             grammar: self.grammar(),
         };
+        let overrides = self.overrides.clone();
         text_editor(&self.content)
             .placeholder("")
             .font(Font::MONOSPACE)
             .height(Fill)
             .style(borderless)
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
-            .key_binding(key_binding)
+            .key_binding(move |press| key_binding(press, &overrides))
             .on_action(EditorMessage::Action)
             .into()
     }
@@ -296,6 +348,30 @@ fn color_for(category: HighlightCategory) -> iced::Color {
     }
 }
 
+fn word_delete_backward() -> Binding<EditorMessage> {
+    Binding::Sequence(vec![Binding::Select(Motion::Left.widen()), Binding::Backspace])
+}
+
+fn word_delete_forward() -> Binding<EditorMessage> {
+    Binding::Sequence(vec![Binding::Select(Motion::Right.widen()), Binding::Delete])
+}
+
+/// Constructs the `Binding` for a named [`EditorCommand`] - shared by both
+/// the user-override path and this crate's own hardcoded-default path in
+/// `key_binding`, so the two never drift out of sync with each other.
+fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
+    match command {
+        EditorCommand::WordDeleteBackward => word_delete_backward(),
+        EditorCommand::WordDeleteForward => word_delete_forward(),
+        EditorCommand::DocumentStart => Binding::Move(Motion::DocumentStart),
+        EditorCommand::SelectDocumentStart => Binding::Select(Motion::DocumentStart),
+        EditorCommand::DocumentEnd => Binding::Move(Motion::DocumentEnd),
+        EditorCommand::SelectDocumentEnd => Binding::Select(Motion::DocumentEnd),
+        EditorCommand::Undo => Binding::Custom(EditorMessage::Undo),
+        EditorCommand::Redo => Binding::Custom(EditorMessage::Redo),
+    }
+}
+
 /// Extends iced's default `text_editor` key bindings with the OS-standard
 /// behaviors it doesn't already cover, then falls back to
 /// [`Binding::from_key_press`] (iced's own default dispatch) for everything
@@ -305,15 +381,31 @@ fn color_for(category: HighlightCategory) -> iced::Color {
 /// care about - including the focus guard `from_key_press` would otherwise
 /// apply internally.
 ///
-/// Deliberately keyed off iced's own portable modifier predicates
-/// (`command()`, `jump()` - Cmd/Ctrl and Option/Ctrl respectively, already
-/// resolved per-OS by iced itself) rather than `#[cfg(target_os = ...)]`, so
-/// there's exactly one code path for every platform.
-fn key_binding(press: KeyPress) -> Option<Binding<EditorMessage>> {
+/// Three tiers, checked in order, first match wins - no layering/conflict
+/// system beyond that fixed order:
+/// 1. `overrides` - a user's `keybinds.toml` remap, matched by *physical*
+///    key (layout-independent - see `EditorOverrides`'s doc comment for why
+///    this deliberately differs from tier 2's matching style).
+/// 2. This crate's own hardcoded extras (word-delete, undo/redo, document
+///    start/end) - unchanged from before overrides existed, still keyed off
+///    iced's portable `command()`/`jump()` modifier predicates (Cmd/Ctrl and
+///    Option/Ctrl respectively, already resolved per-OS by iced itself)
+///    rather than `#[cfg(target_os = ...)]`.
+/// 3. iced's own stock default dispatch.
+fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<EditorMessage>> {
     if !matches!(press.status, Status::Focused { .. }) {
         return None;
     }
 
+    // Tier 1: user override.
+    if let key::Physical::Code(code) = press.physical_key {
+        if let Some(&command) = overrides.get(&(press.modifiers, code)) {
+            return Some(binding_for(command));
+        }
+    }
+
+    // Tier 2: this repo's existing hardcoded extras.
+    //
     // Option+Backspace (macOS) / Ctrl+Backspace (elsewhere): delete the
     // previous word. Option+Delete / Ctrl+Delete: delete the next word.
     // iced's own default bindings only ever delete one character - `jump()`
@@ -324,16 +416,10 @@ fn key_binding(press: KeyPress) -> Option<Binding<EditorMessage>> {
     if press.modifiers.jump() {
         match press.modified_key.as_ref() {
             keyboard::Key::Named(key::Named::Backspace) => {
-                return Some(Binding::Sequence(vec![
-                    Binding::Select(Motion::Left.widen()),
-                    Binding::Backspace,
-                ]));
+                return Some(word_delete_backward());
             }
             keyboard::Key::Named(key::Named::Delete) => {
-                return Some(Binding::Sequence(vec![
-                    Binding::Select(Motion::Right.widen()),
-                    Binding::Delete,
-                ]));
+                return Some(word_delete_forward());
             }
             _ => {}
         }
@@ -371,15 +457,16 @@ fn key_binding(press: KeyPress) -> Option<Binding<EditorMessage>> {
         if let Some(c) = press.key.to_latin(press.physical_key) {
             match c {
                 'z' if press.modifiers.shift() => {
-                    return Some(Binding::Custom(EditorMessage::Redo));
+                    return Some(binding_for(EditorCommand::Redo));
                 }
-                'z' => return Some(Binding::Custom(EditorMessage::Undo)),
-                'y' => return Some(Binding::Custom(EditorMessage::Redo)),
+                'z' => return Some(binding_for(EditorCommand::Undo)),
+                'y' => return Some(binding_for(EditorCommand::Redo)),
                 _ => {}
             }
         }
     }
 
+    // Tier 3: iced's own stock dispatch.
     Binding::from_key_press(press)
 }
 
@@ -393,5 +480,89 @@ fn borderless(theme: &Theme, status: text_editor::Status) -> text_editor::Style 
             ..Border::default()
         },
         ..text_editor::default(theme, status)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn press(modifiers: keyboard::Modifiers, physical: key::Code, key: keyboard::Key) -> KeyPress {
+        KeyPress {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: key::Physical::Code(physical),
+            modifiers,
+            text: None,
+            status: Status::Focused { is_hovered: false },
+        }
+    }
+
+    #[test]
+    fn binding_for_covers_every_command() {
+        assert!(matches!(
+            binding_for(EditorCommand::WordDeleteBackward),
+            Binding::Sequence(_)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::DocumentStart),
+            Binding::Move(Motion::DocumentStart)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::SelectDocumentEnd),
+            Binding::Select(Motion::DocumentEnd)
+        ));
+        assert!(matches!(binding_for(EditorCommand::Undo), Binding::Custom(EditorMessage::Undo)));
+        assert!(matches!(binding_for(EditorCommand::Redo), Binding::Custom(EditorMessage::Redo)));
+    }
+
+    #[test]
+    fn override_wins_over_a_conflicting_hardcoded_default() {
+        // Ctrl+Z would otherwise hit the hardcoded default's Undo binding -
+        // override it onto Redo instead, and confirm the override wins.
+        let mut overrides = EditorOverrides::new();
+        overrides.insert(
+            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
+            EditorCommand::Redo,
+        );
+        let event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyZ,
+            keyboard::Key::Character("z".into()),
+        );
+        assert!(matches!(
+            key_binding(event, &overrides),
+            Some(Binding::Custom(EditorMessage::Redo))
+        ));
+    }
+
+    #[test]
+    fn hardcoded_default_still_fires_with_no_overrides() {
+        let overrides = EditorOverrides::new();
+        let event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyZ,
+            keyboard::Key::Character("z".into()),
+        );
+        assert!(matches!(
+            key_binding(event, &overrides),
+            Some(Binding::Custom(EditorMessage::Undo))
+        ));
+    }
+
+    #[test]
+    fn unfocused_status_returns_none_regardless_of_overrides() {
+        let mut overrides = EditorOverrides::new();
+        overrides.insert(
+            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
+            EditorCommand::Redo,
+        );
+        let mut event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyZ,
+            keyboard::Key::Character("z".into()),
+        );
+        event.status = Status::Active;
+        assert!(key_binding(event, &overrides).is_none());
     }
 }

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -5,6 +6,7 @@ use std::time::Duration;
 use editor_core::{EditorFactory, EditorMessage, Tab};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{operate, operation};
+use iced::keyboard::key;
 use iced::widget::{button, column, container, keyed_column, mouse_area, row, scrollable, text};
 use iced::{Center, Color, Element, Fill, Point, Subscription, Task, Theme, keyboard};
 
@@ -70,6 +72,12 @@ pub struct XizorApp {
     /// to track that; a since-closed tab's id just fails the lookup and the
     /// shortcut is a no-op that turn, see `update()`.
     previous_active: Option<u64>,
+    /// This app's keybind overrides, resolved from `keybinds.toml` once at
+    /// startup (see `new()`/`build_app_overrides`) - checked by
+    /// `handle_hotkey` ahead of its own hardcoded shortcuts. `Arc` so
+    /// `subscription()` can cheaply clone it into the `keyboard::listen()`
+    /// closure on every rebuild without cloning the map itself.
+    keybind_overrides: Arc<HashMap<(keyboard::Modifiers, key::Code), Message>>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +133,14 @@ pub enum Message {
     /// Ctrl+Tab, identical on every OS - swap back to whichever tab was
     /// active immediately before this one (see `previous_active`).
     SelectPreviousActiveTab,
+    /// A raw key press straight from `keyboard::listen()` - resolved into a
+    /// real command (if any) by `handle_hotkey` in `update()`, using
+    /// `self.keybind_overrides`. Kept as its own variant, rather than
+    /// resolving inside `subscription()`'s `filter_map` closure directly,
+    /// because iced requires `Subscription::filter_map`'s closure to be
+    /// non-capturing (zero-sized) - it can't reach `self.keybind_overrides`
+    /// from there.
+    KeyPressed(keyboard::Key, keyboard::Modifiers, key::Physical),
 }
 
 /// The three choices offered by the unsaved-changes prompt (see
@@ -165,6 +181,15 @@ impl XizorApp {
         // the highlighting-poll subscription in `subscription()` below re-checks
         // every pending tab on a timer instead, so there's nothing for this
         // callback to do.
+        // Loaded unconditionally now (previously only loaded when visor mode
+        // was on, since `toggle` was the only field anyone read) - the new
+        // `overrides` map needs to apply regardless of visor mode. Only
+        // `toggle`'s *use* below stays gated on `visor_enabled`.
+        let keybinds = xizor_config::load_keybinds();
+        let keybind_overrides = Arc::new(build_app_overrides(&keybinds));
+        let editor_overrides = Arc::new(build_editor_overrides(&keybinds));
+        warn_unrecognized_overrides(&keybinds.overrides);
+
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
             config.syntaxes.extension_to_grammar(),
@@ -174,8 +199,10 @@ impl XizorApp {
         // Swapping editor backends later means changing this one line (and
         // the `iced_text_editor` dependency) - nothing else in this file
         // needs to know.
-        let editor_factory: EditorFactory =
-            Box::new(iced_text_editor::IcedTextEditor::factory(registry));
+        let editor_factory: EditorFactory = Box::new(iced_text_editor::IcedTextEditor::factory(
+            registry,
+            editor_overrides,
+        ));
 
         let session_candidates = session::candidate_dirs();
         let session_dir = session_candidates
@@ -191,7 +218,6 @@ impl XizorApp {
         // and avoids claiming the combo with the OS for a feature that isn't
         // in use.
         let hotkey = if visor_enabled {
-            let keybinds = xizor_config::load_keybinds();
             Hotkey::register(keybinds.toggle)
         } else {
             None
@@ -213,6 +239,7 @@ impl XizorApp {
             animation: None,
             visor_enabled,
             previous_active: None,
+            keybind_overrides,
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
@@ -502,6 +529,12 @@ impl XizorApp {
                 },
                 None => Task::none(),
             },
+            Message::KeyPressed(key, modifiers, physical_key) => {
+                match handle_hotkey(key, modifiers, physical_key, &self.keybind_overrides) {
+                    Some(resolved) => self.update(resolved),
+                    None => Task::none(),
+                }
+            }
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -792,11 +825,16 @@ impl XizorApp {
             // iced 0.14 replaced the separate `on_key_press`/`on_key_release`
             // subscriptions with one unified `listen()` covering every
             // keyboard event - `filter_map` (also new in 0.14) picks out
-            // just the presses `handle_hotkey` cares about.
+            // just the presses, forwarded as `Message::KeyPressed` for
+            // `update()` to actually resolve (see that variant's doc
+            // comment for why the resolution can't happen right here).
             keyboard::listen().filter_map(|event| match event {
-                keyboard::Event::KeyPressed { key, modifiers, .. } => {
-                    handle_hotkey(key, modifiers)
-                }
+                keyboard::Event::KeyPressed {
+                    key,
+                    modifiers,
+                    physical_key,
+                    ..
+                } => Some(Message::KeyPressed(key, modifiers, physical_key)),
                 _ => None,
             }),
             // An event listener, not a timer - no idle cost, so this stays
@@ -838,7 +876,100 @@ impl XizorApp {
     }
 }
 
-fn handle_hotkey(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+/// App-level command names a `keybinds.toml` override may target - see
+/// `xizor_config::KeybindsConfig::overrides`'s doc comment. The single
+/// source of truth both `build_app_overrides` and `warn_unrecognized_overrides`
+/// point at.
+pub const APP_COMMAND_NAMES: &[&str] = &[
+    "new_tab",
+    "open_file",
+    "save_file",
+    "save_file_as",
+    "close_active_tab",
+    "select_previous_tab",
+    "select_next_tab",
+    "select_previous_active_tab",
+];
+
+/// Resolves `keybinds.toml`'s overrides into a lookup keyed by the same
+/// `(Modifiers, key::Code)` pair `handle_hotkey` matches incoming presses
+/// against - physical-key based (layout-independent), built once at
+/// startup and reused for the app's lifetime (see `XizorApp::keybind_overrides`).
+fn build_app_overrides(
+    keybinds: &xizor_config::KeybindsConfig,
+) -> HashMap<(keyboard::Modifiers, key::Code), Message> {
+    let resolved = keybinds.resolved_overrides();
+    let mut map = HashMap::new();
+    for (name, message) in [
+        ("new_tab", Message::NewTab),
+        ("open_file", Message::OpenFile),
+        ("save_file", Message::SaveFile),
+        ("save_file_as", Message::SaveFileAs),
+        ("close_active_tab", Message::CloseActiveTab),
+        ("select_previous_tab", Message::SelectPreviousTab),
+        ("select_next_tab", Message::SelectNextTab),
+        ("select_previous_active_tab", Message::SelectPreviousActiveTab),
+    ] {
+        if let Some(resolved) = resolved.get(name) {
+            map.insert((resolved.modifiers, resolved.code), message);
+        }
+    }
+    map
+}
+
+/// Mirror of `build_app_overrides` for the editor-level commands
+/// (`iced_text_editor::EDITOR_COMMAND_NAMES`) - built here, not inside
+/// `iced_text_editor` itself, so that crate doesn't need to depend on
+/// `xizor_config`/`global_hotkey` just to consume an already-resolved chord;
+/// `app.rs` already depends on both and does the intersection for both
+/// layers.
+fn build_editor_overrides(
+    keybinds: &xizor_config::KeybindsConfig,
+) -> HashMap<(keyboard::Modifiers, key::Code), iced_text_editor::EditorCommand> {
+    let resolved = keybinds.resolved_overrides();
+    let mut map = HashMap::new();
+    for (name, command) in iced_text_editor::EDITOR_COMMAND_NAMES {
+        if let Some(resolved) = resolved.get(*name) {
+            map.insert((resolved.modifiers, resolved.code), *command);
+        }
+    }
+    map
+}
+
+/// Logs (doesn't fail) any `keybinds.toml` override whose command name
+/// isn't recognized by either layer - a cheap typo-catcher, not a
+/// validation framework.
+fn warn_unrecognized_overrides(overrides: &HashMap<String, global_hotkey::hotkey::HotKey>) {
+    for name in overrides.keys() {
+        let known = APP_COMMAND_NAMES.contains(&name.as_str())
+            || iced_text_editor::EDITOR_COMMAND_NAMES
+                .iter()
+                .any(|(known_name, _)| known_name == name);
+        if !known {
+            eprintln!(
+                "xizor_config: keybinds.toml overrides an unrecognized command {name:?}, ignoring"
+            );
+        }
+    }
+}
+
+fn handle_hotkey(
+    key: keyboard::Key,
+    modifiers: keyboard::Modifiers,
+    physical_key: key::Physical,
+    overrides: &HashMap<(keyboard::Modifiers, key::Code), Message>,
+) -> Option<Message> {
+    // Tier 1: user override, matched by physical key (layout-independent) -
+    // see `iced_text_editor`'s equivalent for why this deliberately differs
+    // from tier 2's logical-key matching below.
+    if let key::Physical::Code(code) = physical_key {
+        if let Some(message) = overrides.get(&(modifiers, code)) {
+            return Some(message.clone());
+        }
+    }
+
+    // Tier 2: this repo's existing hardcoded shortcuts, unchanged.
+    //
     // Ctrl+Tab: identical on every OS, so this is checked ahead of (and
     // deliberately doesn't use) the `command()` gate below - `command()`
     // resolves to Cmd on macOS, which isn't what this shortcut means.
@@ -1226,6 +1357,7 @@ mod tests {
             animation: None,
             visor_enabled: false,
             previous_active: None,
+            keybind_overrides: Arc::new(HashMap::new()),
         }
     }
 
@@ -1275,11 +1407,20 @@ mod tests {
         assert_eq!(app.active, 0);
     }
 
+    fn no_overrides() -> HashMap<(Modifiers, key::Code), Message> {
+        HashMap::new()
+    }
+
     #[test]
     fn ctrl_tab_is_recognized_as_select_previous_active_tab() {
         let tab_key = Key::Named(Named::Tab);
         assert!(matches!(
-            handle_hotkey(tab_key, Modifiers::CTRL),
+            handle_hotkey(
+                tab_key,
+                Modifiers::CTRL,
+                key::Physical::Code(key::Code::Tab),
+                &no_overrides()
+            ),
             Some(Message::SelectPreviousActiveTab)
         ));
     }
@@ -1287,7 +1428,62 @@ mod tests {
     #[test]
     fn ctrl_tab_with_extra_modifiers_does_not_match() {
         let tab_key = Key::Named(Named::Tab);
-        assert!(handle_hotkey(tab_key.clone(), Modifiers::CTRL | Modifiers::SHIFT).is_none());
-        assert!(handle_hotkey(tab_key, Modifiers::CTRL | Modifiers::ALT).is_none());
+        let physical = key::Physical::Code(key::Code::Tab);
+        assert!(handle_hotkey(
+            tab_key.clone(),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            physical,
+            &no_overrides()
+        )
+        .is_none());
+        assert!(
+            handle_hotkey(tab_key, Modifiers::CTRL | Modifiers::ALT, physical, &no_overrides())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn hardcoded_default_still_fires_with_empty_overrides() {
+        assert!(matches!(
+            handle_hotkey(
+                Key::Character("n".into()),
+                Modifiers::CTRL,
+                key::Physical::Code(key::Code::KeyN),
+                &no_overrides()
+            ),
+            Some(Message::NewTab)
+        ));
+    }
+
+    #[test]
+    fn override_wins_over_a_conflicting_hardcoded_default() {
+        // Ctrl+N would otherwise hit the hardcoded default's NewTab binding
+        // - override it onto OpenFile instead, and confirm the override
+        // wins (proves tier-1-before-tier-2 ordering, not just "a new
+        // binding got added").
+        let mut overrides = HashMap::new();
+        overrides.insert((Modifiers::CTRL, key::Code::KeyN), Message::OpenFile);
+        assert!(matches!(
+            handle_hotkey(
+                Key::Character("n".into()),
+                Modifiers::CTRL,
+                key::Physical::Code(key::Code::KeyN),
+                &overrides
+            ),
+            Some(Message::OpenFile)
+        ));
+    }
+
+    #[test]
+    fn build_app_overrides_ignores_unrecognized_command_name() {
+        let mut keybinds = xizor_config::KeybindsConfig::default();
+        keybinds.overrides.insert(
+            "frobnicate".to_string(),
+            global_hotkey::hotkey::HotKey::new(
+                Some(global_hotkey::hotkey::Modifiers::CONTROL),
+                global_hotkey::hotkey::Code::KeyN,
+            ),
+        );
+        assert!(build_app_overrides(&keybinds).is_empty());
     }
 }

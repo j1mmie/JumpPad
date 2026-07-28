@@ -1,1 +1,22 @@
 toggle = "control+Backquote"
+
+# Command-name -> key-chord overrides for xizor's in-app shortcuts. Takes
+# precedence over xizor's hardcoded default for that command when present.
+# Uses the same chord format as `toggle` above (e.g. "control+alt+n",
+# "cmd+shift+z"). Two different names mapping to the same chord is
+# undefined-which-wins - not a supported configuration, just not guarded
+# against.
+#
+# Valid names:
+#   App-level (crates/xizor/src/app.rs, APP_COMMAND_NAMES):
+#     new_tab, open_file, save_file, save_file_as, close_active_tab,
+#     select_previous_tab, select_next_tab, select_previous_active_tab
+#   Editor-level (crates/iced_text_editor/src/lib.rs, EDITOR_COMMAND_NAMES):
+#     word_delete_backward, word_delete_forward, document_start,
+#     select_document_start, document_end, select_document_end, undo, redo
+#
+# Example:
+# [overrides]
+# new_tab = "control+alt+n"
+# undo = "control+z"
+[overrides]

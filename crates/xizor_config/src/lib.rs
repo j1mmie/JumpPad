@@ -1,10 +1,13 @@
 mod defaults;
+mod keybind_overrides;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
+
+pub use keybind_overrides::ResolvedKeybind;
 
 /// xizor's user-editable settings. Expected to grow (keybindings, theme,
 /// editor behavior, ...) - each concern gets its own section so old config
@@ -51,13 +54,35 @@ pub struct KeybindsConfig {
     /// `"cmd+shift+down"` in the TOML file just works - no custom parsing
     /// needed here.
     pub toggle: HotKey,
+    /// Command-name -> key-chord overrides for xizor's in-app shortcuts,
+    /// e.g. `new_tab = "control+alt+n"`. Takes precedence over xizor's
+    /// hardcoded default for that command when present - see
+    /// `resolved_overrides()`. Two different names mapping to the same
+    /// chord is undefined-which-wins, not guarded against (deliberately -
+    /// this isn't a full conflict-resolution system). Valid names: see
+    /// `xizor::app::APP_COMMAND_NAMES` (app-level commands - new tab, save,
+    /// tab switching, ...) and `iced_text_editor::EDITOR_COMMAND_NAMES`
+    /// (editor-level commands - undo, word-delete, ...); an unrecognized
+    /// name here is silently ignored (logged once at startup).
+    #[serde(default)]
+    pub overrides: HashMap<String, HotKey>,
 }
 
 impl Default for KeybindsConfig {
     fn default() -> Self {
         Self {
             toggle: HotKey::new(Some(Modifiers::CONTROL), Code::Backquote),
+            overrides: HashMap::new(),
         }
+    }
+}
+
+impl KeybindsConfig {
+    /// Resolves `overrides` into iced-native types, ready to compare
+    /// directly against incoming key events - see
+    /// `keybind_overrides::resolved_overrides`.
+    pub fn resolved_overrides(&self) -> HashMap<String, ResolvedKeybind> {
+        keybind_overrides::resolved_overrides(&self.overrides)
     }
 }
 
@@ -235,5 +260,74 @@ fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
             }
         }
         Err(err) => eprintln!("xizor_config: couldn't serialize default keybinds: {err}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keybinds_toml_with_no_overrides_table_parses_as_empty() {
+        // A `keybinds.toml` from before this feature existed - the
+        // container's `#[serde(default)]` needs to keep these parsing.
+        let keybinds: KeybindsConfig = toml::from_str(r#"toggle = "control+Backquote""#).unwrap();
+        assert!(keybinds.overrides.is_empty());
+    }
+
+    #[test]
+    fn keybinds_toml_with_overrides_table_parses_and_resolves() {
+        let keybinds: KeybindsConfig = toml::from_str(
+            r#"
+            toggle = "control+Backquote"
+
+            [overrides]
+            new_tab = "control+alt+n"
+            undo = "control+z"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(keybinds.overrides.len(), 2);
+
+        let resolved = keybinds.resolved_overrides();
+        assert_eq!(
+            resolved.get("new_tab"),
+            Some(&ResolvedKeybind {
+                modifiers: iced_core::keyboard::Modifiers::CTRL | iced_core::keyboard::Modifiers::ALT,
+                code: iced_core::keyboard::key::Code::KeyN,
+            })
+        );
+        assert_eq!(
+            resolved.get("undo"),
+            Some(&ResolvedKeybind {
+                modifiers: iced_core::keyboard::Modifiers::CTRL,
+                code: iced_core::keyboard::key::Code::KeyZ,
+            })
+        );
+    }
+
+    #[test]
+    fn a_malformed_chord_string_fails_the_whole_file_not_just_that_entry() {
+        // `HotKey`'s own `Deserialize` rejects an unparseable chord string,
+        // which fails `HashMap<String, HotKey>`'s deserialize entirely -
+        // same "any parse error loses the whole file, not just one field"
+        // behavior `toggle` already has, extended to `overrides`. Callers
+        // (`load_keybinds`) already handle this by falling back to
+        // `KeybindsConfig::default()` and logging, same as any other
+        // malformed `keybinds.toml`.
+        let result: Result<KeybindsConfig, _> = toml::from_str(
+            r#"
+            toggle = "control+Backquote"
+
+            [overrides]
+            new_tab = "not a real chord"
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn default_keybinds_config_has_no_overrides() {
+        assert!(KeybindsConfig::default().overrides.is_empty());
     }
 }
