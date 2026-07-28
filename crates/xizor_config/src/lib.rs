@@ -21,12 +21,23 @@ pub struct Config {
     /// `iced::Theme::ALL` in the `xizor` crate, where `iced` is already a
     /// dependency; an unrecognized name falls back to the default theme.
     pub theme: String,
+    pub visor: VisorConfig,
 }
 
 impl Default for Config {
     fn default() -> Self {
         defaults::config()
     }
+}
+
+/// Controls whether xizor runs as a drop-down "visor" (undecorated,
+/// always-on-top, hidden until summoned by the global toggle hotkey) or as
+/// an ordinary window. Visor mode is still a bit buggy on some systems, so
+/// it's opt-in rather than the default for now.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisorConfig {
+    pub enabled: bool,
 }
 
 /// xizor's global keybindings, loaded from `keybinds.toml` (separate from
