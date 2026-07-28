@@ -118,7 +118,11 @@ impl TextEditorWidget for IcedTextEditor {
     }
 
     fn cursor_position(&self) -> (usize, usize) {
-        self.content.cursor_position()
+        // `Content::cursor_position()` (iced 0.13) was replaced by
+        // `cursor()` returning a `text_editor::Cursor { position, selection }`
+        // - only the plain caret position is needed here, not any selection.
+        let position = self.content.cursor().position;
+        (position.line, position.column)
     }
 
     fn move_cursor_to(&mut self, line: usize, column: usize) {

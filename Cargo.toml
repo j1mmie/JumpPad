@@ -19,10 +19,16 @@ edition = "2021"
 # library crate here requested one directly, Cargo's feature unification
 # would compile both backends into every binary regardless of what the
 # binary crate asked for, defeating the point of having two builds.
-iced = { version = "0.13", default-features = false, features = ["fira-sans", "auto-detect-theme"] }
+# `x11`/`wayland` are part of iced's own `default` feature set (as of 0.14,
+# which split them out so a Linux build can pick just one) - `x11`/`wayland`
+# have to be requested explicitly here since `default-features = false`
+# above turns them off along with everything else.
+iced = { version = "0.14", default-features = false, features = ["fira-sans", "x11", "wayland"] }
 tree-sitter = { version = "0.26", features = ["wasm"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+global-hotkey = { version = "0.8", features = ["serde"] }
+display-info = "0.5"
 editor_core = { path = "crates/editor_core" }
 iced_text_editor = { path = "crates/iced_text_editor" }
 syntax_registry = { path = "crates/syntax_registry" }

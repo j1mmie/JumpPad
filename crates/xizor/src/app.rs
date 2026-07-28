@@ -3,9 +3,23 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use editor_core::{EditorFactory, EditorMessage, Tab};
+use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{operate, operation};
-use iced::widget::{button, column, container, keyed_column, row, scrollable, text};
-use iced::{Center, Color, Element, Fill, Subscription, Task, Theme, keyboard};
+use iced::widget::{button, column, container, keyed_column, mouse_area, row, scrollable, text};
+use iced::{Center, Color, Element, Fill, Point, Subscription, Task, Theme, keyboard};
+
+use crate::hotkey::{self, Hotkey};
+use crate::session;
+use crate::visor::{self, Animation};
+
+/// How often the visor's slide animation advances a frame while in
+/// progress - see `subscription()`'s gating and `Message::AnimationTick`.
+const ANIMATION_TICK: Duration = Duration::from_millis(16);
+
+/// How often the autosave timer ticks while at least one tab has unflushed
+/// dirty content - see `subscription()`'s gating (mirrors the existing
+/// `PollHighlighting` pattern) and `Message::AutosaveTick`.
+const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct XizorApp {
     tabs: Vec<Tab>,
@@ -17,6 +31,31 @@ pub struct XizorApp {
     /// Flips every time the active tab changes. See `theme()` for what
     /// this actually does - it's not a display preference.
     redraw_nudge: bool,
+    /// Where the session manifest and draft files live - resolved once at
+    /// startup (see `session::candidate_dirs()`) and reused for every
+    /// later write, never re-derived mid-session.
+    session_dir: PathBuf,
+    /// Tab ids waiting on a save (triggered by choosing "Save" in the
+    /// unsaved-changes prompt - see `request_close`) before they can be
+    /// closed. Consumed in `Message::FileSaved`'s success branch; cleared
+    /// without closing on a failed/cancelled save so a later, unrelated
+    /// save of the same tab doesn't unexpectedly close it.
+    pending_close_after_save: Vec<u64>,
+    /// The app's own (only) window - `None` until the startup
+    /// `iced::window::latest()` task resolves in `Message::WindowReady`.
+    /// Needed to target every `move_to`/`resize` call the visor makes.
+    window: Option<iced::window::Id>,
+    /// The registered global toggle hotkey, or `None` if registration
+    /// failed (e.g. the combo is already claimed by another application) -
+    /// see `hotkey::Hotkey::register`. The visor keybind just silently does
+    /// nothing in that case rather than the app failing to start.
+    hotkey: Option<Hotkey>,
+    /// Whether the visor is (or is animating toward being) shown.
+    visor_visible: bool,
+    /// `Some` while a show/hide slide is in progress - see
+    /// `Message::AnimationTick` and `subscription()`'s gating of the
+    /// animation timer on this.
+    animation: Option<Animation>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +72,45 @@ pub enum Message {
     DismissError,
     Editor(usize, EditorMessage),
     PollHighlighting,
+    /// Fires on a timer while some tab has draft content newer than what's
+    /// on disk (see `subscription()`); writes each stale tab's draft file.
+    AutosaveTick,
+    /// A background draft write for tab `.0` finished, bringing its draft
+    /// file up to date with generation `.1`.
+    DraftFlushed(u64, u64),
+    /// The user asked the window to close (e.g. clicked its close button).
+    /// Triggers a last-ditch synchronous draft flush before the window is
+    /// actually allowed to close - see `iced::window::close_requests()` in
+    /// `subscription()`.
+    WindowCloseRequested(iced::window::Id),
+    /// A restored tab's real file finished (re-)reading from disk at
+    /// startup - see `new()`'s restore path and `reload_from_disk`.
+    SessionFileLoaded(u64, Result<Arc<String>, std::io::ErrorKind>),
+    /// The unsaved-changes prompt shown by `request_close` for a dirty tab
+    /// (identified by id, not index - the tab list can change shape while
+    /// the dialog is up) came back with the user's choice.
+    CloseConfirmed(u64, CloseDecision),
+    /// The startup `iced::window::latest()` task (see `new()`) resolved
+    /// with the app's own window id - `None` should never actually happen
+    /// for a single-window app, but the command's signature allows it.
+    WindowReady(Option<iced::window::Id>),
+    /// A global hotkey fired somewhere - see `hotkey::subscription()`.
+    /// Filtered down to "was it a press of *our* toggle hotkey" before
+    /// being acted on (see `toggle_visor`), since this fires for the raw OS
+    /// event regardless of which hotkey or press/release state it was.
+    HotkeyEvent(GlobalHotKeyEvent),
+    /// Fires on a timer while `animation` is `Some` (see `subscription()`);
+    /// advances the in-progress slide by one frame.
+    AnimationTick,
+}
+
+/// The three choices offered by the unsaved-changes prompt (see
+/// `request_close` and `confirm_close`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseDecision {
+    Save,
+    DontSave,
+    Cancel,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +154,16 @@ impl XizorApp {
         let editor_factory: EditorFactory =
             Box::new(iced_text_editor::IcedTextEditor::factory(registry));
 
+        let session_candidates = session::candidate_dirs();
+        let session_dir = session_candidates
+            .first()
+            .cloned()
+            .unwrap_or_else(|| PathBuf::from("drafts"));
+        let manifest = session::load_manifest(&session_candidates);
+
+        let keybinds = xizor_config::load_keybinds();
+        let hotkey = Hotkey::register(keybinds.toggle);
+
         let mut app = Self {
             tabs: Vec::new(),
             active: 0,
@@ -84,8 +172,102 @@ impl XizorApp {
             editor_factory,
             theme: resolve_theme(&config.theme),
             redraw_nudge: false,
+            session_dir,
+            pending_close_after_save: Vec::new(),
+            window: None,
+            hotkey,
+            visor_visible: false,
+            animation: None,
         };
-        let task = app.new_tab();
+
+        let window_task = iced::window::latest().map(Message::WindowReady);
+
+        let Some(manifest) = manifest.filter(|manifest| !manifest.tabs.is_empty()) else {
+            let task = app.new_tab();
+            return (app, Task::batch([task, window_task]));
+        };
+
+        // Restore each tab: dirty ones (with or without a real path) read
+        // their draft file; clean, file-backed ones get a fresh async
+        // re-read of the real file - never a stale cached copy, since the
+        // file may have changed on disk since the last session.
+        let mut reload_tasks = Vec::new();
+        for entry in &manifest.tabs {
+            if entry.dirty {
+                let draft = session::draft_path(&app.session_dir, entry.id);
+                match std::fs::read_to_string(&draft) {
+                    Ok(content) => {
+                        app.tabs.push(Tab::restored(
+                            entry.id,
+                            entry.path.clone(),
+                            &content,
+                            true,
+                            &app.editor_factory,
+                        ));
+                    }
+                    Err(_) if entry.path.is_some() => {
+                        // Draft file missing/unreadable (e.g. the drafts
+                        // dir was hand-edited): best effort is to fall back
+                        // to a clean re-read of the real file instead of
+                        // dropping the tab entirely.
+                        let id = entry.id;
+                        let path = entry
+                            .path
+                            .clone()
+                            .expect("checked above: entry.path is Some");
+                        app.tabs.push(Tab::restored(
+                            id,
+                            Some(path.clone()),
+                            "",
+                            false,
+                            &app.editor_factory,
+                        ));
+                        reload_tasks.push(Task::perform(reload_from_disk(path), move |result| {
+                            Message::SessionFileLoaded(id, result)
+                        }));
+                    }
+                    Err(_) => {
+                        // Untitled, no draft, nothing to recover - drop
+                        // this entry rather than restoring an empty tab.
+                    }
+                }
+            } else if let Some(path) = &entry.path {
+                app.tabs.push(Tab::restored(
+                    entry.id,
+                    Some(path.clone()),
+                    "",
+                    false,
+                    &app.editor_factory,
+                ));
+                let id = entry.id;
+                reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
+                    Message::SessionFileLoaded(id, result)
+                }));
+            } else {
+                app.tabs.push(Tab::untitled(entry.id, &app.editor_factory));
+            }
+        }
+
+        if app.tabs.is_empty() {
+            let task = app.new_tab();
+            return (app, Task::batch([task, window_task]));
+        }
+
+        app.next_id = manifest
+            .tabs
+            .iter()
+            .map(|entry| entry.id)
+            .max()
+            .map(|max_id| max_id + 1)
+            .unwrap_or(0);
+
+        let desired_active = manifest.active.min(app.tabs.len() - 1);
+        let switch_task = app.switch_active(desired_active);
+        let task = Task::batch(
+            reload_tasks
+                .into_iter()
+                .chain([switch_task, window_task]),
+        );
         (app, task)
     }
 
@@ -96,18 +278,43 @@ impl XizorApp {
         self.switch_active(self.tabs.len() - 1)
     }
 
+    /// Entry point for both the tab-bar "x" button and middle-click
+    /// (`Message::CloseTab`) as well as `Ctrl+W`. Closes clean tabs
+    /// immediately; dirty tabs get an async unsaved-changes prompt first,
+    /// with the actual close (or save-then-close) happening once the user
+    /// answers it - see `Message::CloseConfirmed`.
+    fn request_close(&mut self, index: usize) -> Task<Message> {
+        let Some(tab) = self.tabs.get(index) else {
+            return Task::none();
+        };
+        if !tab.dirty {
+            return self.close_tab(index);
+        }
+        let id = tab.id;
+        let title = tab.document.display_name();
+        Task::perform(confirm_close(title), move |decision| {
+            Message::CloseConfirmed(id, decision)
+        })
+    }
+
     fn close_tab(&mut self, index: usize) -> Task<Message> {
         if index >= self.tabs.len() {
             return Task::none();
         }
         self.tabs.remove(index);
-        if self.tabs.is_empty() {
+        // Whichever branch runs, the tab list just changed structurally -
+        // sync unconditionally rather than threading a "did switch_active
+        // already sync for me" flag through all three branches. A couple
+        // of branches end up syncing twice back-to-back; that's cheap.
+        let task = if self.tabs.is_empty() {
             self.new_tab()
         } else if self.active >= self.tabs.len() {
             self.switch_active(self.tabs.len() - 1)
         } else {
             Task::none()
-        }
+        };
+        self.sync_session_metadata();
+        task
     }
 
     /// Switches the active tab, carrying each tab's cursor position across
@@ -137,14 +344,36 @@ impl XizorApp {
             let (line, column) = tab.last_cursor;
             tab.editor.move_cursor_to(line, column);
         }
+        self.sync_session_metadata();
         operate(operation::focusable::focus_next())
+    }
+
+    /// Rewrites the session manifest (tab existence/path/dirty/active
+    /// index) from current state, pruning any now-orphaned draft files.
+    /// Deliberately synchronous (`std::fs`, not `tokio::fs`) - it's a small
+    /// TOML file plus a `read_dir` scan, cheap enough to call straight from
+    /// `update()` on every structural change. Draft *content* (potentially
+    /// large document text) goes through the async path instead - see
+    /// `Message::AutosaveTick`.
+    fn sync_session_metadata(&self) {
+        let manifest = session::build_manifest(&self.tabs, self.active);
+        session::write_manifest_sync(&self.session_dir, &manifest);
     }
 
     fn save_active_tab(&self, force_dialog: bool) -> Task<Message> {
         let Some(tab) = self.tabs.get(self.active) else {
             return Task::none();
         };
-        let id = tab.id;
+        self.save_tab(tab.id, force_dialog)
+    }
+
+    /// Saves the tab with the given id, whether or not it's the active tab -
+    /// needed so `request_close`/`Message::CloseConfirmed` can save a
+    /// background tab the user is closing without first switching to it.
+    fn save_tab(&self, id: u64, force_dialog: bool) -> Task<Message> {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
+            return Task::none();
+        };
         let existing_path = tab.document.path.clone();
         let text = tab.editor.text();
         Task::perform(save_to(existing_path, text, force_dialog), move |result| {
@@ -175,10 +404,32 @@ impl XizorApp {
                     tab.document.path = Some(path);
                     tab.dirty = false;
                 }
+                // The tab just went clean - rewrite the manifest so its
+                // now-stale `.draft` file gets pruned.
+                self.sync_session_metadata();
+                // If this save was the "Save" branch of an unsaved-changes
+                // prompt, the tab is now clean and can actually close.
+                if let Some(pos) = self
+                    .pending_close_after_save
+                    .iter()
+                    .position(|&pending_id| pending_id == id)
+                {
+                    self.pending_close_after_save.remove(pos);
+                    if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                        return self.close_tab(index);
+                    }
+                }
                 Task::none()
             }
-            Message::FileSaved(_, Err(SaveError::DialogClosed)) => Task::none(),
+            Message::FileSaved(id, Err(SaveError::DialogClosed)) => {
+                // The user backed out of the save (e.g. the save-as dialog
+                // for an untitled tab) - leave the tab open rather than
+                // closing it unsaved.
+                self.pending_close_after_save.retain(|&pending_id| pending_id != id);
+                Task::none()
+            }
             Message::FileSaved(id, Err(SaveError::Io { path, kind })) => {
+                self.pending_close_after_save.retain(|&pending_id| pending_id != id);
                 if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
                     self.error = Some(format!(
                         "Couldn't save {}: {kind}",
@@ -190,8 +441,8 @@ impl XizorApp {
                 Task::none()
             }
             Message::SelectTab(index) => self.switch_active(index),
-            Message::CloseTab(index) => self.close_tab(index),
-            Message::CloseActiveTab => self.close_tab(self.active),
+            Message::CloseTab(index) => self.request_close(index),
+            Message::CloseActiveTab => self.request_close(self.active),
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -199,7 +450,16 @@ impl XizorApp {
             Message::Editor(index, editor_message) => {
                 if let Some(tab) = self.tabs.get_mut(index) {
                     if tab.editor.update(editor_message) {
+                        let just_became_dirty = !tab.dirty;
                         tab.dirty = true;
+                        tab.draft_generation += 1;
+                        // Only sync the manifest on the clean->dirty
+                        // transition, not every keystroke - the periodic
+                        // autosave timer (gated on this same dirtiness)
+                        // handles the actual draft *content* writes.
+                        if just_became_dirty {
+                            self.sync_session_metadata();
+                        }
                     }
                 }
                 Task::none()
@@ -210,7 +470,152 @@ impl XizorApp {
                 }
                 Task::none()
             }
+            Message::AutosaveTick => {
+                let dir = self.session_dir.clone();
+                let writes = session::stale_tabs(&self.tabs)
+                    .into_iter()
+                    .map(|(id, generation, text)| {
+                        Task::perform(
+                            session::flush_draft_async(dir.clone(), id, generation, text),
+                            |(id, generation)| Message::DraftFlushed(id, generation),
+                        )
+                    });
+                Task::batch(writes)
+            }
+            Message::DraftFlushed(id, generation) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    if generation > tab.flushed_generation {
+                        tab.flushed_generation = generation;
+                    }
+                }
+                Task::none()
+            }
+            Message::WindowCloseRequested(id) => {
+                session::flush_on_exit(&self.session_dir, &self.tabs, self.active);
+                iced::window::close(id)
+            }
+            Message::SessionFileLoaded(id, Ok(contents)) => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                    // Only replaces the visible content - does not touch
+                    // `dirty`, which stays `false` for these (clean,
+                    // freshly-reloaded) tabs.
+                    tab.editor.set_text(&contents);
+                }
+                Task::none()
+            }
+            Message::SessionFileLoaded(_, Err(kind)) => {
+                self.error = Some(format!("Couldn't reload a restored tab: {kind}"));
+                Task::none()
+            }
+            Message::CloseConfirmed(id, decision) => match decision {
+                CloseDecision::Cancel => Task::none(),
+                CloseDecision::DontSave => {
+                    match self.tabs.iter().position(|tab| tab.id == id) {
+                        Some(index) => self.close_tab(index),
+                        None => Task::none(),
+                    }
+                }
+                CloseDecision::Save => {
+                    self.pending_close_after_save.push(id);
+                    self.save_tab(id, false)
+                }
+            },
+            Message::WindowReady(id) => {
+                self.window = id;
+                self.snap_to_monitor()
+            }
+            Message::HotkeyEvent(event) => {
+                let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {
+                    event.state() == HotKeyState::Pressed && event.id() == hotkey.id()
+                });
+                if is_our_toggle {
+                    self.toggle_visor()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::AnimationTick => self.advance_animation(),
         }
+    }
+
+    /// Snaps the window to the primary monitor's current bounds - full
+    /// width, one third the height - and parks it off-screen above the top,
+    /// ready for the next `ToggleVisor` to slide it into view. Called once
+    /// at startup (`Message::WindowReady`); see `toggle_visor` for the
+    /// per-toggle re-snap that also covers a monitor change mid-session.
+    fn snap_to_monitor(&mut self) -> Task<Message> {
+        let Some(id) = self.window else {
+            return Task::none();
+        };
+        let Some(monitor) = visor::primary_monitor_bounds() else {
+            eprintln!("xizor: couldn't determine the primary monitor's bounds");
+            return Task::none();
+        };
+        Task::batch([
+            iced::window::resize(id, visor::visor_size(monitor)),
+            iced::window::move_to(id, visor::hidden_position(monitor)),
+        ])
+    }
+
+    /// Starts (or reverses) the visor's show/hide slide. Snaps the window's
+    /// width and x-position to the primary monitor's *current* bounds first
+    /// - covers both "resolution changed since startup" and "the monitor
+    /// layout is different than it was at the last toggle" - but only ever
+    /// tweens `y` (see `visor::Animation`), never width/height/x.
+    fn toggle_visor(&mut self) -> Task<Message> {
+        let Some(id) = self.window else {
+            return Task::none();
+        };
+        let Some(monitor) = visor::primary_monitor_bounds() else {
+            eprintln!("xizor: couldn't determine the primary monitor's bounds");
+            return Task::none();
+        };
+
+        // Reversing out of a not-yet-finished animation (rather than always
+        // starting from the nominal settled position) is what keeps a rapid
+        // double-press of the toggle keybind from glitching.
+        let current_y = match &self.animation {
+            Some(animation) => animation.current_y(),
+            None if self.visor_visible => visor::shown_position(monitor).y,
+            None => visor::hidden_position(monitor).y,
+        };
+
+        self.visor_visible = !self.visor_visible;
+        let target = if self.visor_visible {
+            visor::shown_position(monitor)
+        } else {
+            visor::hidden_position(monitor)
+        };
+        self.animation = Some(Animation::new(target.x, current_y, target.y));
+
+        let mut tasks = vec![
+            iced::window::resize(id, visor::visor_size(monitor)),
+            iced::window::move_to(id, Point::new(target.x, current_y)),
+        ];
+        if self.visor_visible {
+            // Lets the user start typing immediately after summoning the
+            // visor, without an extra click. See the plan's "known
+            // limitations" note: hiding doesn't explicitly hand focus back
+            // to whatever was focused before.
+            tasks.push(iced::window::gain_focus(id));
+        }
+        Task::batch(tasks)
+    }
+
+    fn advance_animation(&mut self) -> Task<Message> {
+        let Some(id) = self.window else {
+            self.animation = None;
+            return Task::none();
+        };
+        let Some(animation) = &self.animation else {
+            return Task::none();
+        };
+        let point = Point::new(animation.x, animation.current_y());
+        let finished = animation.is_finished();
+        if finished {
+            self.animation = None;
+        }
+        iced::window::move_to(id, point)
     }
 
     pub fn view(&self) -> Element<'_, Message> {
@@ -237,8 +642,14 @@ impl XizorApp {
             // visible seam. With the frame owning the shape, future
             // additions to a tab (an icon, a dirty-dot) just join the row
             // and get centered - they can't reintroduce that seam.
-            container(row![title, close].spacing(0).align_y(Center))
-                .style(move |theme| tab_frame_style(theme, is_active))
+            let frame = container(row![title, close].spacing(0).align_y(Center))
+                .style(move |theme| tab_frame_style(theme, is_active));
+
+            // Middle-click anywhere on the chip closes it, same as clicking
+            // the "x" - both funnel through `Message::CloseTab` so a dirty
+            // tab gets the same unsaved-changes prompt either way.
+            mouse_area(frame)
+                .on_middle_press(Message::CloseTab(index))
                 .into()
         });
 
@@ -304,7 +715,30 @@ impl XizorApp {
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        let mut subscriptions = vec![keyboard::on_key_press(handle_hotkey)];
+        let mut subscriptions = vec![
+            // iced 0.14 replaced the separate `on_key_press`/`on_key_release`
+            // subscriptions with one unified `listen()` covering every
+            // keyboard event - `filter_map` (also new in 0.14) picks out
+            // just the presses `handle_hotkey` cares about.
+            keyboard::listen().filter_map(|event| match event {
+                keyboard::Event::KeyPressed { key, modifiers, .. } => {
+                    handle_hotkey(key, modifiers)
+                }
+                _ => None,
+            }),
+            // An event listener, not a timer - no idle cost, so this stays
+            // unconditional (unlike the gated timers below), same as the
+            // global-hotkey listener right after it.
+            iced::window::close_requests().map(Message::WindowCloseRequested),
+            hotkey::subscription(),
+        ];
+
+        // Only ticks while a show/hide slide is actually in progress - same
+        // "no idle cost while settled" shape as the two timers below.
+        if self.animation.is_some() {
+            subscriptions
+                .push(iced::time::every(ANIMATION_TICK).map(|_| Message::AnimationTick));
+        }
 
         // Only ticks while some tab is actually waiting on a grammar load -
         // avoids a permanent background timer once every tab's highlighting
@@ -313,6 +747,18 @@ impl XizorApp {
             subscriptions.push(
                 iced::time::every(Duration::from_millis(50)).map(|_| Message::PollHighlighting),
             );
+        }
+
+        // Only ticks while some tab has draft content newer than what's on
+        // disk - same "costs nothing while idle" shape as the highlighting
+        // poll above.
+        if self
+            .tabs
+            .iter()
+            .any(|tab| tab.dirty && tab.draft_generation != tab.flushed_generation)
+        {
+            subscriptions
+                .push(iced::time::every(AUTOSAVE_INTERVAL).map(|_| Message::AutosaveTick));
         }
 
         Subscription::batch(subscriptions)
@@ -477,7 +923,13 @@ fn resolve_theme(name: &str) -> Theme {
             eprintln!(
                 "xizor: unknown theme {name:?}, using default. Valid options: {valid}"
             );
-            Theme::default()
+            // Iced 0.13's `Theme::default()` (removed in 0.14 along with the
+            // `auto-detect-theme` feature) auto-detected the OS's light/dark
+            // preference via the `dark-light` crate - never something this
+            // app itself surfaced or relied on beyond this one fallback, so
+            // there's nothing to replace it with: just match the theme name
+            // xizor_config::defaults already ships as its own default.
+            Theme::Light
         }
     }
 }
@@ -527,6 +979,58 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                 eprintln!("xizor: {}: couldn't read directory: {err}", dir.display());
             }
         }
+    }
+}
+
+/// Re-reads a restored tab's real file fresh from disk at startup (see
+/// `XizorApp::new`'s restore path) - always the *current* on-disk content,
+/// never a cached copy, since the file may have changed since last session.
+async fn reload_from_disk(path: PathBuf) -> Result<Arc<String>, std::io::ErrorKind> {
+    tokio::fs::read_to_string(&path)
+        .await
+        .map(Arc::new)
+        .map_err(|err| err.kind())
+}
+
+/// Shows the native "you have unsaved changes" prompt for a tab being
+/// closed (see `XizorApp::request_close`) and maps its result down to the
+/// three outcomes the caller cares about. Anything other than the "Save" or
+/// "Don't Save" custom buttons (e.g. the dialog's own close button, or a
+/// platform that doesn't support custom labels and falls back to its
+/// default) is treated as `Cancel` - closing is the one destructive path
+/// here, so an unrecognized answer should never be read as consent to lose
+/// changes.
+async fn confirm_close(tab_title: String) -> CloseDecision {
+    let result = rfd::AsyncMessageDialog::new()
+        .set_title("Unsaved Changes")
+        .set_description(format!(
+            "Do you want to save the changes you made to {tab_title}?"
+        ))
+        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
+            "Save".to_string(),
+            "Don't Save".to_string(),
+            "Cancel".to_string(),
+        ))
+        .show()
+        .await;
+
+    match result {
+        rfd::MessageDialogResult::Custom(label) if label == "Save" => CloseDecision::Save,
+        rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => {
+            CloseDecision::DontSave
+        }
+        // Not every backend's async path actually honors custom button
+        // text - notably Windows' plain `MessageBoxW` fallback (this crate
+        // isn't built with rfd's `common-controls-v6` feature, which is
+        // what's needed for real custom-labeled buttons there). Those
+        // backends silently render/report the built-in Yes/No/Cancel
+        // instead, so without this arm every click here - including the
+        // one meaning "yes, save" - fell through to `_` and was treated as
+        // Cancel. The buttons read "Yes"/"No" instead of "Save"/"Don't
+        // Save" on those platforms, but the semantics still line up.
+        rfd::MessageDialogResult::Yes => CloseDecision::Save,
+        rfd::MessageDialogResult::No => CloseDecision::DontSave,
+        _ => CloseDecision::Cancel,
     }
 }
 

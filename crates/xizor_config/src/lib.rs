@@ -3,6 +3,7 @@ mod defaults;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use global_hotkey::hotkey::{Code, HotKey, Modifiers};
 use serde::{Deserialize, Serialize};
 
 /// xizor's user-editable settings. Expected to grow (keybindings, theme,
@@ -25,6 +26,27 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         defaults::config()
+    }
+}
+
+/// xizor's global keybindings, loaded from `keybinds.toml` (separate from
+/// `config.toml` - see `load_keybinds()`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KeybindsConfig {
+    /// Shows/hides the visor from anywhere, even while another application
+    /// has focus. Parsed and validated by `global_hotkey::hotkey::HotKey`'s
+    /// own `Deserialize` impl, so a combo like `"ctrl+alt+7"` or
+    /// `"cmd+shift+down"` in the TOML file just works - no custom parsing
+    /// needed here.
+    pub toggle: HotKey,
+}
+
+impl Default for KeybindsConfig {
+    fn default() -> Self {
+        Self {
+            toggle: HotKey::new(Some(Modifiers::CONTROL), Code::Backquote),
+        }
     }
 }
 
@@ -127,5 +149,80 @@ fn write_default(path: &std::path::Path, config: &Config) {
             }
         }
         Err(err) => eprintln!("xizor_config: couldn't serialize default config: {err}"),
+    }
+}
+
+/// Where `keybinds.toml` is looked for - same search order as
+/// `config_paths()` (next to the executable, then the current directory for
+/// `cargo run`), just a different filename.
+fn keybind_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join("keybinds.toml"));
+        }
+    }
+    paths.push(PathBuf::from("keybinds.toml"));
+    paths
+}
+
+/// Loads `keybinds.toml` from disk, writing out a default file (next to the
+/// executable) on first run. Mirrors `load()`'s never-fail behavior: an
+/// unreadable file, malformed TOML, or an unparseable hotkey spec (e.g. a
+/// typo'd key name) all fall back to the built-in default (`Ctrl+\``) rather
+/// than stopping the editor from starting.
+pub fn load_keybinds() -> KeybindsConfig {
+    let paths = keybind_paths();
+
+    for path in &paths {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        eprintln!("xizor_config: found keybinds at {}", path.display());
+        return match toml::from_str(&text) {
+            Ok(keybinds) => keybinds,
+            Err(err) => {
+                eprintln!(
+                    "xizor_config: {}: {err}, using built-in default keybinds instead",
+                    path.display()
+                );
+                KeybindsConfig::default()
+            }
+        };
+    }
+
+    eprintln!(
+        "xizor_config: no keybinds file found (checked: {}), writing built-in defaults",
+        paths
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    let keybinds = KeybindsConfig::default();
+    if let Some(path) = paths.first() {
+        write_default_keybinds(path, &keybinds);
+    }
+    keybinds
+}
+
+fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if let Err(err) = std::fs::create_dir_all(parent) {
+        eprintln!("xizor_config: couldn't create {}: {err}", parent.display());
+        return;
+    }
+    match toml::to_string_pretty(keybinds) {
+        Ok(text) => {
+            if let Err(err) = std::fs::write(path, text) {
+                eprintln!(
+                    "xizor_config: couldn't write default keybinds to {}: {err}",
+                    path.display()
+                );
+            }
+        }
+        Err(err) => eprintln!("xizor_config: couldn't serialize default keybinds: {err}"),
     }
 }
