@@ -834,7 +834,17 @@ impl XizorApp {
                     modifiers,
                     physical_key,
                     ..
-                } => Some(Message::KeyPressed(key, modifiers, physical_key)),
+                } => {
+                    // TEMPORARY DEBUG - remove once the Cmd-modifier issue
+                    // is diagnosed. Prints every key press this subscription
+                    // sees (i.e. every press iced considers "ignored" /
+                    // uncaptured by any focused widget), with the raw
+                    // modifiers and physical key iced/winit reported.
+                    eprintln!(
+                        "xizor DEBUG: key={key:?} modifiers={modifiers:?} physical_key={physical_key:?}"
+                    );
+                    Some(Message::KeyPressed(key, modifiers, physical_key))
+                }
                 _ => None,
             }),
             // An event listener, not a timer - no idle cost, so this stays
