@@ -63,6 +63,13 @@ pub struct XizorApp {
     /// see `new()` - so there's nothing for `HotkeyEvent` to match against
     /// and the toggle keypress is silently ignored.
     visor_enabled: bool,
+    /// The id of whichever tab was active immediately before the current
+    /// one, for `Message::SelectPreviousActiveTab` (Ctrl+Tab) - updated in
+    /// `switch_active`. By id rather than index since the tab list can
+    /// change shape (a close shifts every later index) without this needing
+    /// to track that; a since-closed tab's id just fails the lookup and the
+    /// shortcut is a no-op that turn, see `update()`.
+    previous_active: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -109,6 +116,15 @@ pub enum Message {
     /// Fires on a timer while `animation` is `Some` (see `subscription()`);
     /// advances the in-progress slide by one frame.
     AnimationTick,
+    /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
+    /// wrapping past the last back to the first.
+    SelectNextTab,
+    /// Cmd+Shift+[ (mac) / Ctrl+Shift+[ (elsewhere) - mirror of
+    /// `SelectNextTab`.
+    SelectPreviousTab,
+    /// Ctrl+Tab, identical on every OS - swap back to whichever tab was
+    /// active immediately before this one (see `previous_active`).
+    SelectPreviousActiveTab,
 }
 
 /// The three choices offered by the unsaved-changes prompt (see
@@ -196,6 +212,7 @@ impl XizorApp {
             visor_visible: false,
             animation: None,
             visor_enabled,
+            previous_active: None,
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
@@ -355,6 +372,7 @@ impl XizorApp {
         }
         if let Some(previous) = self.tabs.get_mut(self.active) {
             previous.last_cursor = previous.editor.cursor_position();
+            self.previous_active = Some(previous.id);
         }
         self.active = index;
         self.redraw_nudge = !self.redraw_nudge;
@@ -364,6 +382,17 @@ impl XizorApp {
         }
         self.sync_session_metadata();
         operate(operation::focusable::focus_next())
+    }
+
+    /// Moves the active tab by `delta` positions, wrapping around at either
+    /// end - `+1`/`-1` for `Message::SelectNextTab`/`SelectPreviousTab`.
+    fn cycle_tab(&mut self, delta: isize) -> Task<Message> {
+        if self.tabs.is_empty() {
+            return Task::none();
+        }
+        let len = self.tabs.len() as isize;
+        let next = (self.active as isize + delta).rem_euclid(len) as usize;
+        self.switch_active(next)
     }
 
     /// Rewrites the session manifest (tab existence/path/dirty/active
@@ -461,6 +490,18 @@ impl XizorApp {
             Message::SelectTab(index) => self.switch_active(index),
             Message::CloseTab(index) => self.request_close(index),
             Message::CloseActiveTab => self.request_close(self.active),
+            Message::SelectNextTab => self.cycle_tab(1),
+            Message::SelectPreviousTab => self.cycle_tab(-1),
+            Message::SelectPreviousActiveTab => match self.previous_active {
+                Some(id) => match self.tabs.iter().position(|tab| tab.id == id) {
+                    Some(index) => self.switch_active(index),
+                    // That tab was closed since - nothing sensible to swap
+                    // to, so this is a silent no-op rather than falling
+                    // back to some other tab the user didn't ask for.
+                    None => Task::none(),
+                },
+                None => Task::none(),
+            },
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -798,6 +839,18 @@ impl XizorApp {
 }
 
 fn handle_hotkey(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<Message> {
+    // Ctrl+Tab: identical on every OS, so this is checked ahead of (and
+    // deliberately doesn't use) the `command()` gate below - `command()`
+    // resolves to Cmd on macOS, which isn't what this shortcut means.
+    if modifiers.control()
+        && !modifiers.shift()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(key, keyboard::Key::Named(keyboard::key::Named::Tab))
+    {
+        return Some(Message::SelectPreviousActiveTab);
+    }
+
     if !modifiers.command() {
         return None;
     }
@@ -807,6 +860,8 @@ fn handle_hotkey(key: keyboard::Key, modifiers: keyboard::Modifiers) -> Option<M
         keyboard::Key::Character("s") if modifiers.shift() => Some(Message::SaveFileAs),
         keyboard::Key::Character("s") => Some(Message::SaveFile),
         keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
+        keyboard::Key::Character("[") if modifiers.shift() => Some(Message::SelectPreviousTab),
+        keyboard::Key::Character("]") if modifiers.shift() => Some(Message::SelectNextTab),
         _ => None,
     }
 }
@@ -1110,4 +1165,129 @@ async fn save_to(
             kind: err.kind(),
         })?;
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use editor_core::TextEditorWidget;
+    use iced::keyboard::key::Named;
+    use iced::keyboard::{Key, Modifiers};
+
+    /// A minimal `TextEditorWidget` for tests, so a `Tab`/`XizorApp` can be
+    /// built without pulling in `iced_text_editor`/`syntax_registry` or any
+    /// real rendering.
+    struct StubEditor;
+
+    impl TextEditorWidget for StubEditor {
+        fn view(&self) -> Element<'_, EditorMessage> {
+            iced::widget::text("").into()
+        }
+        fn update(&mut self, _message: EditorMessage) -> bool {
+            false
+        }
+        fn text(&self) -> String {
+            String::new()
+        }
+        fn set_text(&mut self, _text: &str) {}
+        fn poll_highlighting(&mut self) {}
+        fn cursor_position(&self) -> (usize, usize) {
+            (0, 0)
+        }
+        fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
+        fn has_pending_highlighting(&self) -> bool {
+            false
+        }
+    }
+
+    fn stub_factory() -> EditorFactory {
+        Box::new(|_text, _extension| Box::new(StubEditor) as Box<dyn TextEditorWidget>)
+    }
+
+    /// Builds an `XizorApp` with `tab_count` untitled tabs (ids `0..tab_count`)
+    /// and none of the real I/O `XizorApp::new` would otherwise do - just
+    /// enough state for the tab-switching logic under test.
+    fn test_app(tab_count: u64) -> XizorApp {
+        let factory = stub_factory();
+        let tabs = (0..tab_count).map(|id| Tab::untitled(id, &factory)).collect();
+        XizorApp {
+            tabs,
+            active: 0,
+            next_id: tab_count,
+            error: None,
+            editor_factory: factory,
+            theme: Theme::ALL[0].clone(),
+            redraw_nudge: false,
+            session_dir: PathBuf::from("/tmp"),
+            pending_close_after_save: Vec::new(),
+            window: None,
+            hotkey: None,
+            visor_visible: false,
+            animation: None,
+            visor_enabled: false,
+            previous_active: None,
+        }
+    }
+
+    #[test]
+    fn switch_active_records_previous_tab_id() {
+        let mut app = test_app(3);
+        let _ = app.switch_active(1);
+        assert_eq!(app.previous_active, Some(0));
+        let _ = app.switch_active(2);
+        assert_eq!(app.previous_active, Some(1));
+    }
+
+    #[test]
+    fn select_previous_active_tab_toggles_back_and_forth() {
+        let mut app = test_app(3);
+        let _ = app.switch_active(2);
+        assert_eq!(app.active, 2);
+        let _ = app.update(Message::SelectPreviousActiveTab);
+        assert_eq!(app.active, 0);
+        let _ = app.update(Message::SelectPreviousActiveTab);
+        assert_eq!(app.active, 2);
+    }
+
+    #[test]
+    fn select_previous_active_tab_is_noop_for_a_stale_id() {
+        let mut app = test_app(2);
+        app.previous_active = Some(999); // no tab has this id - e.g. since closed
+        let _ = app.update(Message::SelectPreviousActiveTab);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn cycle_tab_wraps_around_in_both_directions() {
+        let mut app = test_app(3);
+        let _ = app.update(Message::SelectPreviousTab);
+        assert_eq!(app.active, 2);
+        let _ = app.update(Message::SelectNextTab);
+        assert_eq!(app.active, 0);
+        let _ = app.update(Message::SelectNextTab);
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn cycle_tab_on_single_tab_is_noop() {
+        let mut app = test_app(1);
+        let _ = app.update(Message::SelectNextTab);
+        assert_eq!(app.active, 0);
+    }
+
+    #[test]
+    fn ctrl_tab_is_recognized_as_select_previous_active_tab() {
+        let tab_key = Key::Named(Named::Tab);
+        assert!(matches!(
+            handle_hotkey(tab_key, Modifiers::CTRL),
+            Some(Message::SelectPreviousActiveTab)
+        ));
+    }
+
+    #[test]
+    fn ctrl_tab_with_extra_modifiers_does_not_match() {
+        let tab_key = Key::Named(Named::Tab);
+        assert!(handle_hotkey(tab_key.clone(), Modifiers::CTRL | Modifiers::SHIFT).is_none());
+        assert!(handle_hotkey(tab_key, Modifiers::CTRL | Modifiers::ALT).is_none());
+    }
 }

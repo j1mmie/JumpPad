@@ -1,11 +1,15 @@
+mod history;
+
 use std::ops::Range;
 use std::sync::Arc;
 
 use editor_core::{EditorMessage, TextEditorWidget};
+use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
+use iced::keyboard::{self, key};
 use iced::widget::text_editor;
-use iced::widget::text_editor::Content;
+use iced::widget::text_editor::{Binding, Content, KeyPress, Motion, Status};
 use iced::{Border, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 
@@ -20,6 +24,7 @@ use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegi
 pub struct IcedTextEditor {
     content: Content,
     highlighting: Highlighting,
+    history: History,
 }
 
 enum Highlighting {
@@ -47,6 +52,7 @@ impl IcedTextEditor {
         Self {
             content: Content::with_text(text),
             highlighting,
+            history: History::new(),
         }
     }
 
@@ -65,6 +71,26 @@ impl IcedTextEditor {
             _ => None,
         }
     }
+
+    /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
+    /// cursor to `op` (`History::undo` or `History::redo`) and, if it
+    /// returns a state to restore, replaces the content wholesale and walks
+    /// the cursor back to the recorded position. Returns whether an edit
+    /// actually happened (`false` when there was nothing to undo/redo), the
+    /// same contract `update` has for `Action`s.
+    fn apply_history(
+        &mut self,
+        op: impl FnOnce(&mut History, &str, (usize, usize)) -> Option<(String, (usize, usize))>,
+    ) -> bool {
+        let text = self.content.text();
+        let cursor = self.cursor_position();
+        let Some((restored_text, restored_cursor)) = op(&mut self.history, &text, cursor) else {
+            return false;
+        };
+        self.content = Content::with_text(&restored_text);
+        self.move_cursor_to(restored_cursor.0, restored_cursor.1);
+        true
+    }
 }
 
 impl TextEditorWidget for IcedTextEditor {
@@ -79,15 +105,25 @@ impl TextEditorWidget for IcedTextEditor {
             .height(Fill)
             .style(borderless)
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
+            .key_binding(key_binding)
             .on_action(EditorMessage::Action)
             .into()
     }
 
     fn update(&mut self, message: EditorMessage) -> bool {
-        let EditorMessage::Action(action) = message;
-        let is_edit = action.is_edit();
-        self.content.perform(action);
-        is_edit
+        match message {
+            EditorMessage::Action(action) => {
+                let is_edit = action.is_edit();
+                if is_edit {
+                    self.history
+                        .record_before_edit(&self.content.text(), self.cursor_position());
+                }
+                self.content.perform(action);
+                is_edit
+            }
+            EditorMessage::Undo => self.apply_history(History::undo),
+            EditorMessage::Redo => self.apply_history(History::redo),
+        }
     }
 
     fn text(&self) -> String {
@@ -258,6 +294,93 @@ fn color_for(category: HighlightCategory) -> iced::Color {
         HighlightCategory::Quote => iced::Color::from_rgb8(130, 140, 155),
         HighlightCategory::Code => iced::Color::from_rgb8(229, 192, 123),
     }
+}
+
+/// Extends iced's default `text_editor` key bindings with the OS-standard
+/// behaviors it doesn't already cover, then falls back to
+/// [`Binding::from_key_press`] (iced's own default dispatch) for everything
+/// else. Supplying a custom `key_binding` closure at all replaces default
+/// dispatch entirely rather than layering on top of it, so this must
+/// explicitly re-run the default for any key combination it doesn't itself
+/// care about - including the focus guard `from_key_press` would otherwise
+/// apply internally.
+///
+/// Deliberately keyed off iced's own portable modifier predicates
+/// (`command()`, `jump()` - Cmd/Ctrl and Option/Ctrl respectively, already
+/// resolved per-OS by iced itself) rather than `#[cfg(target_os = ...)]`, so
+/// there's exactly one code path for every platform.
+fn key_binding(press: KeyPress) -> Option<Binding<EditorMessage>> {
+    if !matches!(press.status, Status::Focused { .. }) {
+        return None;
+    }
+
+    // Option+Backspace (macOS) / Ctrl+Backspace (elsewhere): delete the
+    // previous word. Option+Delete / Ctrl+Delete: delete the next word.
+    // iced's own default bindings only ever delete one character - `jump()`
+    // is the same modifier iced's built-in word-movement logic already uses
+    // to widen `Left`/`Right` motions to `WordLeft`/`WordRight`, reused here
+    // so word-delete uses the identical "select the word, then delete the
+    // selection" shape as a manual select-then-backspace would.
+    if press.modifiers.jump() {
+        match press.modified_key.as_ref() {
+            keyboard::Key::Named(key::Named::Backspace) => {
+                return Some(Binding::Sequence(vec![
+                    Binding::Select(Motion::Left.widen()),
+                    Binding::Backspace,
+                ]));
+            }
+            keyboard::Key::Named(key::Named::Delete) => {
+                return Some(Binding::Sequence(vec![
+                    Binding::Select(Motion::Right.widen()),
+                    Binding::Delete,
+                ]));
+            }
+            _ => {}
+        }
+    }
+
+    // Cmd+Up/Down: jump to the start/end of the document (the actual macOS
+    // convention - iced's own `macos_command()` handling only remaps
+    // Left/Right this way, not Up/Down). With Shift held, select instead of
+    // just moving. `command()` is the portable helper (Cmd on macOS, Ctrl
+    // elsewhere), so this is Ctrl+Up/Down on other platforms - an unclaimed,
+    // harmless combo there.
+    if press.modifiers.command() {
+        let motion = match press.modified_key.as_ref() {
+            keyboard::Key::Named(key::Named::ArrowUp) => Some(Motion::DocumentStart),
+            keyboard::Key::Named(key::Named::ArrowDown) => Some(Motion::DocumentEnd),
+            _ => None,
+        };
+        if let Some(motion) = motion {
+            return Some(if press.modifiers.shift() {
+                Binding::Select(motion)
+            } else {
+                Binding::Move(motion)
+            });
+        }
+    }
+
+    // Cmd+Z / Ctrl+Z: undo. Cmd+Shift+Z or Cmd+Y (Ctrl+Shift+Z / Ctrl+Y
+    // elsewhere): redo. This exact iced version (0.14.0) has no undo history
+    // of its own (confirmed absent from its `Binding` enum), so these are
+    // routed to `EditorMessage::Undo`/`Redo`, handled by this crate's own
+    // `History` in `update()`. Redo answering to both Shift+Z and Y keeps
+    // this one portable `command()`-gated path instead of a macOS-only
+    // special case for the Shift+Z convention.
+    if press.modifiers.command() {
+        if let Some(c) = press.key.to_latin(press.physical_key) {
+            match c {
+                'z' if press.modifiers.shift() => {
+                    return Some(Binding::Custom(EditorMessage::Redo));
+                }
+                'z' => return Some(Binding::Custom(EditorMessage::Undo)),
+                'y' => return Some(Binding::Custom(EditorMessage::Redo)),
+                _ => {}
+            }
+        }
+    }
+
+    Binding::from_key_press(press)
 }
 
 /// iced's default `text_editor` style draws a border that changes color on
