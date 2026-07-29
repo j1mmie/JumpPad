@@ -25,6 +25,15 @@ const HEIGHT_COLLAPSE_TEST_TICK: Duration = Duration::from_millis(16);
 /// How many ticks to wait with the window collapsed before restoring it.
 const HEIGHT_COLLAPSE_TEST_WAIT_FRAMES: u8 = 1;
 
+/// How many consecutive frames to hold a nudged background color for after the
+/// active tab changes (see AGENTS.md's stale-content bug). One frame is not
+/// enough: `softbuffer` presents through several buffers in rotation, and
+/// `iced_tiny_skia` only repaints the one it was handed. The buffers it skipped
+/// still hold the previous tab's text, and come back around a frame or two
+/// later - which is the ghost text. Nudging for several frames running repaints
+/// every buffer in the rotation.
+const REDRAW_NUDGE_FRAMES: u8 = 4;
+
 pub struct XizorApp {
     tabs: Vec<Tab>,
     active: usize,
@@ -34,8 +43,9 @@ pub struct XizorApp {
     theme: Theme,
     background_alpha: f32,
     height_collapse_test: Option<(iced::Size, u8)>,
-    /// Flips every time the active tab changes.
-    redraw_nudge_hack: bool,
+    /// Frames left to hold a nudged background color for, counted down from
+    /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
+    redraw_nudge_frames: u8,
     session_dir: PathBuf,
     /// List of tab ids waiting on a save
     pending_close_after_save: Vec<u64>,
@@ -104,6 +114,8 @@ pub enum Message {
     HeightCollapseTestSized(iced::Size),
     /// Counts down the collapse wait, restoring the window once it elapses.
     HeightCollapseTestTick,
+    /// One presented frame elapsed - counts down `redraw_nudge_frames`.
+    RedrawNudgeFrame,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
     /// wrapping past the last back to the first.
     SelectNextTab,
@@ -197,7 +209,7 @@ impl XizorApp {
             theme: resolve_theme(&config.theme),
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
             height_collapse_test: None,
-            redraw_nudge_hack: false,
+            redraw_nudge_frames: 0,
             session_dir,
             pending_close_after_save: Vec::new(),
             window: None,
@@ -314,7 +326,16 @@ impl XizorApp {
         let id = self.next_id;
         self.next_id += 1;
         self.tabs.push(Tab::untitled(id, &self.editor_factory));
-        self.switch_active(self.tabs.len() - 1)
+        let index = self.tabs.len() - 1;
+        if index != self.active {
+            return self.switch_active(index);
+        }
+        // The very first tab, or the stand-in for a closed last one: the index
+        // didn't move, so `switch_active` would call it a no-op, but the editor
+        // sitting at it is brand new and still needs focus and a repaint.
+        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+        self.sync_session_metadata();
+        operate(operation::focusable::focus_next())
     }
 
     /// Closes a clean tab immediately; a dirty tab gets an unsaved-changes
@@ -369,7 +390,7 @@ impl XizorApp {
             self.previous_active_id = Some(previous.id);
         }
         self.active = index;
-        self.redraw_nudge_hack = !self.redraw_nudge_hack;
+        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
             tab.editor.move_cursor_to(line, column);
@@ -697,6 +718,10 @@ impl XizorApp {
                 self.height_collapse_test = Some((original, next_waited));
                 Task::none()
             }
+            Message::RedrawNudgeFrame => {
+                self.redraw_nudge_frames = self.redraw_nudge_frames.saturating_sub(1);
+                Task::none()
+            }
         }
     }
 
@@ -896,8 +921,8 @@ impl XizorApp {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.redraw_nudge_hack {
-            nudge_background(&self.theme)
+        if self.redraw_nudge_frames > 0 {
+            nudge_background(&self.theme, self.redraw_nudge_frames)
         } else {
             self.theme.clone()
         }
@@ -941,6 +966,12 @@ impl XizorApp {
                 iced::time::every(HEIGHT_COLLAPSE_TEST_TICK)
                     .map(|_| Message::HeightCollapseTestTick),
             );
+        }
+
+        // Real presented frames, not a wall-clock tick - the point is to outlast
+        // the platform's buffer rotation, which is counted in frames.
+        if self.redraw_nudge_frames > 0 {
+            subscriptions.push(iced::window::frames().map(|_| Message::RedrawNudgeFrame));
         }
 
         if self.tabs.iter().any(|tab| tab.editor.has_pending_highlighting()) {
@@ -1245,12 +1276,13 @@ fn modal_scrim_style(_theme: &Theme) -> container::Style {
     container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.5))
 }
 
-/// Nudges the theme's background alpha by an invisible amount, just enough
-/// to force a full repaint on tab switch - see AGENTS.md's tiny-skia
-/// stale-content bug.
-fn nudge_background(theme: &Theme) -> Theme {
+/// Nudges the theme's background alpha by an invisible amount, just enough to
+/// force a full repaint on tab switch - see AGENTS.md's tiny-skia stale-content
+/// bug. Scaling the nudge by `frames_left` makes every frame of the countdown a
+/// *different* color, so each one repaints rather than only the first.
+fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
     let mut palette = theme.palette();
-    palette.background.a -= 0.001;
+    palette.background.a -= 0.001 * f32::from(frames_left);
     Theme::custom("xizor (redraw nudge)".to_string(), palette)
 }
 
@@ -1426,7 +1458,7 @@ mod tests {
             theme: Theme::ALL[0].clone(),
             background_alpha: 1.0,
             height_collapse_test: None,
-            redraw_nudge_hack: false,
+            redraw_nudge_frames: 0,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
             window: None,
@@ -1819,6 +1851,65 @@ mod tests {
             },
         );
         assert_eq!(darkening_wash(&theme, TAB_ROW_DARKEN).a, 0.0);
+    }
+
+    #[test]
+    fn every_frame_of_the_nudge_countdown_gets_its_own_background_color() {
+        // The compositor only bypasses its (text-blind) per-widget damage check
+        // when the frame's background color differs from the last frame's, so
+        // the countdown has to move it every frame, not just on the first.
+        let mut app = test_app(2);
+        app.background_alpha = 0.7;
+
+        let mut seen = Vec::new();
+        for frames in 0..=REDRAW_NUDGE_FRAMES {
+            app.redraw_nudge_frames = frames;
+            seen.push(app.style(&app.theme()).background_color);
+        }
+
+        for (index, color) in seen.iter().enumerate() {
+            for other in &seen[index + 1..] {
+                assert_ne!(color, other, "two frames share a background color: {seen:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn switching_tabs_arms_the_full_nudge_countdown() {
+        let mut app = test_app(2);
+        let _ = app.switch_active(1);
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+    }
+
+    #[test]
+    fn creating_a_tab_at_the_already_active_index_still_arms_the_nudge() {
+        // `switch_active` treats an unmoved index as a no-op, but the first tab
+        // at startup - and the stand-in for a closed last tab - lands on one
+        // with a brand-new editor under it that has to be painted.
+        let mut app = test_app(0);
+        let _ = app.new_tab();
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(app.active, 0);
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+    }
+
+    #[test]
+    fn closing_the_last_tab_arms_the_nudge_for_its_replacement() {
+        let mut app = test_app(1);
+        app.redraw_nudge_frames = 0;
+        let _ = app.close_tab(0);
+        assert_eq!(app.tabs.len(), 1); // replaced, never left empty
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+    }
+
+    #[test]
+    fn the_nudge_countdown_stops_at_zero() {
+        let mut app = test_app(2);
+        app.redraw_nudge_frames = 1;
+        let _ = app.update(Message::RedrawNudgeFrame);
+        assert_eq!(app.redraw_nudge_frames, 0);
+        let _ = app.update(Message::RedrawNudgeFrame);
+        assert_eq!(app.redraw_nudge_frames, 0);
     }
 
     #[test]

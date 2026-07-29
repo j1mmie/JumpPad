@@ -153,18 +153,40 @@ by switching to `wgpu`-only (that backend has no damage-tracking at all
 and isn't a real option here anyway - `tiny-skia`'s memory footprint is
 the whole point of this project, see `README.md`).
 
-**The fix in place:** `XizorApp::redraw_nudge: bool` flips every time the
-active tab changes (`switch_active`, `crates/xizor/src/app.rs`).
-`XizorApp::theme()` checks it: when set, it returns the app's real theme
-run through `nudge_background`, which nudges the palette's background
-alpha by `0.001` and rebuilds it as `Theme::custom(...)`. That's an
+**The fix in place:** `XizorApp::redraw_nudge_frames: u8` is set to
+`REDRAW_NUDGE_FRAMES` every time the active tab changes (`switch_active`
+and `new_tab`, `crates/xizor/src/app.rs`). `XizorApp::theme()` checks it:
+while it's non-zero, it returns the app's real theme run through
+`nudge_background`, which drops the palette's background alpha by
+`0.001 * frames_left` and rebuilds it as `Theme::custom(...)`. That's an
 `f32` difference big enough for `Color`'s `==` to see, but small enough
 to be invisible - the background quad it's drawn as blends against a
 backdrop the compositor already cleared to that same base color moments
 earlier, and mixing a color with itself at less than full opacity still
-produces that same color. The result: switching tabs reliably forces a
-full repaint, at the cost of one recomputed `Palette`/`Extended` per
-switch - not per frame.
+produces that same color.
+
+**Gotcha - one nudged frame is not enough.** `softbuffer` presents through
+several buffers in rotation, and `present()` only ever draws into the one
+it's handed (`buffer_mut()`), using `buffer.age()` to decide what that
+buffer already contains. Repainting a single frame therefore fixes exactly
+one buffer; the others still hold the *previous* tab's text and come back
+around a frame or two later, which is the faint ghost text seen on macOS.
+Scaling the nudge by `frames_left` is what makes each frame of the
+countdown a *different* color, so all of them repaint instead of just the
+first - a plain flip-flop bool gives the same value on consecutive frames
+and the compositor goes straight back to its damage check. The countdown
+is driven by `iced::window::frames()` (real presented frames, not a
+wall-clock tick - buffer rotation is counted in frames), gated on the
+counter being non-zero so there's no idle cost, same as the other timers
+in `subscription()`. If ghosting ever reappears on a platform with a
+deeper swapchain, raise `REDRAW_NUDGE_FRAMES`; that's the knob.
+
+**Gotcha - `switch_active` no-ops when the index doesn't move,** so it
+can't be the only thing arming the nudge. Two paths land on an unchanged
+index with a brand-new editor underneath: the first tab at startup
+(`tabs` starts empty, `active` is already 0) and the replacement for a
+closed last tab (`close_tab` -> `new_tab`). Both went unpainted *and*
+unfocused before `new_tab` learned to arm the nudge itself.
 
 Two things were tried and found insufficient before landing on this,
 worth knowing so they aren't re-attempted as if untested:
