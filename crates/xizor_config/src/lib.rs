@@ -25,6 +25,7 @@ pub struct Config {
     /// dependency; an unrecognized name falls back to the default theme.
     pub theme: String,
     pub visor: VisorConfig,
+    pub alpha: AlphaConfig,
 }
 
 impl Default for Config {
@@ -41,6 +42,32 @@ impl Default for Config {
 #[serde(default)]
 pub struct VisorConfig {
     pub enabled: bool,
+}
+
+/// Independent transparency for the editor's background versus its text -
+/// `1.0` is fully solid, `0.0` fully invisible. Values outside `0.0..=1.0`
+/// are clamped where they're actually applied (in the `xizor`/
+/// `iced_text_editor` crates, where `iced`'s color types live) rather than
+/// here, so this crate doesn't need an `iced` dependency just to validate a
+/// float.
+///
+/// Kept as its own section (rather than nested under, say, `theme`) since
+/// it's an independent axis from which `iced::Theme` is picked - either one
+/// can change without the other.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AlphaConfig {
+    pub background: f32,
+    pub foreground: f32,
+}
+
+impl Default for AlphaConfig {
+    fn default() -> Self {
+        Self {
+            background: 1.0,
+            foreground: 1.0,
+        }
+    }
 }
 
 /// xizor's global keybindings, loaded from `keybinds.toml` (separate from
@@ -329,5 +356,47 @@ mod tests {
     #[test]
     fn default_keybinds_config_has_no_overrides() {
         assert!(KeybindsConfig::default().overrides.is_empty());
+    }
+
+    #[test]
+    fn default_alpha_is_fully_solid() {
+        assert_eq!(AlphaConfig::default(), AlphaConfig { background: 1.0, foreground: 1.0 });
+    }
+
+    #[test]
+    fn config_toml_with_no_alpha_section_falls_back_to_solid() {
+        // A `config.toml` from before this feature existed - the
+        // container's `#[serde(default)]` needs to keep these parsing.
+        let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
+        assert_eq!(config.alpha, AlphaConfig::default());
+    }
+
+    #[test]
+    fn config_toml_with_an_alpha_section_parses() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [alpha]
+            background = 0.7
+            foreground = 0.9
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.alpha, AlphaConfig { background: 0.7, foreground: 0.9 });
+    }
+
+    #[test]
+    fn alpha_section_with_only_one_field_defaults_the_other() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [alpha]
+            background = 0.5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.alpha, AlphaConfig { background: 0.5, foreground: 1.0 });
     }
 }

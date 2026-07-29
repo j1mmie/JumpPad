@@ -2,7 +2,7 @@ mod history;
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use editor_core::{EditorMessage, TextEditorWidget};
 use history::History;
@@ -68,6 +68,29 @@ pub struct IcedTextEditor {
     highlighting: Highlighting,
     history: History,
     overrides: Arc<EditorOverrides>,
+    /// `xizor_config::AlphaConfig::background`, clamped to `0.0..=1.0` -
+    /// scales the editor's own background color (see `editor_style`).
+    /// Captured per-instance (unlike `foreground_alpha`) since it's only
+    /// ever used inside a `.style()` closure, which is allowed to capture
+    /// state - no need for the `FOREGROUND_ALPHA` global this field's
+    /// sibling requires.
+    background_alpha: f32,
+}
+
+/// `xizor_config::AlphaConfig::foreground`, clamped to `0.0..=1.0` - scales
+/// every color `color_for` produces for syntax-highlighted text. Set once
+/// (see `factory`) and read from `color_for`, rather than threaded through
+/// as a field like `background_alpha`, because `text_editor::highlight_with`
+/// requires its `to_format` callback to be a bare `fn` pointer (confirmed
+/// against `iced_widget`'s signature) - it cannot capture any state, so
+/// `color_for` (called from `to_format`) has nothing else to read this
+/// from. There's exactly one `IcedTextEditor` factory built per app
+/// session, so "write once at startup, read many times" is a correct fit,
+/// not a workaround-shaped compromise.
+static FOREGROUND_ALPHA: OnceLock<f32> = OnceLock::new();
+
+fn foreground_alpha() -> f32 {
+    *FOREGROUND_ALPHA.get().unwrap_or(&1.0)
 }
 
 enum Highlighting {
@@ -92,6 +115,7 @@ impl IcedTextEditor {
         registry: &Arc<SyntaxRegistry>,
         extension: Option<&str>,
         overrides: Arc<EditorOverrides>,
+        background_alpha: f32,
     ) -> Self {
         let highlighting = match extension {
             None => Highlighting::None,
@@ -102,6 +126,7 @@ impl IcedTextEditor {
             highlighting,
             history: History::new(),
             overrides,
+            background_alpha: background_alpha.clamp(0.0, 1.0),
         }
     }
 
@@ -109,11 +134,21 @@ impl IcedTextEditor {
     /// captures a shared syntax registry and the resolved keybind overrides
     /// once. This is the one line the app shell changes to swap editor
     /// backends.
+    ///
+    /// Also sets `FOREGROUND_ALPHA` (see its own doc comment for why that's
+    /// a global rather than a field like `background_alpha`) - this is the
+    /// one place both alpha values naturally already flow through once, at
+    /// app startup, before any tab/editor is ever constructed.
     pub fn factory(
         registry: Arc<SyntaxRegistry>,
         overrides: Arc<EditorOverrides>,
+        background_alpha: f32,
+        foreground_alpha: f32,
     ) -> impl Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget> {
-        move |text, extension| Box::new(Self::new(text, &registry, extension, overrides.clone()))
+        let _ = FOREGROUND_ALPHA.set(foreground_alpha.clamp(0.0, 1.0));
+        move |text, extension| {
+            Box::new(Self::new(text, &registry, extension, overrides.clone(), background_alpha))
+        }
     }
 
     fn grammar(&self) -> Option<Arc<Grammar>> {
@@ -151,11 +186,13 @@ impl TextEditorWidget for IcedTextEditor {
             grammar: self.grammar(),
         };
         let overrides = self.overrides.clone();
+        let background_alpha = self.background_alpha;
+        let foreground_alpha = foreground_alpha();
         text_editor(&self.content)
             .placeholder("")
             .font(Font::MONOSPACE)
             .height(Fill)
-            .style(borderless)
+            .style(move |theme, status| editor_style(theme, status, background_alpha, foreground_alpha))
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
             .key_binding(move |press| key_binding(press, &overrides))
             .on_action(EditorMessage::Action)
@@ -335,6 +372,23 @@ fn to_format(category: &HighlightCategory, _theme: &Theme) -> Format<Font> {
 }
 
 fn color_for(category: HighlightCategory) -> iced::Color {
+    apply_alpha(base_color_for(category), foreground_alpha())
+}
+
+/// Scales `color`'s alpha by `alpha`, skipping the multiply entirely at
+/// `1.0` (fully solid) - the "don't do transparency-related work when
+/// nothing's actually transparent" case `xizor_config::AlphaConfig` is
+/// meant to keep cheap. The multiply itself is negligible either way; this
+/// is about matching that intent explicitly, not a real optimization.
+fn apply_alpha(color: iced::Color, alpha: f32) -> iced::Color {
+    if alpha >= 1.0 {
+        color
+    } else {
+        color.scale_alpha(alpha)
+    }
+}
+
+fn base_color_for(category: HighlightCategory) -> iced::Color {
     match category {
         HighlightCategory::String => iced::Color::from_rgb8(152, 195, 121),
         HighlightCategory::Comment => iced::Color::from_rgb8(140, 140, 140),
@@ -491,14 +545,36 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
 
 /// iced's default `text_editor` style draws a border that changes color on
 /// hover/focus - drop the border in every status instead of just one, so
-/// there's no color-change effect left to notice.
-fn borderless(theme: &Theme, status: text_editor::Status) -> text_editor::Style {
+/// there's no color-change effect left to notice. Also scales the
+/// background by `background_alpha` and the base (non-highlighted) text
+/// color by `foreground_alpha` - see `xizor_config::AlphaConfig`. Both are
+/// plain parameters (not read from `FOREGROUND_ALPHA`/a field) so this stays
+/// pure and directly testable; `view()` passes `foreground_alpha()`'s
+/// current value in explicitly. Syntax-highlighted text goes through
+/// `color_for` instead, which applies the same foreground alpha
+/// independently (it can't take a parameter - see `FOREGROUND_ALPHA`'s doc
+/// comment).
+fn editor_style(
+    theme: &Theme,
+    status: text_editor::Status,
+    background_alpha: f32,
+    foreground_alpha: f32,
+) -> text_editor::Style {
+    let default = text_editor::default(theme, status);
+    let background = if background_alpha >= 1.0 {
+        default.background
+    } else {
+        default.background.scale_alpha(background_alpha)
+    };
+    let value = apply_alpha(default.value, foreground_alpha);
     text_editor::Style {
         border: Border {
             width: 0.0,
             ..Border::default()
         },
-        ..text_editor::default(theme, status)
+        background,
+        value,
+        ..default
     }
 }
 
@@ -629,5 +705,59 @@ mod tests {
         );
         event.status = Status::Active;
         assert!(key_binding(event, &overrides).is_none());
+    }
+
+    #[test]
+    fn apply_alpha_at_full_solid_returns_the_color_unchanged() {
+        let color = iced::Color::from_rgba(0.2, 0.4, 0.6, 0.9);
+        assert_eq!(apply_alpha(color, 1.0), color);
+    }
+
+    #[test]
+    fn apply_alpha_scales_the_alpha_channel_only() {
+        let color = iced::Color::from_rgba(0.2, 0.4, 0.6, 0.8);
+        let scaled = apply_alpha(color, 0.5);
+        assert_eq!((scaled.r, scaled.g, scaled.b), (0.2, 0.4, 0.6));
+        assert!((scaled.a - 0.4).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn editor_style_leaves_background_and_value_alone_at_full_solid() {
+        let theme = Theme::ALL[0].clone();
+        let default = text_editor::default(&theme, text_editor::Status::Active);
+        let style = editor_style(&theme, text_editor::Status::Active, 1.0, 1.0);
+        assert_eq!(style.background, default.background);
+        assert_eq!(style.value, default.value);
+    }
+
+    #[test]
+    fn editor_style_scales_background_and_value_independently() {
+        let theme = Theme::ALL[0].clone();
+        let default = text_editor::default(&theme, text_editor::Status::Active);
+        let style = editor_style(&theme, text_editor::Status::Active, 0.5, 1.0);
+        assert_ne!(style.background, default.background);
+        assert_eq!(style.value, default.value); // foreground untouched
+
+        let style = editor_style(&theme, text_editor::Status::Active, 1.0, 0.3);
+        assert_eq!(style.background, default.background); // background untouched
+        assert_ne!(style.value, default.value);
+    }
+
+    #[test]
+    fn color_for_scales_by_whatever_foreground_alpha_is_currently_set() {
+        // `FOREGROUND_ALPHA` is a process-wide `OnceLock` (see its doc
+        // comment for why) - `.set` only ever takes effect once per
+        // process, so this can't assume its own value "won" if another
+        // test in this binary set it first. Deriving the expected value
+        // from `foreground_alpha()`'s *actual* current reading (the same
+        // way `color_for` itself does) keeps this test correct and
+        // order-independent regardless of which test set it.
+        let _ = FOREGROUND_ALPHA.set(0.25);
+        let alpha = foreground_alpha();
+        let color = color_for(HighlightCategory::Keyword);
+        let base = base_color_for(HighlightCategory::Keyword);
+        assert_eq!((color.r, color.g, color.b), (base.r, base.g, base.b));
+        let expected_alpha = if alpha >= 1.0 { base.a } else { base.a * alpha };
+        assert!((color.a - expected_alpha).abs() < f32::EPSILON);
     }
 }
