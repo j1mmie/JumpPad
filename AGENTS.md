@@ -18,6 +18,16 @@ The app was originally built on `egui` and ported to `iced`. Some comments
 in the codebase still reference `egui` behavior for contrast (e.g. "unlike
 egui's `ctx.request_repaint()`") - that's this history, not a mistake.
 
+## Comment style
+
+Comments stay short and sit right next to what they describe:
+
+- High level, not step-by-step narration.
+- Placed at the thing's first declaration, not cross-referencing other files/areas unless truly necessary.
+- Short - no meandering.
+- Prefer a self-documenting name over a comment.
+- Skip the "why" (bug history, feature origin) unless it's a genuine non-obvious gotcha.
+
 ## Workspace layout
 
 ```
