@@ -6,15 +6,11 @@ use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
 use crate::highlight::{self, HighlightSpan};
 use crate::{Handle, PollResult};
 
-/// A loaded, ready-to-use tree-sitter grammar: a `Parser` with its wasm
-/// module already attached (via `set_wasm_store`/`set_language`), an
-/// optional compiled injection query, and eagerly-acquired handles to any
-/// statically-named injection target grammars - plus a small cache so
-/// repeated calls with unchanged text are nearly free.
-///
-/// `egui::TextEdit`'s layouter callback runs at least once per frame
-/// unconditionally, so this cache is load-bearing for the "don't reparse
-/// every frame" efficiency goal, not just a nice-to-have.
+/// A loaded, ready-to-use tree-sitter grammar - a `Parser` with its wasm
+/// module attached, an optional compiled injection query, handles to any
+/// injection target grammars, and a small cache so repeated calls with
+/// unchanged text (the common case, since highlighting is recomputed on
+/// every render) are nearly free.
 pub struct Grammar {
     #[allow(dead_code)] // kept alive alongside the parser; not read directly by Grammar itself
     language: Language,
@@ -27,11 +23,9 @@ struct GrammarInner {
     parser: Parser,
     last_source: String,
     last_spans: Arc<Vec<HighlightSpan>>,
-    // Set when the last computation skipped an injection because its target
-    // grammar was still `Loading` - so a cache hit on unchanged text must
-    // NOT short-circuit, or a target that finishes loading later would
-    // never get picked up (the outer source text never changes, so nothing
-    // else would ever invalidate the cache).
+    // Set when an injection was skipped because its target grammar was
+    // still loading - forces a recompute even on unchanged text, since
+    // nothing else would invalidate the cache once the target's ready.
     injections_pending: bool,
 }
 
@@ -56,9 +50,7 @@ impl Grammar {
     }
 
     /// Returns highlight spans for `source`, reparsing only if `source`
-    /// differs from the last call (or an injection target that was
-    /// pending last time might have resolved since) - otherwise returns
-    /// the cached result.
+    /// changed or a pending injection might have resolved since.
     pub fn highlight(&self, source: &str) -> Arc<Vec<HighlightSpan>> {
         let mut inner = self.inner.lock().unwrap();
         if inner.last_source == source && !inner.injections_pending {
@@ -82,12 +74,8 @@ impl Grammar {
                 .iter()
                 .position(|&name| name == "injection.content");
 
-            // Stage (range, offset-corrected inner spans) per match without
-            // mutating `spans` yet: `QueryCursor::matches` isn't guaranteed
-            // to yield matches in byte order, so suppressing base spans and
-            // splicing in injected ones interleaved, per match, could let a
-            // later match's suppression pass wrongly strip an earlier
-            // match's already-spliced injected spans.
+            // Staged rather than spliced in per-match, since `QueryCursor::matches`
+            // isn't guaranteed to yield matches in byte order.
             let mut staged: Vec<(usize, usize, Vec<HighlightSpan>)> = Vec::new();
 
             let mut cursor = QueryCursor::new();
@@ -138,12 +126,10 @@ impl Grammar {
             }
 
             if !staged.is_empty() {
-                // Cut each injection range out of every base span it
-                // overlaps, keeping whatever parts of that span fall
-                // outside the injection (rather than dropping the whole
-                // span on any overlap) - a heading like `# **bold**` should
-                // still show heading color on the `# ` part even though
-                // `**bold**` gets overridden by the injected emphasis span.
+                // Cut each injection range out of the base spans it
+                // overlaps, keeping the non-overlapping parts - e.g. a
+                // heading like `# **bold**` keeps heading color on `# `
+                // even though `**bold**` is overridden by an injected span.
                 let mut result = Vec::with_capacity(spans.len() + staged.len());
                 for span in &spans {
                     let mut pieces = vec![(span.start, span.end)];
@@ -162,11 +148,8 @@ impl Grammar {
                 for (_, _, inner_spans) in staged {
                     result.extend(inner_spans);
                 }
-                // Two different injection matches' content ranges overlapping
-                // each other isn't de-overlapped here - doesn't occur in the
-                // real markdown query (frontmatter and inline nodes are
-                // structurally disjoint), so left as an assumption, not a
-                // runtime check.
+                // Assumes injection matches never overlap each other (true
+                // for the real markdown query) - not enforced at runtime.
                 result.sort_by_key(|span| span.start);
                 spans = result;
             }

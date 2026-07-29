@@ -1,15 +1,8 @@
 //! Draft autosave / crash-recovery persistence.
 //!
-//! Two things live on disk here, both in the same directory (see
-//! `candidate_dirs`): a small `session.toml` manifest listing every open
-//! tab's id/path/dirty state plus which one was active, and one flat
-//! `<id>.draft` file per *dirty* tab holding its current unsaved content.
-//! Draft content is deliberately kept out of the TOML - one less thing that
-//! can get out of sync with the manifest.
-//!
-//! `stale_tabs` is the one predicate ("does this tab's on-disk draft need
-//! rewriting") shared by both the periodic autosave timer (async, via
-//! `flush_draft_async`) and the exit-time flush (sync, via `flush_on_exit`).
+//! One `session.toml` manifest lists every open tab's id/path/dirty state
+//! plus which was active; each dirty tab also gets a `<id>.draft` file
+//! holding its unsaved content.
 
 use std::path::{Path, PathBuf};
 
@@ -31,12 +24,8 @@ pub struct TabEntry {
 
 const MANIFEST_FILE: &str = "session.toml";
 
-/// Where the session manifest and draft files live, in order of
-/// preference: next to the running executable (the "real" location), then
-/// `./drafts` relative to the current directory (a `cargo run`
-/// convenience) - mirrors `xizor_config::config_paths()` and
-/// `default_search_dirs()` in `app.rs` exactly, keeping xizor fully
-/// portable rather than reaching for an OS-specific app-data directory.
+/// Where the session manifest and draft files live: next to the running
+/// executable, then `./drafts` (a `cargo run` convenience).
 pub fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -49,9 +38,7 @@ pub fn candidate_dirs() -> Vec<PathBuf> {
 }
 
 /// Reads and parses the first `session.toml` found among `candidates`.
-/// Returns `None` (logging why) if none exist or the first one found is
-/// unparseable - a broken or missing session file should never block
-/// startup, matching `xizor_config::load()`'s philosophy.
+/// Returns `None` if none exist or it's unparseable - never blocks startup.
 pub fn load_manifest(candidates: &[PathBuf]) -> Option<SessionManifest> {
     for dir in candidates {
         let path = dir.join(MANIFEST_FILE);
@@ -92,10 +79,7 @@ pub fn build_manifest(tabs: &[Tab], active: usize) -> SessionManifest {
 }
 
 /// Writes `manifest` to `dir/session.toml`, then deletes any `<id>.draft`
-/// file in `dir` that no longer belongs to a dirty tab in `manifest` - this
-/// one spot handles every source of orphaned drafts (a tab closed, a tab
-/// got saved for real, a tab went from dirty back to clean), since it runs
-/// on every structural change (see call sites in `app.rs`).
+/// file that no longer belongs to a dirty tab in `manifest`.
 pub fn write_manifest_sync(dir: &Path, manifest: &SessionManifest) {
     if let Err(err) = std::fs::create_dir_all(dir) {
         eprintln!("xizor: couldn't create {}: {err}", dir.display());
@@ -142,10 +126,8 @@ fn prune_orphaned_drafts(dir: &Path, manifest: &SessionManifest) {
     }
 }
 
-/// Every tab whose in-memory content has changed since its draft file was
-/// last written - `(id, generation, text)`, where `generation` is the
-/// `draft_generation` this write will bring the draft up to date with (the
-/// caller marks it flushed once the write actually succeeds).
+/// Every tab whose content has changed since its draft was last written -
+/// `(id, generation, text)`.
 pub fn stale_tabs(tabs: &[Tab]) -> Vec<(u64, u64, String)> {
     tabs.iter()
         .filter(|tab| tab.dirty && tab.draft_generation != tab.flushed_generation)
@@ -154,10 +136,7 @@ pub fn stale_tabs(tabs: &[Tab]) -> Vec<(u64, u64, String)> {
 }
 
 /// Writes one tab's draft content asynchronously. Best-effort: errors are
-/// logged and swallowed rather than surfaced, since a failed background
-/// draft write shouldn't interrupt the user's typing with an error dialog.
-/// Returns `(id, generation)` so the caller can mark that generation
-/// flushed once this completes.
+/// logged, not surfaced. Returns `(id, generation)` for the caller to mark flushed.
 pub async fn flush_draft_async(dir: PathBuf, id: u64, generation: u64, text: String) -> (u64, u64) {
     if let Err(err) = tokio::fs::create_dir_all(&dir).await {
         eprintln!("xizor: couldn't create {}: {err}", dir.display());
@@ -169,11 +148,8 @@ pub async fn flush_draft_async(dir: PathBuf, id: u64, generation: u64, text: Str
     (id, generation)
 }
 
-/// Best-effort, synchronous last-ditch flush run when the app is quitting:
-/// writes the manifest (with orphan cleanup) and every stale tab's draft
-/// content, all before the window is actually allowed to close. Blocking is
-/// deliberate here - there's nothing else happening to hitch, and no
-/// guarantee an async write would survive past the close being dispatched.
+/// Synchronous last-ditch flush run when the app is quitting: writes the
+/// manifest and every stale tab's draft before the window closes.
 pub fn flush_on_exit(dir: &Path, tabs: &[Tab], active: usize) {
     let manifest = build_manifest(tabs, active);
     write_manifest_sync(dir, &manifest);
@@ -190,9 +166,7 @@ mod tests {
     use editor_core::{EditorFactory, EditorMessage, TextEditorWidget};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// A minimal `TextEditorWidget` stub - just enough to build real `Tab`s
-    /// in tests without pulling in `iced_text_editor`'s syntax-registry
-    /// dependency.
+    /// A minimal `TextEditorWidget` stub for building real `Tab`s in tests.
     struct StubEditor(String);
 
     impl TextEditorWidget for StubEditor {
@@ -224,9 +198,7 @@ mod tests {
         })
     }
 
-    /// A fresh scratch directory per test, under the OS temp dir - avoids
-    /// tests stepping on each other's `session.toml`/`.draft` files without
-    /// needing a `tempfile` dependency.
+    /// A fresh scratch directory per test, under the OS temp dir.
     fn scratch_dir() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -257,10 +229,7 @@ mod tests {
         let manifest = build_manifest(&tabs, 2);
         write_manifest_sync(&dir, &manifest);
 
-        // Draft content for dirty tabs is written separately from the
-        // manifest (write_manifest_sync itself never writes draft files -
-        // that's stale_tabs/flush_on_exit's job); simulate that here so
-        // load_manifest's caller has something to read back.
+        // write_manifest_sync never writes draft files itself - simulate that separately.
         std::fs::write(draft_path(&dir, 0), "hello").unwrap();
         std::fs::write(draft_path(&dir, 2), "edited").unwrap();
 

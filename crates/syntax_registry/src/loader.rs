@@ -26,17 +26,8 @@ pub(crate) fn find_injections_source(dirs: &[PathBuf], grammar_name: &str) -> Op
 }
 
 /// Reads and compiles a wasm grammar file into a ready-to-use language and
-/// parser (not yet wrapped in a `Grammar` - the caller assembles that once
-/// it's also resolved any injection targets).
-///
-/// `name` is passed to `WasmStore::load_language` and must match the
-/// grammar's compiled export symbol (`tree_sitter_<name>`). This is why
-/// `SyntaxRegistry` resolves file extensions to a grammar name via config
-/// first (e.g. a `.md` file resolving to grammar name `"markdown"`) rather
-/// than assuming the extension itself is always the right name - upstream
-/// `tree-sitter-markdown` exports `tree_sitter_markdown`, not
-/// `tree_sitter_md`. A mismatch here still surfaces as an ordinary load
-/// error if a grammar's actual export doesn't match its configured name.
+/// parser. `name` must match the grammar's compiled export symbol
+/// (`tree_sitter_<name>`), not necessarily the file extension.
 pub(crate) fn load(
     engine: &wasmtime::Engine,
     path: &Path,

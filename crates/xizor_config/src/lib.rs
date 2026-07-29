@@ -9,20 +9,15 @@ use serde::{Deserialize, Serialize};
 
 pub use keybind_overrides::ResolvedKeybind;
 
-/// xizor's user-editable settings. Expected to grow (keybindings, theme,
-/// editor behavior, ...) - each concern gets its own section so old config
-/// files stay valid as new ones are added, and a missing section just
-/// falls back to that section's defaults rather than failing the file.
+/// xizor's user-editable settings. Each concern gets its own section so a
+/// missing section falls back to its own defaults rather than failing the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub syntaxes: SyntaxesConfig,
-    /// The display name of an `iced::Theme` variant (e.g. `"Dracula"`,
-    /// `"Solarized Light"`, matched case-insensitively) - kept as a plain
-    /// string rather than an enum here so this crate doesn't need to depend
-    /// on `iced` or track its theme list. Resolved against the real
-    /// `iced::Theme::ALL` in the `xizor` crate, where `iced` is already a
-    /// dependency; an unrecognized name falls back to the default theme.
+    /// The display name of an `iced::Theme` variant (e.g. `"Dracula"`),
+    /// matched case-insensitively - kept as a plain string so this crate
+    /// doesn't need to depend on `iced`.
     pub theme: String,
     pub visor: VisorConfig,
     pub alpha: AlphaConfig,
@@ -35,9 +30,7 @@ impl Default for Config {
 }
 
 /// Controls whether xizor runs as a drop-down "visor" (undecorated,
-/// always-on-top, hidden until summoned by the global toggle hotkey) or as
-/// an ordinary window. Visor mode is still a bit buggy on some systems, so
-/// it's opt-in rather than the default for now.
+/// always-on-top, hidden until summoned) or as an ordinary window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisorConfig {
@@ -45,15 +38,8 @@ pub struct VisorConfig {
 }
 
 /// Independent transparency for the editor's background versus its text -
-/// `1.0` is fully solid, `0.0` fully invisible. Values outside `0.0..=1.0`
-/// are clamped where they're actually applied (in the `xizor`/
-/// `iced_text_editor` crates, where `iced`'s color types live) rather than
-/// here, so this crate doesn't need an `iced` dependency just to validate a
-/// float.
-///
-/// Kept as its own section (rather than nested under, say, `theme`) since
-/// it's an independent axis from which `iced::Theme` is picked - either one
-/// can change without the other.
+/// `1.0` is fully solid, `0.0` fully invisible. Clamped where applied, not
+/// here, so this crate doesn't need an `iced` dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AlphaConfig {
@@ -70,27 +56,16 @@ impl Default for AlphaConfig {
     }
 }
 
-/// xizor's global keybindings, loaded from `keybinds.toml` (separate from
-/// `config.toml` - see `load_keybinds()`).
+/// xizor's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindsConfig {
-    /// Shows/hides the visor from anywhere, even while another application
-    /// has focus. Parsed and validated by `global_hotkey::hotkey::HotKey`'s
-    /// own `Deserialize` impl, so a combo like `"ctrl+alt+7"` or
-    /// `"cmd+shift+down"` in the TOML file just works - no custom parsing
-    /// needed here.
+    /// Shows/hides the visor from anywhere, even without focus.
     pub toggle: HotKey,
     /// Command-name -> key-chord overrides for xizor's in-app shortcuts,
-    /// e.g. `new_tab = "control+alt+n"`. Takes precedence over xizor's
-    /// hardcoded default for that command when present - see
-    /// `resolved_overrides()`. Two different names mapping to the same
-    /// chord is undefined-which-wins, not guarded against (deliberately -
-    /// this isn't a full conflict-resolution system). Valid names: see
-    /// `xizor::app::APP_COMMAND_NAMES` (app-level commands - new tab, save,
-    /// tab switching, ...) and `iced_text_editor::EDITOR_COMMAND_NAMES`
-    /// (editor-level commands - undo, word-delete, ...); an unrecognized
-    /// name here is silently ignored (logged once at startup).
+    /// e.g. `new_tab = "control+alt+n"` - takes precedence over the
+    /// hardcoded default when present. An unrecognized name is silently
+    /// ignored (logged once at startup).
     #[serde(default)]
     pub overrides: HashMap<String, HotKey>,
 }
@@ -105,9 +80,7 @@ impl Default for KeybindsConfig {
 }
 
 impl KeybindsConfig {
-    /// Resolves `overrides` into iced-native types, ready to compare
-    /// directly against incoming key events - see
-    /// `keybind_overrides::resolved_overrides`.
+    /// Resolves `overrides` into iced-native types, ready to compare against incoming key events.
     pub fn resolved_overrides(&self) -> HashMap<String, ResolvedKeybind> {
         keybind_overrides::resolved_overrides(&self.overrides)
     }
@@ -120,11 +93,7 @@ impl KeybindsConfig {
 pub struct SyntaxesConfig(pub HashMap<String, Vec<String>>);
 
 impl SyntaxesConfig {
-    /// Inverts the grammar -> extensions mapping into extension -> grammar,
-    /// which is what actually looking up "what grammar does this open file
-    /// need" wants. If the same extension is listed under more than one
-    /// grammar, the last one encountered (arbitrary map iteration order)
-    /// wins - duplicate mappings aren't supported yet.
+    /// Inverts the grammar -> extensions mapping into extension -> grammar.
     pub fn extension_to_grammar(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for (grammar, extensions) in &self.0 {
@@ -136,11 +105,8 @@ impl SyntaxesConfig {
     }
 }
 
-/// Where `config.toml` is looked for, in order: next to the running
-/// executable (the "real" location - works the same for a dev build and a
-/// shipped one), then a `config.toml` relative to the current directory as
-/// a convenience for `cargo run` (where the exe lives buried in
-/// `target/debug/`, far from the workspace root).
+/// Where `config.toml` is looked for: next to the running executable, then
+/// `./config.toml` (a `cargo run` convenience).
 fn config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -152,10 +118,8 @@ fn config_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Loads the config from disk, writing out a default file (next to the
-/// executable) on first run. Never fails the caller - an unreadable file
-/// or malformed TOML falls back to in-memory defaults (and gets logged),
-/// since a broken config file should never stop the editor from starting.
+/// Loads the config from disk, writing a default file on first run. Never
+/// fails the caller - a broken config falls back to in-memory defaults.
 pub fn load() -> Config {
     let paths = config_paths();
 
@@ -215,9 +179,7 @@ fn write_default(path: &std::path::Path, config: &Config) {
     }
 }
 
-/// Where `keybinds.toml` is looked for - same search order as
-/// `config_paths()` (next to the executable, then the current directory for
-/// `cargo run`), just a different filename.
+/// Where `keybinds.toml` is looked for - same search order as `config_paths()`.
 fn keybind_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -229,11 +191,8 @@ fn keybind_paths() -> Vec<PathBuf> {
     paths
 }
 
-/// Loads `keybinds.toml` from disk, writing out a default file (next to the
-/// executable) on first run. Mirrors `load()`'s never-fail behavior: an
-/// unreadable file, malformed TOML, or an unparseable hotkey spec (e.g. a
-/// typo'd key name) all fall back to the built-in default (`Ctrl+\``) rather
-/// than stopping the editor from starting.
+/// Loads `keybinds.toml` from disk, writing a default file on first run.
+/// Mirrors `load()`'s never-fail behavior.
 pub fn load_keybinds() -> KeybindsConfig {
     let paths = keybind_paths();
 
@@ -296,8 +255,6 @@ mod tests {
 
     #[test]
     fn keybinds_toml_with_no_overrides_table_parses_as_empty() {
-        // A `keybinds.toml` from before this feature existed - the
-        // container's `#[serde(default)]` needs to keep these parsing.
         let keybinds: KeybindsConfig = toml::from_str(r#"toggle = "control+Backquote""#).unwrap();
         assert!(keybinds.overrides.is_empty());
     }
@@ -335,13 +292,6 @@ mod tests {
 
     #[test]
     fn a_malformed_chord_string_fails_the_whole_file_not_just_that_entry() {
-        // `HotKey`'s own `Deserialize` rejects an unparseable chord string,
-        // which fails `HashMap<String, HotKey>`'s deserialize entirely -
-        // same "any parse error loses the whole file, not just one field"
-        // behavior `toggle` already has, extended to `overrides`. Callers
-        // (`load_keybinds`) already handle this by falling back to
-        // `KeybindsConfig::default()` and logging, same as any other
-        // malformed `keybinds.toml`.
         let result: Result<KeybindsConfig, _> = toml::from_str(
             r#"
             toggle = "control+Backquote"
@@ -365,8 +315,6 @@ mod tests {
 
     #[test]
     fn config_toml_with_no_alpha_section_falls_back_to_solid() {
-        // A `config.toml` from before this feature existed - the
-        // container's `#[serde(default)]` needs to keep these parsing.
         let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
         assert_eq!(config.alpha, AlphaConfig::default());
     }

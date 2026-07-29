@@ -14,13 +14,9 @@ use iced::widget::text_editor::{Binding, Content, KeyPress, Motion, Status};
 use iced::{Border, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 
-/// A named editor-level action a `keybinds.toml` override can target - see
-/// `xizor_config::KeybindsConfig::overrides`'s doc comment. Deliberately a
-/// small, closed set (not every possible motion): these are the commands
-/// this crate already has custom logic for beyond iced's own stock
-/// `text_editor` defaults (copy/cut/paste/select-all/plain motions/etc,
-/// which stay non-configurable - nobody's asked to remap those, and they're
-/// already identical on every OS via iced's own `command()` gating).
+/// A named editor-level action a `keybinds.toml` override can target - a
+/// small, closed set: the commands this crate has custom logic for beyond
+/// iced's own stock `text_editor` defaults.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorCommand {
     WordDeleteBackward,
@@ -33,9 +29,7 @@ pub enum EditorCommand {
     Redo,
 }
 
-/// The canonical `keybinds.toml` override name for each [`EditorCommand`] -
-/// the single source of truth both `key_binding`'s override lookup and
-/// `xizor_config::KeybindsConfig::overrides`'s doc comment point at.
+/// The canonical `keybinds.toml` override name for each [`EditorCommand`].
 pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
     ("word_delete_backward", EditorCommand::WordDeleteBackward),
     ("word_delete_forward", EditorCommand::WordDeleteForward),
@@ -47,46 +41,30 @@ pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
     ("redo", EditorCommand::Redo),
 ];
 
-/// A user override's resolved chord, keyed by the same `(Modifiers,
-/// key::Code)` pair `key_binding` matches incoming presses against -
-/// physical-key based (layout-independent), unlike this crate's other,
-/// pre-existing hardcoded bindings below, which stay logical-key based
-/// (layout-dependent) exactly as already shipped. See the plan doc for why
-/// that inconsistency is deliberate and scoped rather than an oversight.
+/// A user override's resolved chord, keyed by physical key (layout-
+/// independent) - unlike this crate's pre-existing hardcoded bindings
+/// below, which stay logical-key based.
 pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorCommand>;
 
 /// A [`TextEditorWidget`] backed by `iced::widget::text_editor`, with
-/// optional tree-sitter/WASM syntax highlighting layered on top via a
+/// optional tree-sitter/WASM syntax highlighting layered on via a
 /// [`syntax_registry::SyntaxRegistry`].
-///
-/// This is the default/first editor implementation. The highlighting
-/// machinery lives in `syntax_registry` (which has no `iced` dependency),
-/// so a future, different `TextEditorWidget` implementation could reuse it
-/// without depending on this crate.
 pub struct IcedTextEditor {
     content: Content,
     highlighting: Highlighting,
     history: History,
     overrides: Arc<EditorOverrides>,
-    /// `xizor_config::AlphaConfig::background`, clamped to `0.0..=1.0` -
-    /// scales the editor's own background color (see `editor_style`).
-    /// Captured per-instance (unlike `foreground_alpha`) since it's only
-    /// ever used inside a `.style()` closure, which is allowed to capture
-    /// state - no need for the `FOREGROUND_ALPHA` global this field's
-    /// sibling requires.
+    /// Scales the editor's own background color (see `editor_style`).
+    /// Captured per-instance, unlike `foreground_alpha`, since it's only
+    /// used inside a `.style()` closure that's allowed to capture state.
     background_alpha: f32,
 }
 
-/// `xizor_config::AlphaConfig::foreground`, clamped to `0.0..=1.0` - scales
-/// every color `color_for` produces for syntax-highlighted text. Set once
-/// (see `factory`) and read from `color_for`, rather than threaded through
-/// as a field like `background_alpha`, because `text_editor::highlight_with`
-/// requires its `to_format` callback to be a bare `fn` pointer (confirmed
-/// against `iced_widget`'s signature) - it cannot capture any state, so
-/// `color_for` (called from `to_format`) has nothing else to read this
-/// from. There's exactly one `IcedTextEditor` factory built per app
-/// session, so "write once at startup, read many times" is a correct fit,
-/// not a workaround-shaped compromise.
+/// Scales every syntax-highlighted color `color_for` produces. Global
+/// rather than a field like `background_alpha` because
+/// `text_editor::highlight_with`'s `to_format` callback must be a bare `fn`
+/// pointer - it can't capture state, so `color_for` has nothing else to
+/// read this from. Set once in `factory`, before any editor is constructed.
 static FOREGROUND_ALPHA: OnceLock<f32> = OnceLock::new();
 
 fn foreground_alpha() -> f32 {
@@ -98,14 +76,11 @@ enum Highlighting {
     None,
     /// A grammar load was requested; still waiting on it.
     Pending(Handle),
-    /// Grammar loaded and ready to parse/highlight with. The `Handle` must
-    /// be kept alive here (not just while `Pending`) - dropping it releases
-    /// the registry's reservation, which would evict the grammar the
-    /// moment it finished loading and defeat the whole reuse/cache point.
+    /// Grammar loaded and ready to use. The `Handle` must stay alive here,
+    /// not just while `Pending` - dropping it would evict the grammar.
     Ready(#[allow(dead_code)] Handle, Arc<Grammar>),
-    /// Grammar search finished with nothing usable - stop polling. Still
-    /// holds the `Handle` so a second tab with the same extension reuses
-    /// this cached "nothing to find" result instead of re-searching.
+    /// Grammar search finished with nothing usable. Still holds the
+    /// `Handle` so a second tab with the same extension reuses this result.
     Unavailable(#[allow(dead_code)] Handle),
 }
 
@@ -132,13 +107,7 @@ impl IcedTextEditor {
 
     /// Builds an [`editor_core::EditorFactory`]-shaped closure that
     /// captures a shared syntax registry and the resolved keybind overrides
-    /// once. This is the one line the app shell changes to swap editor
-    /// backends.
-    ///
-    /// Also sets `FOREGROUND_ALPHA` (see its own doc comment for why that's
-    /// a global rather than a field like `background_alpha`) - this is the
-    /// one place both alpha values naturally already flow through once, at
-    /// app startup, before any tab/editor is ever constructed.
+    /// once, and sets `FOREGROUND_ALPHA`.
     pub fn factory(
         registry: Arc<SyntaxRegistry>,
         overrides: Arc<EditorOverrides>,
@@ -159,11 +128,9 @@ impl IcedTextEditor {
     }
 
     /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
-    /// cursor to `op` (`History::undo` or `History::redo`) and, if it
-    /// returns a state to restore, replaces the content wholesale and walks
-    /// the cursor back to the recorded position. Returns whether an edit
-    /// actually happened (`false` when there was nothing to undo/redo), the
-    /// same contract `update` has for `Action`s.
+    /// cursor to `op` and, if it returns a state to restore, replaces the
+    /// content wholesale and moves the cursor back. Returns whether an edit
+    /// actually happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
         op: impl FnOnce(&mut History, &str, (usize, usize)) -> Option<(String, (usize, usize))>,
@@ -243,20 +210,14 @@ impl TextEditorWidget for IcedTextEditor {
     }
 
     fn cursor_position(&self) -> (usize, usize) {
-        // `Content::cursor_position()` (iced 0.13) was replaced by
-        // `cursor()` returning a `text_editor::Cursor { position, selection }`
-        // - only the plain caret position is needed here, not any selection.
         let position = self.content.cursor().position;
         (position.line, position.column)
     }
 
     fn move_cursor_to(&mut self, line: usize, column: usize) {
         // No absolute "jump to (line, column)" action exists, so this walks
-        // there from the start: document start, then down `line` times,
-        // then right `column` times. Each step clamps at the nearest valid
-        // position rather than erroring, so a document that's gotten
-        // shorter since `line`/`column` were recorded just lands at the
-        // closest place instead of panicking or doing nothing.
+        // there from document start - each step clamps to the nearest
+        // valid position if the document's since gotten shorter.
         self.content
             .perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
         for _ in 0..line {
@@ -271,11 +232,9 @@ impl TextEditorWidget for IcedTextEditor {
 }
 
 /// The settings a [`TreeSitterHighlighter`] is built/updated from: the
-/// grammar to highlight with (if any) and the *entire* current document
-/// text. iced's `Highlighter::highlight_line` only ever sees one line at a
-/// time, but tree-sitter needs the whole buffer to parse - so the full text
-/// is threaded through here instead, and `highlight_line` slices into
-/// spans computed up front in `new`/`update`.
+/// grammar to highlight with (if any) and the entire current document text -
+/// `highlight_line` only sees one line at a time, but tree-sitter needs the
+/// whole buffer to parse.
 #[derive(Clone)]
 struct HighlighterSettings {
     source: String,
@@ -375,11 +334,7 @@ fn color_for(category: HighlightCategory) -> iced::Color {
     apply_alpha(base_color_for(category), foreground_alpha())
 }
 
-/// Scales `color`'s alpha by `alpha`, skipping the multiply entirely at
-/// `1.0` (fully solid) - the "don't do transparency-related work when
-/// nothing's actually transparent" case `xizor_config::AlphaConfig` is
-/// meant to keep cheap. The multiply itself is negligible either way; this
-/// is about matching that intent explicitly, not a real optimization.
+/// Scales `color`'s alpha by `alpha`, skipping the multiply at `1.0`.
 fn apply_alpha(color: iced::Color, alpha: f32) -> iced::Color {
     if alpha >= 1.0 {
         color
@@ -411,8 +366,7 @@ fn word_delete_forward() -> Binding<EditorMessage> {
 }
 
 /// Constructs the `Binding` for a named [`EditorCommand`] - shared by both
-/// the user-override path and this crate's own hardcoded-default path in
-/// `key_binding`, so the two never drift out of sync with each other.
+/// the user-override and hardcoded-default paths in `key_binding`.
 fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
     match command {
         EditorCommand::WordDeleteBackward => word_delete_backward(),
@@ -428,23 +382,11 @@ fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
 
 /// Extends iced's default `text_editor` key bindings with the OS-standard
 /// behaviors it doesn't already cover, then falls back to
-/// [`Binding::from_key_press`] (iced's own default dispatch) for everything
-/// else. Supplying a custom `key_binding` closure at all replaces default
-/// dispatch entirely rather than layering on top of it, so this must
-/// explicitly re-run the default for any key combination it doesn't itself
-/// care about - including the focus guard `from_key_press` would otherwise
-/// apply internally.
+/// [`Binding::from_key_press`] for everything else.
 ///
-/// Three tiers, checked in order, first match wins - no layering/conflict
-/// system beyond that fixed order:
-/// 1. `overrides` - a user's `keybinds.toml` remap, matched by *physical*
-///    key (layout-independent - see `EditorOverrides`'s doc comment for why
-///    this deliberately differs from tier 2's matching style).
-/// 2. This crate's own hardcoded extras (word-delete, undo/redo, document
-///    start/end) - unchanged from before overrides existed, still keyed off
-///    iced's portable `command()`/`jump()` modifier predicates (Cmd/Ctrl and
-///    Option/Ctrl respectively, already resolved per-OS by iced itself)
-///    rather than `#[cfg(target_os = ...)]`.
+/// Three tiers, checked in order, first match wins:
+/// 1. `overrides` - a user's `keybinds.toml` remap, matched by physical key.
+/// 2. This crate's own hardcoded extras (word-delete, undo/redo, document start/end).
 /// 3. iced's own stock default dispatch.
 fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<EditorMessage>> {
     if !matches!(press.status, Status::Focused { .. }) {
@@ -458,15 +400,10 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
         }
     }
 
-    // Tier 2: this repo's existing hardcoded extras.
+    // Tier 2: hardcoded extras.
     //
     // Option+Backspace (macOS) / Ctrl+Backspace (elsewhere): delete the
     // previous word. Option+Delete / Ctrl+Delete: delete the next word.
-    // iced's own default bindings only ever delete one character - `jump()`
-    // is the same modifier iced's built-in word-movement logic already uses
-    // to widen `Left`/`Right` motions to `WordLeft`/`WordRight`, reused here
-    // so word-delete uses the identical "select the word, then delete the
-    // selection" shape as a manual select-then-backspace would.
     if press.modifiers.jump() {
         match press.modified_key.as_ref() {
             keyboard::Key::Named(key::Named::Backspace) => {
@@ -479,12 +416,8 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
         }
     }
 
-    // Cmd+Up/Down: jump to the start/end of the document (the actual macOS
-    // convention - iced's own `macos_command()` handling only remaps
-    // Left/Right this way, not Up/Down). With Shift held, select instead of
-    // just moving. `command()` is the portable helper (Cmd on macOS, Ctrl
-    // elsewhere), so this is Ctrl+Up/Down on other platforms - an unclaimed,
-    // harmless combo there.
+    // Cmd+Up/Down (Ctrl+Up/Down elsewhere): jump to document start/end;
+    // with Shift held, select instead of just moving.
     if press.modifiers.command() {
         let motion = match press.modified_key.as_ref() {
             keyboard::Key::Named(key::Named::ArrowUp) => Some(Motion::DocumentStart),
@@ -501,12 +434,8 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
     }
 
     // Cmd+Z / Ctrl+Z: undo. Cmd+Shift+Z or Cmd+Y (Ctrl+Shift+Z / Ctrl+Y
-    // elsewhere): redo. This exact iced version (0.14.0) has no undo history
-    // of its own (confirmed absent from its `Binding` enum), so these are
-    // routed to `EditorMessage::Undo`/`Redo`, handled by this crate's own
-    // `History` in `update()`. Redo answering to both Shift+Z and Y keeps
-    // this one portable `command()`-gated path instead of a macOS-only
-    // special case for the Shift+Z convention.
+    // elsewhere): redo. iced has no undo history of its own, so these route
+    // to this crate's own `History` via `EditorMessage::Undo`/`Redo`.
     if press.modifiers.command() {
         if let Some(c) = press.key.to_latin(press.physical_key) {
             match c {
@@ -520,22 +449,13 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
         }
     }
 
-    // Tier 3: iced's own stock dispatch - with one correction. Its final
-    // fallback treats any produced `text` as literal character insertion.
-    // On macOS specifically, holding Cmd (unlike Ctrl) doesn't suppress
-    // that text production - `NSEvent.characters` still comes through as
-    // a plain, non-control character - so an unrecognized Cmd+<letter>
-    // (anything not already handled above, or by iced's own Cmd+C/X/V/A)
-    // would otherwise get silently typed into the document *and* mark the
-    // event captured, meaning app-level shortcuts (Cmd+N/O/S/W in
-    // `xizor::app::handle_hotkey`, which run on a separate subscription
-    // that only ever sees *uncaptured* key events) never see it at all.
-    // Discarding exactly that one failure mode - an `Insert` produced while
-    // `command()` is held - leaves the event unhandled instead, so it
-    // correctly falls through as ignored for the app-level layer to pick
-    // up. (On non-mac, `command()` is Ctrl, which already turns the
-    // character into a control code before reaching here - this is a
-    // no-op there, not just a mac-only carve-out via `#[cfg(target_os)]`.)
+    // Tier 3: iced's own stock dispatch - with one correction. On macOS,
+    // holding Cmd doesn't suppress character production, so an
+    // unrecognized Cmd+<letter> would otherwise get typed into the
+    // document *and* mark the event captured, hiding it from app-level
+    // shortcuts. Discard an `Insert` produced while `command()` is held so
+    // it falls through unhandled instead (a no-op on other platforms,
+    // where `command()` is Ctrl and already suppresses character production).
     let command_held = press.modifiers.command();
     match Binding::from_key_press(press) {
         Some(Binding::Insert(_)) if command_held => None,
@@ -544,16 +464,10 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
 }
 
 /// iced's default `text_editor` style draws a border that changes color on
-/// hover/focus - drop the border in every status instead of just one, so
-/// there's no color-change effect left to notice. Also scales the
-/// background by `background_alpha` and the base (non-highlighted) text
-/// color by `foreground_alpha` - see `xizor_config::AlphaConfig`. Both are
-/// plain parameters (not read from `FOREGROUND_ALPHA`/a field) so this stays
-/// pure and directly testable; `view()` passes `foreground_alpha()`'s
-/// current value in explicitly. Syntax-highlighted text goes through
-/// `color_for` instead, which applies the same foreground alpha
-/// independently (it can't take a parameter - see `FOREGROUND_ALPHA`'s doc
-/// comment).
+/// hover/focus - dropped here so there's no color-change effect to notice.
+/// Also scales the background by `background_alpha` and the base text
+/// color by `foreground_alpha` (both plain parameters, for testability -
+/// syntax-highlighted text instead goes through `color_for`).
 fn editor_style(
     theme: &Theme,
     status: text_editor::Status,
@@ -656,17 +570,8 @@ mod tests {
 
     #[test]
     fn command_held_unrecognized_character_does_not_fall_through_to_insert() {
-        // Reproduces the real bug this fix addresses: on macOS, holding Cmd
-        // (unlike Ctrl) doesn't suppress `text` production, so an
-        // unrecognized Cmd+<letter> - like Cmd+N, which this crate has no
-        // binding for - would otherwise hit iced's own default `Insert`
-        // fallback: silently typing the letter *and* capturing the event,
-        // so it never reaches app-level shortcuts (`xizor::app::handle_hotkey`,
-        // a separate subscription that only ever sees *uncaptured* key
-        // events). `Modifiers::CTRL` stands in for the command() modifier
-        // here since `command()` is resolved per-OS at compile time and
-        // these tests run on whichever OS built them - same convention the
-        // other tests in this module already use for Undo/Redo.
+        // `Modifiers::CTRL` stands in for `command()`, which resolves per-OS
+        // at compile time - same convention the Undo/Redo tests use.
         let overrides = EditorOverrides::new();
         let event = press_with_text(
             keyboard::Modifiers::CTRL,
@@ -745,13 +650,9 @@ mod tests {
 
     #[test]
     fn color_for_scales_by_whatever_foreground_alpha_is_currently_set() {
-        // `FOREGROUND_ALPHA` is a process-wide `OnceLock` (see its doc
-        // comment for why) - `.set` only ever takes effect once per
-        // process, so this can't assume its own value "won" if another
-        // test in this binary set it first. Deriving the expected value
-        // from `foreground_alpha()`'s *actual* current reading (the same
-        // way `color_for` itself does) keeps this test correct and
-        // order-independent regardless of which test set it.
+        // `FOREGROUND_ALPHA.set` only takes effect once per process, so
+        // this derives the expected value from its actual current reading
+        // rather than assuming 0.25 won.
         let _ = FOREGROUND_ALPHA.set(0.25);
         let alpha = foreground_alpha();
         let color = color_for(HighlightCategory::Keyword);

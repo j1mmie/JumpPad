@@ -120,11 +120,8 @@ fn unconfigured_extension_is_unavailable_without_touching_disk_or_hanging() {
 
 #[test]
 fn configured_extension_with_missing_wasm_file_resolves_to_unavailable() {
-    // "nope" is configured to map to a "does-not-exist" grammar, but no
-    // such .wasm file exists in this fixtures dir - this exercises the
-    // disk-search-fails path specifically, as opposed to the "not
-    // configured at all" path above. (Deliberately not "toml": that
-    // fixture is present in this dir for the injection test below.)
+    // "nope" maps to a grammar with no .wasm file in the fixtures dir -
+    // the disk-search-fails path, distinct from "not configured at all" above.
     let (tx, rx) = mpsc::channel();
     let registry = SyntaxRegistry::new(
         fixtures_dir(),
@@ -171,11 +168,8 @@ fn highlighting_parses_json_into_spans_and_caches_unchanged_text() {
 
 #[test]
 fn highlighting_parses_xml_despite_pascal_case_node_kinds() {
-    // Regression test: tree-sitter-xml names its nodes in PascalCase
-    // (`Comment`, `AttValue`, ...), unlike every other bundled grammar's
-    // lowercase/snake_case convention - `classify` silently produced zero
-    // spans for any XML file until it started case-folding and recognizing
-    // XML's quoted-literal node kinds.
+    // Regression test: tree-sitter-xml names nodes in PascalCase, unlike
+    // every other bundled grammar - see `classify`'s case-folding.
     let (tx, rx) = mpsc::channel();
     let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("xml", "xml")]), move || {
         let _ = tx.send(());
@@ -205,11 +199,8 @@ fn highlighting_parses_xml_despite_pascal_case_node_kinds() {
 
 #[test]
 fn static_injection_highlights_yaml_frontmatter_via_markdown() {
-    // "toml" isn't configured here on purpose - the fixtures dir has this
-    // note's neighbor toml.wasm present but not registered as an
-    // extension mapping, which is irrelevant: injection targets are
-    // resolved by grammar name (via markdown.injections.scm), not through
-    // this test's extension_to_grammar map at all.
+    // Injection targets resolve by grammar name (via markdown.injections.scm),
+    // not through this test's extension_to_grammar map - "toml" is deliberately unconfigured.
     let (tx, rx) = mpsc::channel();
     let registry = SyntaxRegistry::new(
         fixtures_dir(),
@@ -224,16 +215,10 @@ fn static_injection_highlights_yaml_frontmatter_via_markdown() {
     let source = "---\n# a comment\ntitle: Test\n---\n\nSome **bold** text.\n";
     let frontmatter_end = source.rfind("---").unwrap() + "---".len();
 
-    // Repeatedly call `highlight` with the *identical* source string as
-    // `on_ready` signals arrive - first from markdown's own load, then
-    // from its injection targets (yaml, toml, html, markdown_inline)
-    // loading independently in the background. This directly exercises
-    // the stale-cache fix: without `injections_pending` gating the cache
-    // hit, a cache keyed only on unchanged source text would freeze at
-    // whatever the first successful call produced and never pick up an
-    // injection that resolves later - the frontmatter's yaml `# comment`
-    // (which only tree-sitter-yaml, not markdown itself, understands as a
-    // distinct "comment" node) would never get highlighted.
+    // Repeatedly highlights the same source as injection targets load in
+    // the background - exercises `injections_pending`: without it, the
+    // cache would freeze at the first result and never pick up the yaml
+    // frontmatter's comment once its grammar resolves.
     let mut last_spans = Arc::new(Vec::new());
     for _ in 0..8 {
         if let PollResult::Ready(grammar) = handle.poll() {

@@ -10,11 +10,10 @@ const MAX_DEPTH: usize = 200;
 /// keystroke at a time.
 const COALESCE_WINDOW: Duration = Duration::from_millis(750);
 
-/// A snapshot-based undo/redo stack, standing in for the undo history that
-/// `iced::widget::text_editor::Content` doesn't provide (confirmed absent in
-/// the exact iced 0.14.0 this crate depends on). Stores whole-document text
-/// rather than diffs - simple, and fine at realistic document sizes with the
-/// depth cap above; not worth a diff-based rewrite unless that stops holding.
+/// A snapshot-based undo/redo stack, standing in for the undo history
+/// `iced::widget::text_editor::Content` doesn't provide. Stores
+/// whole-document text rather than diffs - simple, fine at realistic
+/// document sizes given the depth cap above.
 pub struct History {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,

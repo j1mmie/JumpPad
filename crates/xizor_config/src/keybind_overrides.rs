@@ -2,29 +2,18 @@ use std::collections::HashMap;
 
 use global_hotkey::hotkey::{Code as GhCode, HotKey, Modifiers as GhModifiers};
 
-/// A chord resolved into iced-native types, ready for a consumer crate to
-/// compare directly against a `keyboard::Event::KeyPressed` (or
-/// `text_editor::KeyPress`)'s `(modifiers, physical_key)`. Intentionally
-/// opaque about *what* it's bound to - see `resolved_overrides`.
+/// A chord resolved into iced-native types, ready to compare directly
+/// against a `keyboard::Event::KeyPressed`'s `(modifiers, physical_key)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ResolvedKeybind {
     pub modifiers: iced_core::keyboard::Modifiers,
     pub code: iced_core::keyboard::key::Code,
 }
 
-/// Converts a `keyboard_types::Code` (what `global_hotkey`'s `HotKey` -
-/// and so `keybinds.toml` - actually stores) into iced's own, separately
-/// defined `keyboard::key::Code`. The two enums are independently authored
-/// but both track the W3C UI Events `code` values, so almost every variant
-/// name matches exactly - confirmed by diffing both enums directly (191 of
-/// 194 iced variants match by name). The three that don't are a documented,
-/// intentional rename in iced itself (`key.rs`'s doc comment on `Code`):
-/// the spec's `MetaLeft`/`MetaRight` are iced's `SuperLeft`/`SuperRight`,
-/// and the spec's `Super` has no `Code` representation in iced at all (iced
-/// reports it via `Physical::Unidentified` instead, one level up from
-/// `Code`) - so that one resolves to `None`, same as everything else with
-/// no iced equivalent (a couple dozen Chromium-only extras, plus
-/// `keyboard_types`' own `Unidentified` variant).
+/// Converts `global_hotkey`'s `Code` to iced's own `keyboard::key::Code` -
+/// both track W3C UI Events `code` values, so almost every variant matches
+/// by name. `MetaLeft`/`MetaRight` are iced's `SuperLeft`/`SuperRight`;
+/// `Super` and other iced-less variants resolve to `None`.
 fn to_iced_code(code: GhCode) -> Option<iced_core::keyboard::key::Code> {
     use iced_core::keyboard::key::Code as Ic;
 
@@ -64,11 +53,8 @@ fn to_iced_code(code: GhCode) -> Option<iced_core::keyboard::key::Code> {
     ]
 }
 
-/// `keyboard_types::Modifiers` tracks more bits than iced's `Modifiers`
-/// does; only the four with a direct iced equivalent are kept. The rest
-/// (`META, ALT_GRAPH, CAPS_LOCK, FN, FN_LOCK, NUM_LOCK, SCROLL_LOCK,
-/// SYMBOL, SYMBOL_LOCK, HYPER`) have no iced-side meaning and are dropped
-/// deliberately, not an oversight.
+/// Keeps only the four bits with a direct iced equivalent; the rest
+/// (`META`, `CAPS_LOCK`, ...) have no iced-side meaning and are dropped deliberately.
 fn to_iced_modifiers(modifiers: GhModifiers) -> iced_core::keyboard::Modifiers {
     let mut resolved = iced_core::keyboard::Modifiers::empty();
     if modifiers.contains(GhModifiers::SHIFT) {
@@ -93,12 +79,8 @@ fn resolve(hotkey: &HotKey) -> Option<ResolvedKeybind> {
     })
 }
 
-/// Resolves every entry in a raw `command name -> HotKey` overrides map
-/// (as parsed straight from `keybinds.toml`) into iced-native types. An
-/// entry whose key has no iced equivalent is dropped (logged, not panicked),
-/// per `to_iced_code`. Doesn't know or care what the command names mean;
-/// that's for each consumer (`xizor::app`, `iced_text_editor`) to decide by
-/// looking up the names it recognizes.
+/// Resolves a raw `command name -> HotKey` overrides map into iced-native
+/// types, dropping (and logging) any entry with no iced equivalent.
 pub(crate) fn resolved_overrides(
     overrides: &HashMap<String, HotKey>,
 ) -> HashMap<String, ResolvedKeybind> {

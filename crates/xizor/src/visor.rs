@@ -1,7 +1,5 @@
-//! Pure geometry and animation math for the visor's show/hide slide - no
-//! `Message`/window-command types here, just what position the window
-//! should be at. `app.rs` is what actually calls `iced::window::move_to`
-//! with the values this module computes.
+//! Pure geometry and animation math for the visor's show/hide slide - just
+//! what position the window should be at, no `Message`/window-command types.
 
 use std::time::{Duration, Instant};
 
@@ -15,11 +13,8 @@ const ANIMATION_DURATION: Duration = Duration::from_millis(200);
 /// shown.
 const HEIGHT_FRACTION: f32 = 1.0 / 3.0;
 
-/// An in-progress slide between two `y` positions, in logical window
-/// coordinates. `x`/width/height don't change mid-slide (see `app.rs`'s
-/// `ToggleVisor` handling - those are snapped once, before a new animation
-/// starts, never tweened), so `x` is just carried through unchanged rather
-/// than re-derived from the monitor on every animation frame.
+/// An in-progress slide between two `y` positions. `x`/width/height are
+/// snapped once before the slide starts and never tweened.
 pub struct Animation {
     start: Instant,
     pub x: f32,
@@ -28,11 +23,8 @@ pub struct Animation {
 }
 
 impl Animation {
-    /// Starts a new slide toward `to_y`. `from_y` is normally the window's
-    /// settled position, but can just as well be another animation's
-    /// current (in-flight) position - reversing out of a not-yet-finished
-    /// slide this way is what keeps a rapid double-press of the toggle
-    /// keybind from glitching.
+    /// Starts a new slide toward `to_y`. `from_y` can be another animation's
+    /// in-flight position, to reverse smoothly out of it.
     pub fn new(x: f32, from_y: f32, to_y: f32) -> Self {
         Self {
             start: Instant::now(),
@@ -57,12 +49,8 @@ impl Animation {
     }
 }
 
-/// The primary monitor's bounds, in logical coordinates. `display_info`
-/// reports physical pixels; `iced::window`'s `move_to`/`resize` both operate
-/// in logical coordinates, so this divides through by `scale_factor` up
-/// front rather than leaving that conversion to every caller. Returns
-/// `None` if display enumeration fails outright (e.g. a headless
-/// environment) - callers skip resizing/positioning rather than panicking.
+/// The primary monitor's bounds, converted from physical to logical
+/// coordinates. `None` if display enumeration fails (e.g. headless).
 pub fn primary_monitor_bounds() -> Option<Rectangle> {
     let displays = DisplayInfo::all().ok()?;
     let display = displays

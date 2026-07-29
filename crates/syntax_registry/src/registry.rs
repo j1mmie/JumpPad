@@ -22,30 +22,20 @@ pub enum PollResult {
 }
 
 /// Loads, caches, and reference-counts tree-sitter WASM grammars, keyed by
-/// grammar name (the `<name>.wasm` file) rather than by file extension -
-/// several extensions (`yaml`/`yml`) can map to the one grammar and must
-/// share a single loaded instance. Deliberately has no `egui` dependency so
-/// a future, different `TextEditorWidget` implementation could reuse it.
+/// grammar name rather than file extension - several extensions
+/// (`yaml`/`yml`) can map to the one grammar and share a loaded instance.
 pub struct SyntaxRegistry {
     engine: wasmtime::Engine,
     search_dirs: Vec<PathBuf>,
     extension_to_grammar: HashMap<String, String>,
-    // Called (on a background thread) whenever any grammar load - top-level
-    // or one loaded internally as another grammar's injection target -
-    // resolves. A single shared callback rather than one per `acquire` call
-    // is enough: there's only one UI to wake up, regardless of which
-    // grammar just became ready.
+    // Called whenever any grammar load resolves - one shared callback is
+    // enough since there's only one UI to wake up.
     on_ready: Box<dyn Fn() + Send + Sync>,
     state: Mutex<HashMap<String, (Entry, usize)>>,
-    // Serializes the actual wasmtime compilation step (`loader::load`)
-    // across all background loader threads. Multiple grammars can be
-    // *requested* concurrently (dedup/refcounting in `state` still happens
-    // independently per grammar), but letting more than one thread compile
-    // a different wasm module at the same time through the same shared
-    // `wasmtime::Engine` was observed to hang indefinitely in practice
-    // (reproduced directly: 4 concurrent first-time `acquire` calls with no
-    // injection queries involved at all). One grammar compiles at a time;
-    // this only serializes the one-time load, not repeated highlighting.
+    // Serializes the wasmtime compile step across loader threads - compiling
+    // more than one wasm module at a time through the same shared `Engine`
+    // was observed to hang indefinitely. Grammars can still be requested
+    // concurrently; only the compile itself is serialized.
     compile_lock: Mutex<()>,
 }
 
@@ -65,11 +55,9 @@ impl SyntaxRegistry {
         })
     }
 
-    /// Registers interest in the grammar configured for `extension` (see
-    /// `xizor_config`'s `syntaxes` table). If `extension` has no configured
-    /// grammar, the returned `Handle` just reports `Unavailable` forever -
-    /// no search or thread spawn happens for it. Drop the `Handle` (e.g. by
-    /// dropping the owning widget) to release this reservation.
+    /// Registers interest in the grammar configured for `extension`. If none
+    /// is configured, the returned `Handle` just reports `Unavailable`
+    /// forever. Drop the `Handle` to release the reservation.
     pub fn acquire(self: &Arc<Self>, extension: &str) -> Handle {
         let Some(grammar) = self.extension_to_grammar.get(extension).cloned() else {
             return Handle {
@@ -80,12 +68,9 @@ impl SyntaxRegistry {
         self.acquire_grammar(&grammar)
     }
 
-    /// Core acquire logic, keyed directly by grammar name rather than file
-    /// extension. Used by `acquire` (after resolving an extension via
-    /// config) and internally by `load_injections` - an injection target
-    /// named in a query (e.g. `"yaml"`) is already a resolved grammar name,
-    /// not a file extension, and must bypass `extension_to_grammar` (which
-    /// only coincidentally has matching entries for some grammar names).
+    /// Core acquire logic, keyed directly by grammar name - used by
+    /// `acquire` and by `load_injections` (an injection target is already a
+    /// resolved grammar name, not a file extension).
     fn acquire_grammar(self: &Arc<Self>, grammar_name: &str) -> Handle {
         let mut state = self.state.lock().unwrap();
         match state.get_mut(grammar_name) {
@@ -117,8 +102,6 @@ impl SyntaxRegistry {
         let result = loader::find_wasm(&self.search_dirs, grammar_name)
             .ok_or_else(|| "no matching .wasm file found".to_string())
             .and_then(|path| {
-                // See `compile_lock`'s doc comment: only one thread may be
-                // inside wasmtime compilation at a time, whole-registry-wide.
                 let _compile_guard = self.compile_lock.lock().unwrap();
                 loader::load(&self.engine, &path, grammar_name)
             });
@@ -152,11 +135,9 @@ impl SyntaxRegistry {
     }
 
     /// Finds and compiles `<grammar_name>.injections.scm` if present, and
-    /// eagerly acquires every *statically* named injection target it
-    /// declares (`(#set! injection.language "yaml")`). Targets whose
-    /// language name is only known dynamically (read from a capture at
-    /// match time, e.g. a fenced code block's info string) are skipped
-    /// entirely - not supported this slice.
+    /// eagerly acquires every *statically* named injection target
+    /// (`(#set! injection.language "yaml")`). Dynamically-named targets
+    /// (read from a capture at match time) aren't supported yet.
     fn load_injections(
         self: &Arc<Self>,
         grammar_name: &str,
@@ -207,13 +188,10 @@ impl SyntaxRegistry {
     }
 
     fn release(&self, grammar_name: &str) {
-        // Evicting a grammar with injected sub-grammars drops its `Handle`s
-        // for them, which calls back into `release` for those - so the
-        // removed entry must be dropped *after* the lock guard below is
-        // released, not while still holding it. `std::sync::Mutex` isn't
-        // reentrant: dropping it while still locked would self-deadlock
-        // this thread forever the moment any grammar with injections is
-        // actually evicted (reproduced directly while building this).
+        // Evicting a grammar with injected sub-grammars drops their
+        // `Handle`s, which calls back into `release` - so `removed` must be
+        // dropped after the lock guard, not while still holding it, or this
+        // self-deadlocks (`Mutex` isn't reentrant).
         let removed = {
             let mut state = self.state.lock().unwrap();
             let Some((_, refcount)) = state.get_mut(grammar_name) else {
@@ -232,11 +210,8 @@ impl SyntaxRegistry {
     }
 }
 
-/// RAII reservation on a grammar. Dropping it releases the reservation,
-/// unloading the grammar once the last `Handle` for it is gone. Holds
-/// `None` if the extension it was acquired for has no configured grammar
-/// at all - `poll` then just reports `Unavailable` with no registry
-/// bookkeeping involved.
+/// RAII reservation on a grammar - dropping it releases the reservation,
+/// unloading the grammar once the last `Handle` for it is gone.
 pub struct Handle {
     registry: Arc<SyntaxRegistry>,
     grammar: Option<String>,

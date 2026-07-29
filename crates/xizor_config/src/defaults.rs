@@ -2,10 +2,7 @@ use std::collections::HashMap;
 
 use crate::{AlphaConfig, Config, SyntaxesConfig, VisorConfig};
 
-/// Built-in defaults, written out as the config file on first run. Covers
-/// the grammars xizor ships `.wasm` builds for out of the box - anything
-/// else the user adds a grammar for just needs a new entry here or in
-/// their own edited config file.
+/// Built-in defaults, written out as the config file on first run.
 pub(crate) fn config() -> Config {
     let entries: &[(&str, &[&str])] = &[
         ("json", &["json"]),

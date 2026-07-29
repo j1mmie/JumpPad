@@ -22,9 +22,8 @@ pub trait TextEditorWidget {
     fn set_text(&mut self, text: &str);
 
     /// Advances any in-progress syntax-highlighting grammar load one step.
-    /// The app shell calls this periodically (see `xizor`'s
-    /// highlighting-poll subscription) since, unlike egui's per-frame
-    /// `ui()` call, iced only re-runs app code in response to a message.
+    /// The app shell calls this periodically, since iced only re-runs app
+    /// code in response to a message.
     fn poll_highlighting(&mut self);
 
     /// The cursor's current (line, column) - saved by the app shell when a
@@ -41,31 +40,20 @@ pub trait TextEditorWidget {
     fn has_pending_highlighting(&self) -> bool;
 }
 
-/// The message type produced by a `TextEditorWidget`'s view. Concrete (not
-/// generic per-backend) for the same reason `TextEditorWidget::view` used to
-/// take a concrete `&mut egui::Ui`: there's exactly one editor implementation
-/// live at a time, so a shared type is simpler than plumbing a generic
-/// `Message` parameter through every widget implementation and the app
-/// shell's own `Message` enum.
+/// The message type produced by a `TextEditorWidget`'s view. Concrete, not
+/// generic per-backend, since there's exactly one editor implementation live at a time.
 #[derive(Debug, Clone)]
 pub enum EditorMessage {
     Action(text_editor::Action),
     /// Restore the most recent entry from this editor's own undo history -
-    /// see `iced_text_editor`'s `History`. Not a `text_editor::Action`
-    /// because `iced::widget::text_editor::Content` (as of iced 0.14) has no
-    /// undo/redo of its own to delegate to.
+    /// not a `text_editor::Action` since `text_editor::Content` has no undo/redo of its own.
     Undo,
     /// Mirror of `Undo`, restoring the most recently undone entry.
     Redo,
 }
 
 /// Constructs a boxed editor widget seeded with the given initial text and,
-/// if known, the file extension it was opened from (no leading dot) -
-/// implementations that support syntax highlighting use this to look up a
-/// grammar.
-///
-/// A boxed closure (rather than a plain `fn` pointer) so the app shell can
-/// build one factory that captures shared state (e.g. a syntax-highlighting
-/// registry) once, without the app shell needing to know the concrete
-/// widget type.
+/// if known, the file extension it was opened from (no leading dot). A
+/// boxed closure so the app shell can capture shared state (e.g. a syntax
+/// registry) once, without knowing the concrete widget type.
 pub type EditorFactory = Box<dyn Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget>>;

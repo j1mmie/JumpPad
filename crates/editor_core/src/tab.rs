@@ -28,16 +28,11 @@ pub struct Tab {
     pub document: Document,
     pub dirty: bool,
     pub editor: Box<dyn TextEditorWidget>,
-    /// Where the cursor was the last time this tab was the active one -
-    /// saved on deselect, restored on reselect (see `XizorApp`'s tab
-    /// switching). Starts at the document start, same as a freshly created
-    /// editor's actual cursor position.
+    /// Where the cursor was the last time this tab was active - saved on
+    /// deselect, restored on reselect.
     pub last_cursor: (usize, usize),
-    /// Bumped every time an edit changes the text. Compared against
-    /// `flushed_generation` to tell whether this tab's on-disk draft file
-    /// (see `xizor`'s `session` module) is stale - the single predicate for
-    /// "does this tab need a draft write" used by both the periodic
-    /// autosave timer and the exit-time flush.
+    /// Bumped on every edit; compared against `flushed_generation` to tell
+    /// whether this tab's draft file is stale.
     pub draft_generation: u64,
     /// The `draft_generation` value that was last successfully written to
     /// this tab's draft file.
@@ -71,13 +66,8 @@ impl Tab {
         }
     }
 
-    /// Builds a tab from a restored session entry (see `xizor`'s `session`
-    /// module): either a draft file's content (dirty tabs, with or without
-    /// a real path) or a fresh read of the real file (clean, file-backed
-    /// tabs) - the caller decides which `content` to pass in and what
-    /// `dirty` should be; this constructor just assembles the `Tab`.
-    /// `flushed_generation` starts equal to `draft_generation` (both `0`)
-    /// since `content` is, by construction, already what's on disk.
+    /// Builds a tab from a restored session entry - the caller decides
+    /// what `content` and `dirty` should be; this just assembles the `Tab`.
     pub fn restored(
         id: u64,
         path: Option<PathBuf>,
