@@ -189,6 +189,79 @@ focus/cursor by hand, the caret would simply be invisible and typing
 would resume from the document start instead of wherever the user left
 off.
 
+## Transparent windows: why nothing repaints the background
+
+With `[alpha] background < 1.0`, `XizorApp::style` hands iced a
+`background_color` whose alpha is the configured value. The compositor
+writes that straight into the framebuffer (`BlendMode::Source`, so it
+*replaces* rather than blends), then every widget quad blends **on top**
+of it. Two consequences that are easy to trip over:
+
+- **Every extra layer compounds opacity.** A region painted at the same
+  alpha `a` as the window background ends up at `2a - a²`, not `a`. At
+  `a = 0.7` that's 0.91 - the window is far more solid than configured,
+  and any region *not* painted (the "+" button paints no background at
+  all) stays at 0.7 and reads as a conspicuously lighter block.
+- **Gotcha - hairline seams.** `iced_tiny_skia` fills quads with
+  `anti_alias: true`, and widget edges land mid-pixel constantly (iced's
+  default line height is 1.3x the font size, text metrics decide chip
+  widths, and a fractional DPI scale factor moves everything again). A
+  partially covered edge pixel blends both sides at partial coverage, so
+  where two quads *abut*, that pixel ends up less opaque than either
+  neighbour - a faint 1px border along the seam. It's invisible at
+  `a = 1.0` (the base layer is already opaque) which is why this only
+  shows up with transparency on.
+
+So the rule: **never paint a quad that merely reproduces the window
+background.** The editor (`editor_style`, `iced_text_editor`) and the
+active tab (`tab_frame_style`) both deliberately paint *nothing* when
+translucent - iced's `text_editor` and window backgrounds are both
+`palette.background.base.color`, so matching them seamlessly means adding
+no layer, not adding a matching one. Re-adding a background there as a
+"fix" is what puts the seams back.
+
+Shade differences that *are* wanted (inactive tabs, the row past the last
+tab) go through `darkening_wash`, a thin black overlay sized to the
+desired brightness drop, rather than a pre-darkened copy of the
+background. It adds the least opacity that still produces the shade, and
+because it overlays bare background instead of abutting another quad its
+edges ramp smoothly instead of dipping. Darkening a translucent surface
+inherently costs opacity, though, so a near-black theme can't reach the
+full step without going solid - `WASH_ALPHA_CEILING` caps it and those
+themes get a shallower step instead.
+
+The other half of the fix is keeping quad edges *on* the pixel grid, so
+there's no partial coverage to blend in the first place. The tab bar's
+text carries absolute line heights (`TAB_TITLE_LINE_HEIGHT`,
+`TAB_CLOSE_LINE_HEIGHT`) instead of iced's default
+`LineHeight::Relative(1.3)`, which would make the strip 6 + 20.8 + 6 =
+32.8px tall and put its bottom edge mid-pixel. Verified directly against
+tiny-skia 0.11.4: two abutting quads at a 32.8 boundary leave the shared
+row at alpha 225/255 against an interior of 233; at 33.0 the row reads a
+flat 233. Two limits worth knowing:
+
+- This only holds at integer scale factors. Nothing chosen in logical
+  pixels survives a 1.25x or 1.5x display.
+- It only fixes *horizontal* edges. Chip widths come from text
+  measurement, so the left/right edges of a wash stay fractional; there's
+  no app-level way to round them.
+
+**Gotcha - `snap` does nothing on the default binary.** iced has a
+pixel-snapping mechanism for exactly this: `renderer::Quad::snap`, exposed
+as `container::Style::snap` / `button::Style::snap` and defaulted from
+iced's `crisp` Cargo feature. `iced_tiny_skia` never reads the field -
+zero occurrences in the whole backend - so setting it changes nothing in
+`xizor` and only takes effect in `xizor-gpu` (`iced_wgpu` passes it
+through to its quad shader). Don't reach for it expecting a fix on the
+default build, and weigh the two binaries rendering differently before
+turning it on for the wgpu one.
+
+Disabling the antialiasing itself is not reachable either: `anti_alias:
+true` is hardcoded in `iced_tiny_skia::engine`'s quad fill, so it would
+take a `[patch.crates-io]` fork - and it's global, meaning every rounded
+corner and stroked border in the app (the modal, its focused button, the
+scrollbar) would go jagged to fix a seam the tab bar no longer has.
+
 ## Config (`xizor_config`)
 
 `config.toml` is looked for next to the running executable first, then
