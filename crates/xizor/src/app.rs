@@ -16,13 +16,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::session;
 use crate::visor::{self, Animation};
 
-/// How often the visor's slide animation advances a frame while in
-/// progress - see `subscription()`'s gating and `Message::AnimationTick`.
-const ANIMATION_TICK: Duration = Duration::from_millis(16);
-
-/// How often the autosave timer ticks while at least one tab has unflushed
-/// dirty content - see `subscription()`'s gating (mirrors the existing
-/// `PollHighlighting` pattern) and `Message::AutosaveTick`.
+const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How often `Message::HeightCollapseTestTick` advances the wait after
@@ -42,41 +36,15 @@ pub struct XizorApp {
     error: Option<String>,
     editor_factory: EditorFactory,
     theme: Theme,
-    /// `xizor_config::AlphaConfig::background`, clamped to `0.0..=1.0` -
-    /// scales the application-wide window background color returned by
-    /// `style()`. This is the color the renderer clears the whole window
-    /// surface to *before* drawing any widget - leaving it opaque would
-    /// defeat `lib.rs`'s OS-level `.transparent(true)` window request no
-    /// matter how transparent individual widgets (e.g. the text editor's
-    /// own background - see `iced_text_editor::editor_style`) are drawn on
-    /// top of it.
     background_alpha: f32,
-    /// `Some((original_size, waited_frames))` while
-    /// `Message::TriggerHeightCollapseTest`'s wait-with-height-collapsed
-    /// period is in progress, `None` otherwise. `subscription()` only runs
-    /// `HeightCollapseTestTick`'s timer while this is `Some`.
     height_collapse_test: Option<(iced::Size, u8)>,
-    /// Flips every time the active tab changes. See `theme()` for what
-    /// this actually does - it's not a display preference.
-    redraw_nudge: bool,
-    /// Where the session manifest and draft files live - resolved once at
-    /// startup (see `session::candidate_dirs()`) and reused for every
-    /// later write, never re-derived mid-session.
+    /// Flips every time the active tab changes.
+    redraw_nudge_hack: bool,
     session_dir: PathBuf,
-    /// Tab ids waiting on a save (triggered by choosing "Save" in the
-    /// unsaved-changes prompt - see `request_close`) before they can be
-    /// closed. Consumed in `Message::FileSaved`'s success branch; cleared
-    /// without closing on a failed/cancelled save so a later, unrelated
-    /// save of the same tab doesn't unexpectedly close it.
+    /// List of tab ids waiting on a save
     pending_close_after_save: Vec<u64>,
-    /// The app's own (only) window - `None` until the startup
-    /// `iced::window::latest()` task resolves in `Message::WindowReady`.
-    /// Needed to target every `move_to`/`resize` call the visor makes.
     window: Option<iced::window::Id>,
-    /// The registered global toggle hotkey, or `None` if registration
-    /// failed (e.g. the combo is already claimed by another application) -
-    /// see `hotkey::Hotkey::register`. The visor keybind just silently does
-    /// nothing in that case rather than the app failing to start.
+    /// The registered global toggle hotkey
     hotkey: Option<Hotkey>,
     /// Whether the visor is (or is animating toward being) shown.
     visor_visible: bool,
@@ -84,43 +52,13 @@ pub struct XizorApp {
     /// `Message::AnimationTick` and `subscription()`'s gating of the
     /// animation timer on this.
     animation: Option<Animation>,
-    /// Mirrors `xizor_config::VisorConfig::enabled`. When `false`, the app
-    /// behaves as an ordinary window: `snap_to_monitor`/`toggle_visor` never
-    /// reposition or resize it (decorations and window level are set once,
-    /// up front, in `lib.rs`), and no global hotkey is registered at all -
-    /// see `new()` - so there's nothing for `HotkeyEvent` to match against
-    /// and the toggle keypress is silently ignored.
     visor_enabled: bool,
-    /// The id of whichever tab was active immediately before the current
-    /// one, for `Message::SelectPreviousActiveTab` (Ctrl+Tab) - updated in
-    /// `switch_active`. By id rather than index since the tab list can
-    /// change shape (a close shifts every later index) without this needing
-    /// to track that; a since-closed tab's id just fails the lookup and the
-    /// shortcut is a no-op that turn, see `update()`.
-    previous_active: Option<u64>,
-    /// This app's keybind overrides, resolved from `keybinds.toml` once at
-    /// startup (see `new()`/`build_app_overrides`) - checked by
-    /// `handle_hotkey` ahead of its own hardcoded shortcuts. `Arc` so
-    /// `subscription()` can cheaply clone it into the `keyboard::listen()`
-    /// closure on every rebuild without cloning the map itself.
+    previous_active_id: Option<u64>,
     keybind_overrides: Arc<HashMap<(keyboard::Modifiers, key::Code), Message>>,
-    /// The unsaved-changes prompt currently being shown, if any - a custom
-    /// in-app modal (see `view()`), not a native OS dialog, so it can be
-    /// driven from the keyboard and there's a real place to enforce "only
-    /// one at a time" (see `close_queue`) rather than relying on however
-    /// modal a native dialog happens to be.
+    /// The unsaved-changes prompt currently being shown, if any
     pending_close: Option<PendingClose>,
-    /// Tab ids that asked to close while a prompt was already showing -
-    /// queued (not dropped, and not shown concurrently) so closing several
-    /// dirty tabs in a row surfaces one prompt after another instead of
-    /// only the first request "winning". By id, not index, matching this
-    /// file's existing convention for anything that survives while the tab
-    /// list might reshape underneath it (e.g. `pending_close_after_save`).
+    /// Tab ids that asked to close while a prompt was already showing
     close_queue: Vec<u64>,
-    /// Set while an Open-File or dialog-backed Save is in flight, so a
-    /// second `Message::OpenFile`/dialog-triggering save can't spawn another
-    /// concurrent file-picker task - see `Message::OpenFile` and
-    /// `save_tab()`.
     file_dialog_active: bool,
 }
 
@@ -148,8 +86,6 @@ pub enum Message {
     DismissError,
     Editor(usize, EditorMessage),
     PollHighlighting,
-    /// Fires on a timer while some tab has draft content newer than what's
-    /// on disk (see `subscription()`); writes each stale tab's draft file.
     AutosaveTick,
     /// A background draft write for tab `.0` finished, bringing its draft
     /// file up to date with generation `.1`.
@@ -319,7 +255,7 @@ impl XizorApp {
             theme: resolve_theme(&config.theme),
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
             height_collapse_test: None,
-            redraw_nudge: false,
+            redraw_nudge_hack: false,
             session_dir,
             pending_close_after_save: Vec::new(),
             window: None,
@@ -327,7 +263,7 @@ impl XizorApp {
             visor_visible: false,
             animation: None,
             visor_enabled,
-            previous_active: None,
+            previous_active_id: None,
             keybind_overrides,
             pending_close: None,
             close_queue: Vec::new(),
@@ -515,30 +451,16 @@ impl XizorApp {
         task
     }
 
-    /// Switches the active tab, carrying each tab's cursor position across
-    /// the switch: the previously active tab's cursor is saved, and the
-    /// newly active tab's remembered cursor (if any - a never-visited tab
-    /// just has the document-start default) is restored. Also re-focuses
-    /// the editor, since a freshly switched-to tab's widget state starts
-    /// unfocused (see the `keyed_column` comment in `view`) - without it,
-    /// the caret would just be invisible until the user clicked.
-    ///
-    /// Focusing alone was tried as a fix for the tiny-skia stale-content
-    /// bug (AGENTS.md) on the theory that it reproduces what a real click
-    /// does - confirmed insufficient in practice, content still went
-    /// stale. `redraw_nudge` (flipped here, consumed by `theme()`) is the
-    /// actual fix for that; it's independent of the cursor/focus handling
-    /// above and would still be needed even if this method didn't exist.
     fn switch_active(&mut self, index: usize) -> Task<Message> {
         if index >= self.tabs.len() || index == self.active {
             return Task::none();
         }
         if let Some(previous) = self.tabs.get_mut(self.active) {
             previous.last_cursor = previous.editor.cursor_position();
-            self.previous_active = Some(previous.id);
+            self.previous_active_id = Some(previous.id);
         }
         self.active = index;
-        self.redraw_nudge = !self.redraw_nudge;
+        self.redraw_nudge_hack = !self.redraw_nudge_hack;
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
             tab.editor.move_cursor_to(line, column);
@@ -558,13 +480,8 @@ impl XizorApp {
         self.switch_active(next)
     }
 
-    /// Rewrites the session manifest (tab existence/path/dirty/active
-    /// index) from current state, pruning any now-orphaned draft files.
-    /// Deliberately synchronous (`std::fs`, not `tokio::fs`) - it's a small
-    /// TOML file plus a `read_dir` scan, cheap enough to call straight from
-    /// `update()` on every structural change. Draft *content* (potentially
-    /// large document text) goes through the async path instead - see
-    /// `Message::AutosaveTick`.
+    /// Rewrites the session manifest from current state, pruning any 
+    /// orphaned draft files. Synchronous since the file is small
     fn sync_session_metadata(&self) {
         let manifest = session::build_manifest(&self.tabs, self.active);
         session::write_manifest_sync(&self.session_dir, &manifest);
@@ -578,17 +495,8 @@ impl XizorApp {
         self.save_tab(id, force_dialog)
     }
 
-    /// Saves the tab with the given id, whether or not it's the active tab -
-    /// needed so `request_close`/`Message::CloseConfirmed` can save a
-    /// background tab the user is closing without first switching to it.
-    ///
-    /// Guarded the same way `Message::OpenFile` is guarded (see
-    /// `file_dialog_active`): a save with no existing path yet, or an
-    /// explicit Save As, shows a file-picker dialog exactly like Open File
-    /// does, so it needs the same "don't spawn a second one while one's
-    /// already in flight" protection. A plain save of an already-saved tab
-    /// never shows a dialog at all and is left unguarded - it can't be the
-    /// second dialog in the scenario this guards against.
+    /// Saves the tab with the given id. Shows a file dialog if the tab has no
+    /// associated file. Otherwise, saves to the associated file
     fn save_tab(&mut self, id: u64, force_dialog: bool) -> Task<Message> {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
             return Task::none();
@@ -666,9 +574,8 @@ impl XizorApp {
                 Task::none()
             }
             Message::FileSaved(id, Err(SaveError::DialogClosed)) => {
-                // The user backed out of the save (e.g. the save-as dialog
-                // for an untitled tab) - leave the tab open rather than
-                // closing it unsaved.
+                // The user canceled the save dialog - leave the tab open
+                // rather than closing it unsaved.
                 self.file_dialog_active = false;
                 self.pending_close_after_save.retain(|&pending_id| pending_id != id);
                 Task::none()
@@ -691,22 +598,16 @@ impl XizorApp {
             Message::CloseActiveTab => self.request_close(self.active),
             Message::SelectNextTab => self.cycle_tab(1),
             Message::SelectPreviousTab => self.cycle_tab(-1),
-            Message::SelectPreviousActiveTab => match self.previous_active {
+            Message::SelectPreviousActiveTab => match self.previous_active_id {
                 Some(id) => match self.tabs.iter().position(|tab| tab.id == id) {
                     Some(index) => self.switch_active(index),
-                    // That tab was closed since - nothing sensible to swap
-                    // to, so this is a silent no-op rather than falling
-                    // back to some other tab the user didn't ask for.
+                    // That tab was closed since - do nothing
                     None => Task::none(),
                 },
                 None => Task::none(),
             },
             Message::KeyPressed(key, modifiers, physical_key) => {
-                // While the unsaved-changes modal is up, it owns every
-                // keystroke - checked before `handle_hotkey` at all, so
-                // none of the app's normal shortcuts (new tab, save, tab
-                // switching, ...) can fire behind the user's back until
-                // they've answered the prompt.
+                // Unsaved-changes modal intercepts all keystrokes while open
                 if let Some(pending) = &mut self.pending_close {
                     match key {
                         keyboard::Key::Named(key::Named::ArrowLeft) => {
@@ -1158,7 +1059,7 @@ impl XizorApp {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.redraw_nudge {
+        if self.redraw_nudge_hack {
             nudge_background(&self.theme)
         } else {
             self.theme.clone()
@@ -1207,7 +1108,7 @@ impl XizorApp {
         // "no idle cost while settled" shape as the two timers below.
         if self.animation.is_some() {
             subscriptions
-                .push(iced::time::every(ANIMATION_TICK).map(|_| Message::AnimationTick));
+                .push(iced::time::every(VISOR_ANIM_TICK).map(|_| Message::AnimationTick));
         }
 
         // Only ticks while `Message::TriggerHeightCollapseTest`'s wait
@@ -1768,9 +1669,9 @@ mod tests {
             error: None,
             editor_factory: factory,
             theme: Theme::ALL[0].clone(),
-            redraw_nudge: false,
             background_alpha: 1.0,
             height_collapse_test: None,
+            redraw_nudge_hack: false,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
             window: None,
@@ -1778,7 +1679,7 @@ mod tests {
             visor_visible: false,
             animation: None,
             visor_enabled: false,
-            previous_active: None,
+            previous_active_id: None,
             keybind_overrides: Arc::new(HashMap::new()),
             pending_close: None,
             close_queue: Vec::new(),
@@ -1790,9 +1691,9 @@ mod tests {
     fn switch_active_records_previous_tab_id() {
         let mut app = test_app(3);
         let _ = app.switch_active(1);
-        assert_eq!(app.previous_active, Some(0));
+        assert_eq!(app.previous_active_id, Some(0));
         let _ = app.switch_active(2);
-        assert_eq!(app.previous_active, Some(1));
+        assert_eq!(app.previous_active_id, Some(1));
     }
 
     #[test]
@@ -1809,7 +1710,7 @@ mod tests {
     #[test]
     fn select_previous_active_tab_is_noop_for_a_stale_id() {
         let mut app = test_app(2);
-        app.previous_active = Some(999); // no tab has this id - e.g. since closed
+        app.previous_active_id = Some(999); // no tab has this id - e.g. since closed
         let _ = app.update(Message::SelectPreviousActiveTab);
         assert_eq!(app.active, 0);
     }
