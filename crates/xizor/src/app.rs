@@ -793,9 +793,8 @@ impl XizorApp {
 
             // The frame is the only thing that paints this tab's background -
             // title and close stay fully transparent so there's one seamless surface.
-            let background_alpha = self.background_alpha;
             let frame = container(row![title, close].spacing(0).align_y(Center))
-                .style(move |theme| tab_frame_style(theme, is_active, background_alpha));
+                .style(move |theme| tab_frame_style(theme, is_active));
 
             // Middle-click closes it too, same as the "x".
             mouse_area(frame)
@@ -812,17 +811,15 @@ impl XizorApp {
             .spacing(0)
             .align_y(Center);
 
-        // No shared background container behind the row - with the window
-        // translucent, a second fill layered under each chip's own would
-        // double-blend and look different from the editor's single-layer
-        // background. `filler` fills the leftover space past the last chip
-        // the same single-layered way, matching `title`'s padding so its
-        // height lines up without relying on flex cross-axis sizing.
-        let background_alpha = self.background_alpha;
+        // No shared background container behind the row - on a transparent
+        // window every extra layer compounds opacity, so the row is painted
+        // once, in pieces. `filler` covers the leftover space past the last
+        // chip, matching `title`'s padding so its height lines up without
+        // relying on flex cross-axis sizing.
         let filler = container(text(""))
             .padding([6, 10])
             .width(Fill)
-            .style(move |theme| tab_bar_style(theme, background_alpha));
+            .style(tab_bar_style);
 
         let tab_bar: Element<'_, Message> = row![
             scrollable(tabs_row).direction(scrollable::Direction::Horizontal(
@@ -1085,41 +1082,51 @@ fn handle_hotkey(
     }
 }
 
-/// Moves each RGB channel toward black by a fixed absolute amount, clamped
-/// at 0 - a percentage step is too small to see against very dark themes.
-fn darken(color: Color, amount: f32) -> Color {
-    Color {
-        r: (color.r - amount).max(0.0),
-        g: (color.g - amount).max(0.0),
-        b: (color.b - amount).max(0.0),
-        a: color.a,
-    }
-}
-
+/// How far toward black to shade a tab-bar surface, as an absolute drop in
+/// brightness rather than a percentage - a percentage step is too small to see
+/// against very dark themes.
 const INACTIVE_TAB_DARKEN: f32 = 0.035; // ~9/255 per channel
 const TAB_ROW_DARKEN: f32 = 0.09; // ~23/255 per channel
 
-/// The (background, text) pair for a tab chip - shared by the title button
-/// and the close button so they always agree exactly, rather than each
-/// computing it separately and risking drift.
-fn tab_chip_colors(theme: &Theme, is_active: bool) -> (Color, Color) {
-    let palette = theme.extended_palette();
-    let background = palette.background.base.color;
-    if is_active {
-        (background, palette.background.base.text)
+/// How opaque a `darkening_wash` is ever allowed to get. Themes whose
+/// background is near-black hit this before reaching the full step above -
+/// darkening a transparent window costs opacity, and a solid tab row is a
+/// worse trade than a shallower one.
+const WASH_ALPHA_CEILING: f32 = 0.8;
+
+/// A translucent black overlay that darkens whatever it covers by roughly
+/// `amount`, rather than a pre-darkened copy of the background - on a
+/// transparent window a full-alpha copy stacks with the window background and
+/// leaves a visible opacity step (see AGENTS.md's hairline-seam gotcha).
+/// Solid, it matches the subtractive darkening it replaced on average, shading
+/// channels proportionally instead of uniformly.
+fn darkening_wash(theme: &Theme, amount: f32) -> Color {
+    let base = theme.extended_palette().background.base.color;
+    let luminance = (base.r + base.g + base.b) / 3.0;
+    // A background not much brighter than `amount` can't give up that much
+    // light without a solid wash, which would turn the tab row into an opaque
+    // bar on a transparent window. Those themes get a shallower step instead.
+    let alpha = if luminance > 0.0 {
+        (amount / luminance).clamp(0.0, WASH_ALPHA_CEILING)
     } else {
-        (
-            darken(background, INACTIVE_TAB_DARKEN),
-            palette.background.base.text.scale_alpha(0.7),
-        )
-    }
+        0.0
+    };
+    Color { a: alpha, ..Color::BLACK }
+}
+
+/// A tab's text color - shared by the title button and the close button so
+/// they always agree exactly, rather than each computing it separately and
+/// risking drift.
+fn tab_text_color(theme: &Theme, is_active: bool) -> Color {
+    let text = theme.extended_palette().background.base.text;
+    if is_active { text } else { text.scale_alpha(0.7) }
 }
 
 /// A tab's title button: always transparent - the enclosing `tab_frame_style`
 /// container is what paints the tab's background, so title and close never
 /// have to agree on a box size to look like one continuous surface.
 fn tab_title_style(theme: &Theme, _status: button::Status, is_active: bool) -> button::Style {
-    let (_, text_color) = tab_chip_colors(theme, is_active);
+    let text_color = tab_text_color(theme, is_active);
     button::Style {
         background: None,
         text_color,
@@ -1131,7 +1138,7 @@ fn tab_title_style(theme: &Theme, _status: button::Status, is_active: bool) -> b
 /// `tab_title_style`), with a faint highlight only on hover/press as the
 /// only background it ever paints itself.
 fn tab_close_style(theme: &Theme, status: button::Status, is_active: bool) -> button::Style {
-    let (_, text_color) = tab_chip_colors(theme, is_active);
+    let text_color = tab_text_color(theme, is_active);
     let background = match status {
         button::Status::Hovered | button::Status::Pressed => {
             Some(text_color.scale_alpha(0.15).into())
@@ -1146,11 +1153,16 @@ fn tab_close_style(theme: &Theme, status: button::Status, is_active: bool) -> bu
 }
 
 /// The frame behind a tab's title+close row - the only thing that paints a
-/// tab's background. Active tab matches the editor's background for a
-/// seamless look; inactive tabs get a darker background instead of a border.
-fn tab_frame_style(theme: &Theme, is_active: bool, background_alpha: f32) -> container::Style {
-    let (background, _) = tab_chip_colors(theme, is_active);
-    container::Style::default().background(apply_background_alpha(background, background_alpha))
+/// tab's background. The active tab paints nothing: the window background
+/// already *is* the editor's background, so matching it seamlessly means
+/// adding no layer at all. Inactive tabs get a darkening wash instead of a
+/// border.
+fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
+    if is_active {
+        container::Style::default()
+    } else {
+        container::Style::default().background(darkening_wash(theme, INACTIVE_TAB_DARKEN))
+    }
 }
 
 /// The "+" new-tab button: transparent and dim at rest so it doesn't
@@ -1169,20 +1181,10 @@ fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
-/// The tab row's own background - darker than even an inactive tab, so
+/// The tab row's own background - a wash darker than even an inactive tab, so
 /// empty space past the last tab reads as a frame, not a gap.
-fn tab_bar_style(theme: &Theme, background_alpha: f32) -> container::Style {
-    let background = darken(theme.extended_palette().background.base.color, TAB_ROW_DARKEN);
-    container::Style::default().background(apply_background_alpha(background, background_alpha))
-}
-
-/// Scales `color`'s alpha by `background_alpha`, skipping the multiply at `1.0`.
-fn apply_background_alpha(color: Color, background_alpha: f32) -> Color {
-    if background_alpha >= 1.0 {
-        color
-    } else {
-        color.scale_alpha(background_alpha)
-    }
+fn tab_bar_style(theme: &Theme) -> container::Style {
+    container::Style::default().background(darkening_wash(theme, TAB_ROW_DARKEN))
 }
 
 /// One of the unsaved-changes modal's three choices - a colored border marks
@@ -1746,5 +1748,76 @@ mod tests {
         let _ = app.save_active_tab(false);
 
         assert!(app.file_dialog_active);
+    }
+
+    /// Composites `wash` over `base` the way the renderer does, source-over.
+    fn composite(base: Color, wash: Color) -> Color {
+        Color {
+            r: wash.r * wash.a + base.r * (1.0 - wash.a),
+            g: wash.g * wash.a + base.g * (1.0 - wash.a),
+            b: wash.b * wash.a + base.b * (1.0 - wash.a),
+            a: wash.a + base.a * (1.0 - wash.a),
+        }
+    }
+
+    fn luminance(color: Color) -> f32 {
+        (color.r + color.g + color.b) / 3.0
+    }
+
+    #[test]
+    fn darkening_wash_darkens_by_the_requested_amount_on_every_theme_bright_enough_to() {
+        let mut checked = 0;
+        for theme in Theme::ALL {
+            let base = theme.extended_palette().background.base.color;
+            // Near-black themes can't give up this much light without a solid
+            // wash; they're capped by design, not mispredicted.
+            if TAB_ROW_DARKEN / luminance(base) > WASH_ALPHA_CEILING {
+                continue;
+            }
+            let washed = composite(base, darkening_wash(theme, TAB_ROW_DARKEN));
+            let wanted = luminance(base) - TAB_ROW_DARKEN;
+            assert!(
+                (luminance(washed) - wanted).abs() < 0.001,
+                "{theme}: washed to {}, wanted {wanted}",
+                luminance(washed)
+            );
+            checked += 1;
+        }
+        assert!(checked > 0, "no theme was actually checked");
+    }
+
+    #[test]
+    fn darkening_wash_never_goes_solid() {
+        // The whole point: the wash adds a sliver of opacity where painting a
+        // pre-darkened copy of the background would add a full second layer.
+        for theme in Theme::ALL {
+            let wash = darkening_wash(theme, TAB_ROW_DARKEN);
+            assert!(
+                wash.a <= WASH_ALPHA_CEILING,
+                "{theme}: wash alpha {} exceeds the ceiling",
+                wash.a
+            );
+        }
+    }
+
+    #[test]
+    fn darkening_wash_paints_nothing_on_a_background_it_cannot_darken() {
+        let theme = Theme::custom(
+            "black".to_string(),
+            iced::theme::Palette {
+                background: Color::BLACK,
+                ..Theme::Dark.palette()
+            },
+        );
+        assert_eq!(darkening_wash(&theme, TAB_ROW_DARKEN).a, 0.0);
+    }
+
+    #[test]
+    fn the_active_tab_paints_no_background_of_its_own() {
+        // It has to read as one surface with the editor below it, and the
+        // window background already paints that surface.
+        let theme = Theme::Dark;
+        assert!(tab_frame_style(&theme, true).background.is_none());
+        assert!(tab_frame_style(&theme, false).background.is_some());
     }
 }

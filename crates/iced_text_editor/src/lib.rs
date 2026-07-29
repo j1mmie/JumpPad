@@ -11,7 +11,7 @@ use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
 use iced::widget::text_editor;
 use iced::widget::text_editor::{Binding, Content, KeyPress, Motion, Status};
-use iced::{Border, Element, Fill, Font, Theme};
+use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 
 /// A named editor-level action a `keybinds.toml` override can target - a
@@ -465,7 +465,7 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
 
 /// iced's default `text_editor` style draws a border that changes color on
 /// hover/focus - dropped here so there's no color-change effect to notice.
-/// Also scales the background by `background_alpha` and the base text
+/// Also drops its background on a transparent window and scales the base text
 /// color by `foreground_alpha` (both plain parameters, for testability -
 /// syntax-highlighted text instead goes through `color_for`).
 fn editor_style(
@@ -475,10 +475,13 @@ fn editor_style(
     foreground_alpha: f32,
 ) -> text_editor::Style {
     let default = text_editor::default(theme, status);
+    // The window background is already this exact color; repainting it
+    // translucent would just stack a second layer (see AGENTS.md's
+    // hairline-seam gotcha).
     let background = if background_alpha >= 1.0 {
         default.background
     } else {
-        default.background.scale_alpha(background_alpha)
+        Background::Color(Color::TRANSPARENT)
     };
     let value = apply_alpha(default.value, foreground_alpha);
     text_editor::Style {
@@ -636,11 +639,11 @@ mod tests {
     }
 
     #[test]
-    fn editor_style_scales_background_and_value_independently() {
+    fn editor_style_drops_its_background_when_translucent_but_keeps_the_value() {
         let theme = Theme::ALL[0].clone();
         let default = text_editor::default(&theme, text_editor::Status::Active);
         let style = editor_style(&theme, text_editor::Status::Active, 0.5, 1.0);
-        assert_ne!(style.background, default.background);
+        assert_eq!(style.background, Background::Color(Color::TRANSPARENT));
         assert_eq!(style.value, default.value); // foreground untouched
 
         let style = editor_style(&theme, text_editor::Status::Active, 1.0, 0.3);
