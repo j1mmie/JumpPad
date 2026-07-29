@@ -466,8 +466,27 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
         }
     }
 
-    // Tier 3: iced's own stock dispatch.
-    Binding::from_key_press(press)
+    // Tier 3: iced's own stock dispatch - with one correction. Its final
+    // fallback treats any produced `text` as literal character insertion.
+    // On macOS specifically, holding Cmd (unlike Ctrl) doesn't suppress
+    // that text production - `NSEvent.characters` still comes through as
+    // a plain, non-control character - so an unrecognized Cmd+<letter>
+    // (anything not already handled above, or by iced's own Cmd+C/X/V/A)
+    // would otherwise get silently typed into the document *and* mark the
+    // event captured, meaning app-level shortcuts (Cmd+N/O/S/W in
+    // `xizor::app::handle_hotkey`, which run on a separate subscription
+    // that only ever sees *uncaptured* key events) never see it at all.
+    // Discarding exactly that one failure mode - an `Insert` produced while
+    // `command()` is held - leaves the event unhandled instead, so it
+    // correctly falls through as ignored for the app-level layer to pick
+    // up. (On non-mac, `command()` is Ctrl, which already turns the
+    // character into a control code before reaching here - this is a
+    // no-op there, not just a mac-only carve-out via `#[cfg(target_os)]`.)
+    let command_held = press.modifiers.command();
+    match Binding::from_key_press(press) {
+        Some(Binding::Insert(_)) if command_held => None,
+        other => other,
+    }
 }
 
 /// iced's default `text_editor` style draws a border that changes color on
@@ -488,12 +507,21 @@ mod tests {
     use super::*;
 
     fn press(modifiers: keyboard::Modifiers, physical: key::Code, key: keyboard::Key) -> KeyPress {
+        press_with_text(modifiers, physical, key, None)
+    }
+
+    fn press_with_text(
+        modifiers: keyboard::Modifiers,
+        physical: key::Code,
+        key: keyboard::Key,
+        text: Option<&str>,
+    ) -> KeyPress {
         KeyPress {
             key: key.clone(),
             modified_key: key,
             physical_key: key::Physical::Code(physical),
             modifiers,
-            text: None,
+            text: text.map(Into::into),
             status: Status::Focused { is_hovered: false },
         }
     }
@@ -548,6 +576,43 @@ mod tests {
             key_binding(event, &overrides),
             Some(Binding::Custom(EditorMessage::Undo))
         ));
+    }
+
+    #[test]
+    fn command_held_unrecognized_character_does_not_fall_through_to_insert() {
+        // Reproduces the real bug this fix addresses: on macOS, holding Cmd
+        // (unlike Ctrl) doesn't suppress `text` production, so an
+        // unrecognized Cmd+<letter> - like Cmd+N, which this crate has no
+        // binding for - would otherwise hit iced's own default `Insert`
+        // fallback: silently typing the letter *and* capturing the event,
+        // so it never reaches app-level shortcuts (`xizor::app::handle_hotkey`,
+        // a separate subscription that only ever sees *uncaptured* key
+        // events). `Modifiers::CTRL` stands in for the command() modifier
+        // here since `command()` is resolved per-OS at compile time and
+        // these tests run on whichever OS built them - same convention the
+        // other tests in this module already use for Undo/Redo.
+        let overrides = EditorOverrides::new();
+        let event = press_with_text(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyN,
+            keyboard::Key::Character("n".into()),
+            Some("n"),
+        );
+        assert!(key_binding(event, &overrides).is_none());
+    }
+
+    #[test]
+    fn plain_character_without_command_still_inserts_normally() {
+        // Regression guard for the fix above: ordinary typing (no command
+        // modifier held) must still work.
+        let overrides = EditorOverrides::new();
+        let event = press_with_text(
+            keyboard::Modifiers::empty(),
+            key::Code::KeyN,
+            keyboard::Key::Character("n".into()),
+            Some("n"),
+        );
+        assert!(matches!(key_binding(event, &overrides), Some(Binding::Insert('n'))));
     }
 
     #[test]
