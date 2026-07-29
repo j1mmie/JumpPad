@@ -10,7 +10,7 @@ use iced::keyboard::key;
 use iced::widget::{
     button, center, column, container, keyed_column, mouse_area, row, scrollable, stack, text,
 };
-use iced::{Center, Color, Element, Fill, Point, Subscription, Task, Theme, keyboard};
+use iced::{Center, Color, Element, Fill, Pixels, Point, Subscription, Task, Theme, keyboard};
 
 use crate::hotkey::{self, Hotkey};
 use crate::session;
@@ -781,12 +781,12 @@ impl XizorApp {
         let tab_chips = self.tabs.iter().enumerate().map(|(index, tab)| {
             let is_active = index == self.active;
 
-            let title = button(text(tab.title()))
+            let title = button(text(tab.title()).line_height(TAB_TITLE_LINE_HEIGHT))
                 .padding([6, 10])
                 .style(move |theme, status| tab_title_style(theme, status, is_active))
                 .on_press(Message::SelectTab(index));
 
-            let close = button(text("x").size(12))
+            let close = button(text("x").size(12).line_height(TAB_CLOSE_LINE_HEIGHT))
                 .padding([6, 8])
                 .style(move |theme, status| tab_close_style(theme, status, is_active))
                 .on_press(Message::CloseTab(index));
@@ -802,7 +802,7 @@ impl XizorApp {
                 .into()
         });
 
-        let new_tab_button = button(text("+"))
+        let new_tab_button = button(text("+").line_height(TAB_TITLE_LINE_HEIGHT))
             .padding([6, 10])
             .style(new_tab_style)
             .on_press(Message::NewTab);
@@ -814,9 +814,9 @@ impl XizorApp {
         // No shared background container behind the row - on a transparent
         // window every extra layer compounds opacity, so the row is painted
         // once, in pieces. `filler` covers the leftover space past the last
-        // chip, matching `title`'s padding so its height lines up without
-        // relying on flex cross-axis sizing.
-        let filler = container(text(""))
+        // chip, matching `title`'s padding and line height so its height lines
+        // up without relying on flex cross-axis sizing.
+        let filler = container(text("").line_height(TAB_TITLE_LINE_HEIGHT))
             .padding([6, 10])
             .width(Fill)
             .style(tab_bar_style);
@@ -1081,6 +1081,15 @@ fn handle_hotkey(
         _ => None,
     }
 }
+
+/// Line heights for the tab bar's text, absolute so the strip's height - and
+/// with it every horizontal quad edge in it - lands on a whole pixel. iced's
+/// default `LineHeight::Relative(1.3)` would put the strip at 6 + 20.8 + 6 =
+/// 32.8px, and a quad edge mid-pixel gets antialiased into a visible seam on a
+/// transparent window (see AGENTS.md). Only holds at integer scale factors;
+/// nothing chosen in logical pixels survives a 1.25x or 1.5x display.
+const TAB_TITLE_LINE_HEIGHT: Pixels = Pixels(20.0); // 16px text, 1.3x rounded down
+const TAB_CLOSE_LINE_HEIGHT: Pixels = Pixels(16.0); // 12px text, 1.3x rounded up
 
 /// How far toward black to shade a tab-bar surface, as an absolute drop in
 /// brightness rather than a percentage - a percentage step is too small to see
