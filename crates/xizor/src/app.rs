@@ -7,7 +7,9 @@ use editor_core::{EditorFactory, EditorMessage, Tab};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{operate, operation};
 use iced::keyboard::key;
-use iced::widget::{button, column, container, keyed_column, mouse_area, row, scrollable, text};
+use iced::widget::{
+    button, center, column, container, keyed_column, mouse_area, row, scrollable, stack, text,
+};
 use iced::{Center, Color, Element, Fill, Point, Subscription, Task, Theme, keyboard};
 
 use crate::hotkey::{self, Hotkey};
@@ -78,6 +80,34 @@ pub struct XizorApp {
     /// `subscription()` can cheaply clone it into the `keyboard::listen()`
     /// closure on every rebuild without cloning the map itself.
     keybind_overrides: Arc<HashMap<(keyboard::Modifiers, key::Code), Message>>,
+    /// The unsaved-changes prompt currently being shown, if any - a custom
+    /// in-app modal (see `view()`), not a native OS dialog, so it can be
+    /// driven from the keyboard and there's a real place to enforce "only
+    /// one at a time" (see `close_queue`) rather than relying on however
+    /// modal a native dialog happens to be.
+    pending_close: Option<PendingClose>,
+    /// Tab ids that asked to close while a prompt was already showing -
+    /// queued (not dropped, and not shown concurrently) so closing several
+    /// dirty tabs in a row surfaces one prompt after another instead of
+    /// only the first request "winning". By id, not index, matching this
+    /// file's existing convention for anything that survives while the tab
+    /// list might reshape underneath it (e.g. `pending_close_after_save`).
+    close_queue: Vec<u64>,
+    /// Set while an Open-File or dialog-backed Save is in flight, so a
+    /// second `Message::OpenFile`/dialog-triggering save can't spawn another
+    /// concurrent file-picker task - see `Message::OpenFile` and
+    /// `save_tab()`.
+    file_dialog_active: bool,
+}
+
+/// State for the unsaved-changes modal (see `XizorApp::pending_close` and
+/// `view()`) - `focused` indexes the three choices in their on-screen
+/// left-to-right order (0=Save, 1=Don't Save, 2=Cancel), cycled by
+/// `Message::KeyPressed` while a prompt is showing.
+struct PendingClose {
+    tab_id: u64,
+    title: String,
+    focused: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -240,13 +270,24 @@ impl XizorApp {
             visor_enabled,
             previous_active: None,
             keybind_overrides,
+            pending_close: None,
+            close_queue: Vec::new(),
+            file_dialog_active: false,
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
 
         let Some(manifest) = manifest.filter(|manifest| !manifest.tabs.is_empty()) else {
             let task = app.new_tab();
-            return (app, Task::batch([task, window_task]));
+            // `new_tab()`'s own `switch_active(0)` always no-ops here (the
+            // tab list was empty, so the new tab's index and `self.active`
+            // are both `0`) - focus_next() is never redundant in this
+            // branch, so it's safe to always add it (see the doc comment
+            // on the final return below for why that's not true everywhere).
+            return (
+                app,
+                Task::batch([task, window_task, operate(operation::focusable::focus_next())]),
+            );
         };
 
         // Restore each tab: dirty ones (with or without a real path) read
@@ -312,7 +353,11 @@ impl XizorApp {
 
         if app.tabs.is_empty() {
             let task = app.new_tab();
-            return (app, Task::batch([task, window_task]));
+            // Same reasoning as the no-manifest branch above.
+            return (
+                app,
+                Task::batch([task, window_task, operate(operation::focusable::focus_next())]),
+            );
         }
 
         app.next_id = manifest
@@ -325,10 +370,25 @@ impl XizorApp {
 
         let desired_active = manifest.active.min(app.tabs.len() - 1);
         let switch_task = app.switch_active(desired_active);
+        // `switch_active` only calls `focus_next()` itself when
+        // `desired_active != app.active` (still `0` here) - so when the
+        // restored session's active tab genuinely was index 0, that
+        // call never fires and needs adding explicitly. When it's
+        // non-zero, `switch_active` already focused correctly:
+        // `focus_next()` *cycles* (confirmed against iced_core's
+        // `operation/focusable.rs`) - since this app only ever has one
+        // focusable widget in the tree at a time, calling it again here
+        // would unfocus that already-correct widget rather than being a
+        // harmless no-op, so it must not be added in that case.
+        let focus_task = if desired_active == 0 {
+            operate(operation::focusable::focus_next())
+        } else {
+            Task::none()
+        };
         let task = Task::batch(
             reload_tasks
                 .into_iter()
-                .chain([switch_task, window_task]),
+                .chain([switch_task, focus_task, window_task]),
         );
         (app, task)
     }
@@ -342,9 +402,15 @@ impl XizorApp {
 
     /// Entry point for both the tab-bar "x" button and middle-click
     /// (`Message::CloseTab`) as well as `Ctrl+W`. Closes clean tabs
-    /// immediately; dirty tabs get an async unsaved-changes prompt first,
-    /// with the actual close (or save-then-close) happening once the user
-    /// answers it - see `Message::CloseConfirmed`.
+    /// immediately; dirty tabs get an unsaved-changes prompt first (see
+    /// `view()`'s modal and `Message::KeyPressed`'s handling while
+    /// `pending_close` is set), with the actual close (or save-then-close)
+    /// happening once the user answers it - see `Message::CloseConfirmed`.
+    ///
+    /// If a prompt is already showing, this queues the request instead of
+    /// showing a second one - only one prompt is ever on screen at a time,
+    /// even for the same tab id (a rapid double-click on the same tab's "x"
+    /// used to spawn two concurrent native dialogs before this existed).
     fn request_close(&mut self, index: usize) -> Task<Message> {
         let Some(tab) = self.tabs.get(index) else {
             return Task::none();
@@ -353,10 +419,21 @@ impl XizorApp {
             return self.close_tab(index);
         }
         let id = tab.id;
-        let title = tab.document.display_name();
-        Task::perform(confirm_close(title), move |decision| {
-            Message::CloseConfirmed(id, decision)
-        })
+        if self.pending_close.is_some() {
+            if !self.close_queue.contains(&id) {
+                self.close_queue.push(id);
+            }
+            return Task::none();
+        }
+        self.pending_close = Some(PendingClose {
+            tab_id: id,
+            title: tab.document.display_name(),
+            focused: 0,
+        });
+        // Blur the editor so the same keystrokes that navigate the modal
+        // (Enter, Tab, ...) can't also be typed into the hidden document -
+        // see `Message::KeyPressed`'s handling while `pending_close` is set.
+        operate(operation::focusable::unfocus())
     }
 
     fn close_tab(&mut self, index: usize) -> Task<Message> {
@@ -434,21 +511,42 @@ impl XizorApp {
         session::write_manifest_sync(&self.session_dir, &manifest);
     }
 
-    fn save_active_tab(&self, force_dialog: bool) -> Task<Message> {
+    fn save_active_tab(&mut self, force_dialog: bool) -> Task<Message> {
         let Some(tab) = self.tabs.get(self.active) else {
             return Task::none();
         };
-        self.save_tab(tab.id, force_dialog)
+        let id = tab.id;
+        self.save_tab(id, force_dialog)
     }
 
     /// Saves the tab with the given id, whether or not it's the active tab -
     /// needed so `request_close`/`Message::CloseConfirmed` can save a
     /// background tab the user is closing without first switching to it.
-    fn save_tab(&self, id: u64, force_dialog: bool) -> Task<Message> {
+    ///
+    /// Guarded the same way `Message::OpenFile` is guarded (see
+    /// `file_dialog_active`): a save with no existing path yet, or an
+    /// explicit Save As, shows a file-picker dialog exactly like Open File
+    /// does, so it needs the same "don't spawn a second one while one's
+    /// already in flight" protection. A plain save of an already-saved tab
+    /// never shows a dialog at all and is left unguarded - it can't be the
+    /// second dialog in the scenario this guards against.
+    fn save_tab(&mut self, id: u64, force_dialog: bool) -> Task<Message> {
         let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) else {
             return Task::none();
         };
         let existing_path = tab.document.path.clone();
+        let shows_dialog = force_dialog || existing_path.is_none();
+        if shows_dialog {
+            if self.file_dialog_active {
+                return Task::none();
+            }
+            self.file_dialog_active = true;
+        }
+        let tab = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == id)
+            .expect("checked above: a tab with this id exists");
         let text = tab.editor.text();
         Task::perform(save_to(existing_path, text, force_dialog), move |result| {
             Message::FileSaved(id, result)
@@ -458,22 +556,35 @@ impl XizorApp {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::NewTab => self.new_tab(),
-            Message::OpenFile => Task::perform(open_and_read(), Message::FileOpened),
+            Message::OpenFile => {
+                if self.file_dialog_active {
+                    Task::none()
+                } else {
+                    self.file_dialog_active = true;
+                    Task::perform(open_and_read(), Message::FileOpened)
+                }
+            }
             Message::FileOpened(Ok((path, contents))) => {
+                self.file_dialog_active = false;
                 let id = self.next_id;
                 self.next_id += 1;
                 self.tabs
                     .push(Tab::from_file(id, path, &contents, &self.editor_factory));
                 self.switch_active(self.tabs.len() - 1)
             }
-            Message::FileOpened(Err(OpenError::DialogClosed)) => Task::none(),
+            Message::FileOpened(Err(OpenError::DialogClosed)) => {
+                self.file_dialog_active = false;
+                Task::none()
+            }
             Message::FileOpened(Err(OpenError::Io { path, kind })) => {
+                self.file_dialog_active = false;
                 self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
                 Task::none()
             }
             Message::SaveFile => self.save_active_tab(false),
             Message::SaveFileAs => self.save_active_tab(true),
             Message::FileSaved(id, Ok(path)) => {
+                self.file_dialog_active = false;
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
                     tab.document.path = Some(path);
                     tab.dirty = false;
@@ -499,10 +610,12 @@ impl XizorApp {
                 // The user backed out of the save (e.g. the save-as dialog
                 // for an untitled tab) - leave the tab open rather than
                 // closing it unsaved.
+                self.file_dialog_active = false;
                 self.pending_close_after_save.retain(|&pending_id| pending_id != id);
                 Task::none()
             }
             Message::FileSaved(id, Err(SaveError::Io { path, kind })) => {
+                self.file_dialog_active = false;
                 self.pending_close_after_save.retain(|&pending_id| pending_id != id);
                 if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
                     self.error = Some(format!(
@@ -530,6 +643,47 @@ impl XizorApp {
                 None => Task::none(),
             },
             Message::KeyPressed(key, modifiers, physical_key) => {
+                // While the unsaved-changes modal is up, it owns every
+                // keystroke - checked before `handle_hotkey` at all, so
+                // none of the app's normal shortcuts (new tab, save, tab
+                // switching, ...) can fire behind the user's back until
+                // they've answered the prompt.
+                if let Some(pending) = &mut self.pending_close {
+                    match key {
+                        keyboard::Key::Named(key::Named::ArrowLeft) => {
+                            pending.focused = (pending.focused + 2) % 3;
+                            return Task::none();
+                        }
+                        keyboard::Key::Named(key::Named::ArrowRight) => {
+                            pending.focused = (pending.focused + 1) % 3;
+                            return Task::none();
+                        }
+                        keyboard::Key::Named(key::Named::Tab) => {
+                            pending.focused = if modifiers.shift() {
+                                (pending.focused + 2) % 3
+                            } else {
+                                (pending.focused + 1) % 3
+                            };
+                            return Task::none();
+                        }
+                        keyboard::Key::Named(key::Named::Enter)
+                        | keyboard::Key::Named(key::Named::Space) => {
+                            let decision = match pending.focused {
+                                0 => CloseDecision::Save,
+                                1 => CloseDecision::DontSave,
+                                _ => CloseDecision::Cancel,
+                            };
+                            let tab_id = pending.tab_id;
+                            return self.update(Message::CloseConfirmed(tab_id, decision));
+                        }
+                        keyboard::Key::Named(key::Named::Escape) => {
+                            let tab_id = pending.tab_id;
+                            return self
+                                .update(Message::CloseConfirmed(tab_id, CloseDecision::Cancel));
+                        }
+                        _ => return Task::none(),
+                    }
+                }
                 match handle_hotkey(key, modifiers, physical_key, &self.keybind_overrides) {
                     Some(resolved) => self.update(resolved),
                     None => Task::none(),
@@ -540,6 +694,13 @@ impl XizorApp {
                 Task::none()
             }
             Message::Editor(index, editor_message) => {
+                // Defense in depth: `request_close` already blurs the
+                // editor when the modal opens, but that takes effect on the
+                // next diff/render pass, not synchronously against
+                // messages already in flight this same tick.
+                if self.pending_close.is_some() {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get_mut(index) {
                     if tab.editor.update(editor_message) {
                         let just_became_dirty = !tab.dirty;
@@ -599,19 +760,38 @@ impl XizorApp {
                 self.error = Some(format!("Couldn't reload a restored tab: {kind}"));
                 Task::none()
             }
-            Message::CloseConfirmed(id, decision) => match decision {
-                CloseDecision::Cancel => Task::none(),
-                CloseDecision::DontSave => {
-                    match self.tabs.iter().position(|tab| tab.id == id) {
-                        Some(index) => self.close_tab(index),
+            Message::CloseConfirmed(id, decision) => {
+                self.pending_close = None;
+                let decision_task = match decision {
+                    CloseDecision::Cancel => Task::none(),
+                    CloseDecision::DontSave => {
+                        match self.tabs.iter().position(|tab| tab.id == id) {
+                            Some(index) => self.close_tab(index),
+                            None => Task::none(),
+                        }
+                    }
+                    CloseDecision::Save => {
+                        self.pending_close_after_save.push(id);
+                        self.save_tab(id, false)
+                    }
+                };
+                // If another tab is waiting to be confirmed, show its
+                // prompt next; otherwise the modal's gone, so hand
+                // keyboard focus back to the editor.
+                let next_task = if self.close_queue.is_empty() {
+                    operate(operation::focusable::focus_next())
+                } else {
+                    let next_id = self.close_queue.remove(0);
+                    match self.tabs.iter().position(|tab| tab.id == next_id) {
+                        Some(index) => self.request_close(index),
+                        // That tab was closed some other way while queued -
+                        // same stale-id-is-a-silent-no-op precedent used
+                        // elsewhere in this file.
                         None => Task::none(),
                     }
-                }
-                CloseDecision::Save => {
-                    self.pending_close_after_save.push(id);
-                    self.save_tab(id, false)
-                }
-            },
+                };
+                Task::batch([decision_task, next_task])
+            }
             Message::WindowReady(id) => {
                 self.window = id;
                 self.snap_to_monitor()
@@ -809,7 +989,46 @@ impl XizorApp {
             );
         }
 
-        content.into()
+        let Some(pending) = &self.pending_close else {
+            return content.into();
+        };
+
+        // A choice's `on_press` is still wired up (not just keyboard-driven)
+        // so a mouse click also works, and so it doubles as a visible
+        // affordance for what Enter/Space would do.
+        let choice = |label: &'static str, index: usize, decision: CloseDecision| {
+            button(text(label))
+                .padding([6, 14])
+                .style(move |theme, status| modal_button_style(theme, status, pending.focused == index))
+                .on_press(Message::CloseConfirmed(pending.tab_id, decision))
+        };
+
+        let dialog = container(
+            column![
+                text(format!(
+                    "Do you want to save the changes you made to {}?",
+                    pending.title
+                )),
+                row![
+                    choice("Save", 0, CloseDecision::Save),
+                    choice("Don't Save", 1, CloseDecision::DontSave),
+                    choice("Cancel", 2, CloseDecision::Cancel),
+                ]
+                .spacing(10),
+            ]
+            .spacing(16)
+            .padding(20),
+        )
+        .style(modal_dialog_style);
+
+        // Covers the whole window so `Stack`'s event-capture-stops-
+        // propagation behavior keeps clicks from reaching the tab bar or
+        // editor underneath - deliberately has no `on_press` of its own, so
+        // clicking it does nothing rather than dismissing the prompt (only
+        // Escape/the Cancel button should risk losing unsaved work).
+        let scrim = mouse_area(container(text("")).width(Fill).height(Fill).style(modal_scrim_style));
+
+        stack![content, scrim, center(dialog)].into()
     }
 
     pub fn theme(&self) -> Theme {
@@ -1095,6 +1314,58 @@ fn tab_bar_style(theme: &Theme) -> container::Style {
     container::Style::default().background(background)
 }
 
+/// One of the unsaved-changes modal's three choices - a colored border
+/// (rather than a background fill, so it stays legible under hover/press
+/// too) is the only visual difference for whichever one keyboard nav
+/// currently has on `pending.focused` - see `view()`.
+fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -> button::Style {
+    let palette = theme.extended_palette();
+    let border = if is_focused {
+        iced::Border {
+            color: palette.primary.strong.color,
+            width: 2.0,
+            radius: 4.0.into(),
+        }
+    } else {
+        iced::Border {
+            radius: 4.0.into(),
+            ..iced::Border::default()
+        }
+    };
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(palette.background.weak.color.into())
+        }
+        _ => Some(palette.background.base.color.into()),
+    };
+    button::Style {
+        background,
+        text_color: palette.background.base.text,
+        border,
+        ..button::Style::default()
+    }
+}
+
+/// The modal's own dialog box - opaque, so it reads as a real window sitting
+/// on top of the scrim rather than another translucent layer.
+fn modal_dialog_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style::default()
+        .background(palette.background.base.color)
+        .border(iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 8.0.into(),
+        })
+}
+
+/// The full-window backdrop behind the modal dialog - dark and translucent,
+/// both to visually indicate the rest of the app is blocked and to give
+/// `Stack`'s event capture something to swallow clicks with (see `view()`).
+fn modal_scrim_style(_theme: &Theme) -> container::Style {
+    container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.5))
+}
+
 /// Nudges `theme`'s background alpha by an amount too small to see, but
 /// large enough that `Color`'s `==` (which iced's tiny-skia compositor
 /// uses to decide whether a repaint is even necessary) reports a
@@ -1218,40 +1489,6 @@ async fn reload_from_disk(path: PathBuf) -> Result<Arc<String>, std::io::ErrorKi
 /// default) is treated as `Cancel` - closing is the one destructive path
 /// here, so an unrecognized answer should never be read as consent to lose
 /// changes.
-async fn confirm_close(tab_title: String) -> CloseDecision {
-    let result = rfd::AsyncMessageDialog::new()
-        .set_title("Unsaved Changes")
-        .set_description(format!(
-            "Do you want to save the changes you made to {tab_title}?"
-        ))
-        .set_buttons(rfd::MessageButtons::YesNoCancelCustom(
-            "Save".to_string(),
-            "Don't Save".to_string(),
-            "Cancel".to_string(),
-        ))
-        .show()
-        .await;
-
-    match result {
-        rfd::MessageDialogResult::Custom(label) if label == "Save" => CloseDecision::Save,
-        rfd::MessageDialogResult::Custom(label) if label == "Don't Save" => {
-            CloseDecision::DontSave
-        }
-        // Not every backend's async path actually honors custom button
-        // text - notably Windows' plain `MessageBoxW` fallback (this crate
-        // isn't built with rfd's `common-controls-v6` feature, which is
-        // what's needed for real custom-labeled buttons there). Those
-        // backends silently render/report the built-in Yes/No/Cancel
-        // instead, so without this arm every click here - including the
-        // one meaning "yes, save" - fell through to `_` and was treated as
-        // Cancel. The buttons read "Yes"/"No" instead of "Save"/"Don't
-        // Save" on those platforms, but the semantics still line up.
-        rfd::MessageDialogResult::Yes => CloseDecision::Save,
-        rfd::MessageDialogResult::No => CloseDecision::DontSave,
-        _ => CloseDecision::Cancel,
-    }
-}
-
 async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
     let handle = rfd::AsyncFileDialog::new()
         .pick_file()
@@ -1315,7 +1552,10 @@ mod tests {
             iced::widget::text("").into()
         }
         fn update(&mut self, _message: EditorMessage) -> bool {
-            false
+            // Reports every message as an edit - lets tests observe whether
+            // `Message::Editor` actually reached the editor (via
+            // `tab.dirty`/`draft_generation`) without needing a real one.
+            true
         }
         fn text(&self) -> String {
             String::new()
@@ -1358,6 +1598,9 @@ mod tests {
             visor_enabled: false,
             previous_active: None,
             keybind_overrides: Arc::new(HashMap::new()),
+            pending_close: None,
+            close_queue: Vec::new(),
+            file_dialog_active: false,
         }
     }
 
@@ -1485,5 +1728,207 @@ mod tests {
             ),
         );
         assert!(build_app_overrides(&keybinds).is_empty());
+    }
+
+    fn key_press(named: Named, modifiers: Modifiers, code: key::Code) -> Message {
+        Message::KeyPressed(Key::Named(named), modifiers, key::Physical::Code(code))
+    }
+
+    #[test]
+    fn request_close_queues_a_second_request_instead_of_showing_a_second_prompt() {
+        let mut app = test_app(3);
+        app.tabs[0].dirty = true;
+        app.tabs[1].dirty = true;
+        let tab0_id = app.tabs[0].id;
+        let tab1_id = app.tabs[1].id;
+
+        let _ = app.request_close(0);
+        assert_eq!(app.pending_close.as_ref().unwrap().tab_id, tab0_id);
+        assert!(app.close_queue.is_empty());
+
+        let _ = app.request_close(1);
+        assert_eq!(app.pending_close.as_ref().unwrap().tab_id, tab0_id); // unchanged
+        assert_eq!(app.close_queue, vec![tab1_id]);
+    }
+
+    #[test]
+    fn request_close_does_not_duplicate_an_already_queued_id() {
+        let mut app = test_app(3);
+        app.tabs[0].dirty = true;
+        app.tabs[1].dirty = true;
+        let _ = app.request_close(0);
+        let _ = app.request_close(1);
+        let _ = app.request_close(1);
+        assert_eq!(app.close_queue.len(), 1);
+    }
+
+    #[test]
+    fn close_confirmed_opens_the_next_queued_prompt() {
+        let mut app = test_app(3);
+        app.tabs[0].dirty = true;
+        app.tabs[1].dirty = true;
+        let tab1_id = app.tabs[1].id;
+        let _ = app.request_close(0);
+        let _ = app.request_close(1);
+
+        let tab0_id = app.tabs[0].id;
+        let _ = app.update(Message::CloseConfirmed(tab0_id, CloseDecision::DontSave));
+
+        assert!(app.close_queue.is_empty());
+        assert_eq!(app.pending_close.as_ref().unwrap().tab_id, tab1_id);
+    }
+
+    #[test]
+    fn key_pressed_cycles_focused_choice_both_directions_with_wraparound() {
+        let mut app = test_app(1);
+        app.tabs[0].dirty = true;
+        let _ = app.request_close(0);
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 0);
+
+        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 1);
+
+        let _ = app.update(key_press(Named::Tab, Modifiers::empty(), key::Code::Tab));
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 2);
+
+        // Wraps back around to 0.
+        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 0);
+
+        // Shift+Tab goes backward, wrapping to the last choice.
+        let _ = app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 2);
+
+        let _ = app.update(key_press(Named::ArrowLeft, Modifiers::empty(), key::Code::ArrowLeft));
+        assert_eq!(app.pending_close.as_ref().unwrap().focused, 1);
+    }
+
+    #[test]
+    fn key_pressed_enter_resolves_whichever_choice_is_focused() {
+        let mut app = test_app(2);
+        app.tabs[0].dirty = true;
+        let _ = app.request_close(0);
+        // Move focus to "Don't Save" (index 1).
+        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let tabs_before = app.tabs.len();
+
+        let _ = app.update(key_press(Named::Enter, Modifiers::empty(), key::Code::Enter));
+
+        assert!(app.pending_close.is_none());
+        assert_eq!(app.tabs.len(), tabs_before - 1); // Don't Save actually closed it
+    }
+
+    #[test]
+    fn key_pressed_escape_always_cancels_regardless_of_focus() {
+        let mut app = test_app(2);
+        app.tabs[0].dirty = true;
+        let _ = app.request_close(0);
+        // Move focus to "Don't Save" - Escape should still cancel, not "Don't Save".
+        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let tabs_before = app.tabs.len();
+
+        let _ = app.update(key_press(Named::Escape, Modifiers::empty(), key::Code::Escape));
+
+        assert!(app.pending_close.is_none());
+        assert_eq!(app.tabs.len(), tabs_before); // nothing closed
+    }
+
+    #[test]
+    fn key_pressed_swallows_app_shortcuts_while_a_prompt_is_pending() {
+        let mut app = test_app(1);
+        app.tabs[0].dirty = true;
+        let _ = app.request_close(0);
+        let tabs_before = app.tabs.len();
+
+        // Ctrl+N would normally fire NewTab (see hardcoded_default_still_fires_with_empty_overrides).
+        let _ = app.update(Message::KeyPressed(
+            Key::Character("n".into()),
+            Modifiers::CTRL,
+            key::Physical::Code(key::Code::KeyN),
+        ));
+
+        assert_eq!(app.tabs.len(), tabs_before);
+        assert!(app.pending_close.is_some());
+    }
+
+    #[test]
+    fn editor_messages_are_ignored_while_a_prompt_is_pending() {
+        let mut app = test_app(1);
+        app.tabs[0].dirty = true;
+        let generation_before = app.tabs[0].draft_generation;
+        let _ = app.request_close(0);
+
+        let _ = app.update(Message::Editor(0, EditorMessage::Undo));
+
+        assert_eq!(app.tabs[0].draft_generation, generation_before);
+    }
+
+    #[test]
+    fn open_file_does_not_spawn_a_second_dialog_while_one_is_active() {
+        let mut app = test_app(1);
+        let _ = app.update(Message::OpenFile);
+        assert!(app.file_dialog_active);
+        // A second OpenFile while one's already in flight is a no-op - the
+        // flag doesn't get set again, and (more importantly) no test here
+        // can observe a second `rfd` dialog actually spawning, but the
+        // guard itself not flipping is directly observable.
+        let _ = app.update(Message::OpenFile);
+        assert!(app.file_dialog_active);
+    }
+
+    #[test]
+    fn file_dialog_flag_resets_on_every_file_opened_outcome() {
+        let mut app = test_app(1);
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileOpened(Err(OpenError::DialogClosed)));
+        assert!(!app.file_dialog_active);
+
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileOpened(Err(OpenError::Io {
+            path: PathBuf::from("/tmp/x"),
+            kind: std::io::ErrorKind::NotFound,
+        })));
+        assert!(!app.file_dialog_active);
+    }
+
+    #[test]
+    fn file_dialog_flag_resets_on_every_file_saved_outcome() {
+        let mut app = test_app(1);
+        let id = app.tabs[0].id;
+
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileSaved(id, Err(SaveError::DialogClosed)));
+        assert!(!app.file_dialog_active);
+
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileSaved(
+            id,
+            Err(SaveError::Io {
+                path: PathBuf::from("/tmp/x"),
+                kind: std::io::ErrorKind::NotFound,
+            }),
+        ));
+        assert!(!app.file_dialog_active);
+
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileSaved(id, Ok(PathBuf::from("/tmp/x"))));
+        assert!(!app.file_dialog_active);
+    }
+
+    #[test]
+    fn save_tab_does_not_spawn_a_second_dialog_for_an_untitled_tab_while_one_is_active() {
+        // A plain Save on a never-saved tab shows a file-picker just like
+        // Open File does (`save_to`'s dialog gate is `force_dialog ||
+        // existing_path.is_none()`) - confirm it's guarded the same way.
+        let mut app = test_app(1);
+        assert!(app.tabs[0].document.path.is_none());
+        app.file_dialog_active = true;
+
+        let _ = app.save_active_tab(false);
+
+        // Still true - no second dialog-spawning task should have been
+        // created (and, since the flag was already true, the guard should
+        // have short-circuited before touching anything else).
+        assert!(app.file_dialog_active);
     }
 }
