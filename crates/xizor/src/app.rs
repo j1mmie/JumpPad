@@ -232,6 +232,8 @@ impl XizorApp {
         let editor_factory: EditorFactory = Box::new(iced_text_editor::IcedTextEditor::factory(
             registry,
             editor_overrides,
+            config.alpha.background,
+            config.alpha.foreground,
         ));
 
         let session_candidates = session::candidate_dirs();

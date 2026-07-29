@@ -16,6 +16,14 @@ use app::XizorApp;
 pub fn run() -> iced::Result {
     let config = xizor_config::load();
     let visor_enabled = config.visor.enabled;
+    // Only actually asks the OS for a transparent (alpha-composited) window
+    // when the background is configured to be anything less than fully
+    // solid - a transparent window engages a different, costlier
+    // compositing path than an ordinary opaque one regardless of what gets
+    // painted into it, so this is skipped entirely (not just harmlessly
+    // requested) for the common case of leaving background alpha at its
+    // default `1.0`.
+    let transparent = config.alpha.background < 1.0;
 
     // iced 0.14 moved the boot/init closure to `application`'s first
     // argument (previously supplied last, via `.run_with(...)`) and moved
@@ -37,6 +45,7 @@ pub fn run() -> iced::Result {
         // this instead behaves like an ordinary window, default OS
         // titlebar/frame included.
         .decorations(!visor_enabled)
+        .transparent(transparent)
         // The visor should render above whatever application currently has
         // focus while it's shown - it wouldn't be much of a drop-down
         // console otherwise. An ordinary (non-visor) window has no reason
