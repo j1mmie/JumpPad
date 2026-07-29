@@ -25,6 +25,16 @@ const ANIMATION_TICK: Duration = Duration::from_millis(16);
 /// `PollHighlighting` pattern) and `Message::AutosaveTick`.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 
+/// How often `Message::HeightCollapseTestTick` advances the wait after
+/// `Message::TriggerHeightCollapseTest` collapses the window's height to
+/// `0` - see that message's doc comment.
+const HEIGHT_COLLAPSE_TEST_TICK: Duration = Duration::from_millis(16);
+
+/// How many `HEIGHT_COLLAPSE_TEST_TICK`s to wait, with the window's height
+/// collapsed to `0`, before restoring it - see
+/// `Message::TriggerHeightCollapseTest`'s doc comment.
+const HEIGHT_COLLAPSE_TEST_WAIT_FRAMES: u8 = 1;
+
 pub struct XizorApp {
     tabs: Vec<Tab>,
     active: usize,
@@ -32,6 +42,20 @@ pub struct XizorApp {
     error: Option<String>,
     editor_factory: EditorFactory,
     theme: Theme,
+    /// `xizor_config::AlphaConfig::background`, clamped to `0.0..=1.0` -
+    /// scales the application-wide window background color returned by
+    /// `style()`. This is the color the renderer clears the whole window
+    /// surface to *before* drawing any widget - leaving it opaque would
+    /// defeat `lib.rs`'s OS-level `.transparent(true)` window request no
+    /// matter how transparent individual widgets (e.g. the text editor's
+    /// own background - see `iced_text_editor::editor_style`) are drawn on
+    /// top of it.
+    background_alpha: f32,
+    /// `Some((original_size, waited_frames))` while
+    /// `Message::TriggerHeightCollapseTest`'s wait-with-height-collapsed
+    /// period is in progress, `None` otherwise. `subscription()` only runs
+    /// `HeightCollapseTestTick`'s timer while this is `Some`.
+    height_collapse_test: Option<(iced::Size, u8)>,
     /// Flips every time the active tab changes. See `theme()` for what
     /// this actually does - it's not a display preference.
     redraw_nudge: bool,
@@ -154,6 +178,37 @@ pub enum Message {
     /// Fires on a timer while `animation` is `Some` (see `subscription()`);
     /// advances the in-progress slide by one frame.
     AnimationTick,
+    /// Fetches the window's current size, then collapses its height to `0`;
+    /// `Message::HeightCollapseTestTick` waits `HEIGHT_COLLAPSE_TEST_WAIT_FRAMES`
+    /// frames with it collapsed before restoring the original size.
+    ///
+    /// Fires two ways: automatically once, right after `WindowReady`, only
+    /// when `background_alpha < 1.0` (see that handler) - and by hand, on
+    /// Ctrl+` (matching `keybinds.toml`'s default `toggle` chord, though not
+    /// actually routed through that config - see `handle_hotkey`), kept
+    /// around so this can still be re-triggered on demand for testing
+    /// without restarting the app.
+    ///
+    /// Why this exists: on Windows, a freshly created transparent `wgpu`
+    /// surface renders fully opaque (or shows a wrong, additively-brightened
+    /// tint at low alpha - looks like a straight-vs-premultiplied-alpha
+    /// mismatch in how the DXGI swapchain gets negotiated) until the window
+    /// goes through a real resize - confirmed reliable and permanent for the
+    /// rest of that session once it happens, no matter whether that resize
+    /// was a manual drag or this collapse-and-restore. Whether height alone
+    /// is enough (vs. needing width too), and how short the wait can be, was
+    /// worked out by hand via the Ctrl+` trigger before wiring this into
+    /// startup automatically.
+    TriggerHeightCollapseTest,
+    /// The window size `Message::TriggerHeightCollapseTest` asked for,
+    /// resolved - arms `height_collapse_test` with it and immediately
+    /// collapses the window's height to `0`.
+    HeightCollapseTestSized(iced::Size),
+    /// Fires on a timer while `height_collapse_test` is `Some` (see
+    /// `subscription()`'s gating); counts down the wait, then restores the
+    /// window to its original size once `HEIGHT_COLLAPSE_TEST_WAIT_FRAMES`
+    /// have passed.
+    HeightCollapseTestTick,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
     /// wrapping past the last back to the first.
     SelectNextTab,
@@ -262,6 +317,8 @@ impl XizorApp {
             error: None,
             editor_factory,
             theme: resolve_theme(&config.theme),
+            background_alpha: config.alpha.background.clamp(0.0, 1.0),
+            height_collapse_test: None,
             redraw_nudge: false,
             session_dir,
             pending_close_after_save: Vec::new(),
@@ -796,7 +853,18 @@ impl XizorApp {
             }
             Message::WindowReady(id) => {
                 self.window = id;
-                self.snap_to_monitor()
+                let snap_task = self.snap_to_monitor();
+                // See `Message::TriggerHeightCollapseTest`'s doc comment -
+                // same fix, fired automatically once at startup instead of
+                // needing a manual Ctrl+`. Only when the window was
+                // actually created transparent - a solid window never needs
+                // this and shouldn't pay for it.
+                let collapse_task = if self.background_alpha < 1.0 {
+                    Task::done(Message::TriggerHeightCollapseTest)
+                } else {
+                    Task::none()
+                };
+                Task::batch([snap_task, collapse_task])
             }
             Message::HotkeyEvent(event) => {
                 let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {
@@ -809,6 +877,33 @@ impl XizorApp {
                 }
             }
             Message::AnimationTick => self.advance_animation(),
+            Message::TriggerHeightCollapseTest => match self.window {
+                Some(id) => iced::window::size(id).map(Message::HeightCollapseTestSized),
+                None => Task::none(),
+            },
+            Message::HeightCollapseTestSized(size) => {
+                let Some(id) = self.window else {
+                    return Task::none();
+                };
+                self.height_collapse_test = Some((size, 0));
+                iced::window::resize(id, iced::Size::new(size.width, 0.0))
+            }
+            Message::HeightCollapseTestTick => {
+                let Some((original, waited)) = self.height_collapse_test else {
+                    return Task::none();
+                };
+                let Some(id) = self.window else {
+                    self.height_collapse_test = None;
+                    return Task::none();
+                };
+                let next_waited = waited + 1;
+                if next_waited >= HEIGHT_COLLAPSE_TEST_WAIT_FRAMES {
+                    self.height_collapse_test = None;
+                    return iced::window::resize(id, original);
+                }
+                self.height_collapse_test = Some((original, next_waited));
+                Task::none()
+            }
         }
     }
 
@@ -930,8 +1025,9 @@ impl XizorApp {
             // visible seam. With the frame owning the shape, future
             // additions to a tab (an icon, a dirty-dot) just join the row
             // and get centered - they can't reintroduce that seam.
+            let background_alpha = self.background_alpha;
             let frame = container(row![title, close].spacing(0).align_y(Center))
-                .style(move |theme| tab_frame_style(theme, is_active));
+                .style(move |theme| tab_frame_style(theme, is_active, background_alpha));
 
             // Middle-click anywhere on the chip closes it, same as clicking
             // the "x" - both funnel through `Message::CloseTab` so a dirty
@@ -950,13 +1046,41 @@ impl XizorApp {
             .spacing(0)
             .align_y(Center);
 
-        let tab_bar: Element<'_, Message> = container(
+        // Deliberately *not* one `container` painting a single background
+        // behind the whole row (the previous approach): with the window
+        // itself translucent, that meant every tab chip's own background
+        // (painted on top, inside the row) blended twice against the
+        // backdrop - once via this container's fill, once via the chip's
+        // own - producing a visibly different, "double-blended" color than
+        // the editor area's single-layer background, even though both use
+        // the literal same base color. A `row` has no background of its
+        // own to paint, so nothing sits between a chip and the true
+        // backdrop except that one chip's own single fill - `filler` (the
+        // same background color as an inactive tab, single-layered the same
+        // way) covers only the leftover space past the last tab/`+` button,
+        // never underlapping a real chip.
+        // `.height(Fill)` here (tried first) let iced's flex layout blow the
+        // whole row's height up to consume half the window: a `Length::Fill`
+        // cross-axis child inside an otherwise-`Shrink` row isn't guaranteed
+        // to simply match its shrink siblings' natural height the way a
+        // `Length::Fill` *main*-axis child predictably divides remaining
+        // space - so instead, matching `title`'s own padding makes the
+        // filler's height come out the same as a real tab chip by
+        // construction, no flex cross-axis inference involved at all.
+        let background_alpha = self.background_alpha;
+        let filler = container(text(""))
+            .padding([6, 10])
+            .width(Fill)
+            .style(move |theme| tab_bar_style(theme, background_alpha));
+
+        let tab_bar: Element<'_, Message> = row![
             scrollable(tabs_row).direction(scrollable::Direction::Horizontal(
                 scrollable::Scrollbar::new(),
             )),
-        )
+            filler,
+        ]
         .width(Fill)
-        .style(tab_bar_style)
+        .align_y(Center)
         .into();
 
         let editor: Element<'_, Message> = if let Some(tab) = self.tabs.get(self.active) {
@@ -1041,6 +1165,20 @@ impl XizorApp {
         }
     }
 
+    /// The application-wide window `Style` - notably `background_color`,
+    /// which the renderer uses to clear the whole window surface underneath
+    /// every widget. Scaling this by `background_alpha` is what actually
+    /// lets the desktop show through a `.transparent(true)` window; without
+    /// it, the default (fully opaque) background_color would paint over the
+    /// entire window regardless of any widget's own alpha.
+    pub fn style(&self, theme: &Theme) -> iced::theme::Style {
+        let mut style = iced::theme::default(theme);
+        if self.background_alpha < 1.0 {
+            style.background_color = style.background_color.scale_alpha(self.background_alpha);
+        }
+        style
+    }
+
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
             // iced 0.14 replaced the separate `on_key_press`/`on_key_release`
@@ -1070,6 +1208,16 @@ impl XizorApp {
         if self.animation.is_some() {
             subscriptions
                 .push(iced::time::every(ANIMATION_TICK).map(|_| Message::AnimationTick));
+        }
+
+        // Only ticks while `Message::TriggerHeightCollapseTest`'s wait
+        // period is in progress. Same "no idle cost while settled" shape as
+        // the other gated timers here.
+        if self.height_collapse_test.is_some() {
+            subscriptions.push(
+                iced::time::every(HEIGHT_COLLAPSE_TEST_TICK)
+                    .map(|_| Message::HeightCollapseTestTick),
+            );
         }
 
         // Only ticks while some tab is actually waiting on a grammar load -
@@ -1203,6 +1351,18 @@ fn handle_hotkey(
         return Some(Message::SelectPreviousActiveTab);
     }
 
+    // Ctrl+` - see `Message::TriggerHeightCollapseTest`'s doc comment.
+    // Matched by physical code (like tier 1), not logical key, since
+    // backquote/backtick shifts around by keyboard layout.
+    if modifiers.control()
+        && !modifiers.shift()
+        && !modifiers.alt()
+        && !modifiers.logo()
+        && matches!(physical_key, key::Physical::Code(key::Code::Backquote))
+    {
+        return Some(Message::TriggerHeightCollapseTest);
+    }
+
     if !modifiers.command() {
         return None;
     }
@@ -1286,10 +1446,13 @@ fn tab_close_style(theme: &Theme, status: button::Status, is_active: bool) -> bu
 /// tab's background. Active tab matches the editor's own background
 /// (`tab_chip_colors`), so it reads as a seamless continuation of the
 /// document below it; inactive tabs get a darker background instead of a
-/// border to distinguish them.
-fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
+/// border to distinguish them. `background_alpha` (`XizorApp::background_alpha`)
+/// scales it the same way the window's own background is scaled (see
+/// `XizorApp::style`), so a tab chip doesn't sit as an opaque island in an
+/// otherwise-transparent window.
+fn tab_frame_style(theme: &Theme, is_active: bool, background_alpha: f32) -> container::Style {
     let (background, _) = tab_chip_colors(theme, is_active);
-    container::Style::default().background(background)
+    container::Style::default().background(apply_background_alpha(background, background_alpha))
 }
 
 /// The "+" new-tab button: transparent and dim at rest so it doesn't
@@ -1310,10 +1473,25 @@ fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
 
 /// The tab row's own background - darker than even an inactive tab, so any
 /// empty space past the last tab reads as a distinct "frame" the tabs sit
-/// in, not a transparent gap.
-fn tab_bar_style(theme: &Theme) -> container::Style {
+/// in, not a transparent gap. `background_alpha` scales it the same way as
+/// `tab_frame_style` - see that doc comment.
+fn tab_bar_style(theme: &Theme, background_alpha: f32) -> container::Style {
     let background = darken(theme.extended_palette().background.base.color, TAB_ROW_DARKEN);
-    container::Style::default().background(background)
+    container::Style::default().background(apply_background_alpha(background, background_alpha))
+}
+
+/// Scales `color`'s alpha by `background_alpha`, skipping the multiply
+/// entirely at `1.0` (fully solid) - mirrors
+/// `iced_text_editor`'s private `apply_alpha` (can't share it directly,
+/// different crate), same "don't do transparency-related work when nothing's
+/// actually transparent" intent as `XizorApp::background_alpha`'s doc
+/// comment.
+fn apply_background_alpha(color: Color, background_alpha: f32) -> Color {
+    if background_alpha >= 1.0 {
+        color
+    } else {
+        color.scale_alpha(background_alpha)
+    }
 }
 
 /// One of the unsaved-changes modal's three choices - a colored border
@@ -1591,6 +1769,8 @@ mod tests {
             editor_factory: factory,
             theme: Theme::ALL[0].clone(),
             redraw_nudge: false,
+            background_alpha: 1.0,
+            height_collapse_test: None,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
             window: None,

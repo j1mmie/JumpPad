@@ -23,7 +23,35 @@ pub fn run() -> iced::Result {
     // painted into it, so this is skipped entirely (not just harmlessly
     // requested) for the common case of leaving background alpha at its
     // default `1.0`.
+    //
+    // The default `tiny-skia` build can't do this on macOS at all - see the
+    // `tiny-skia`/`wgpu` feature comment in this crate's `Cargo.toml`. The
+    // `wgpu` binary (`xizor-gpu`) was assumed to be the fix, but that's
+    // unconfirmed on macOS - it stayed opaque there too in testing, which
+    // could mean `iced_wgpu` isn't landing on the composite alpha mode this
+    // comment expects, or something upstream of that. `env_logger::init()`
+    // below turns on `iced_wgpu`'s own `log::info!`s (which were previously
+    // silent - nothing in this crate ever installed a logger) so a run with
+    // `RUST_LOG=info` shows exactly which adapter/format/alpha mode got
+    // selected, to actually pin this down instead of guessing further from
+    // source alone.
     let transparent = config.alpha.background < 1.0;
+
+    // See the long comment on `transparent` above - temporary, for
+    // diagnosing the macOS `xizor-gpu` transparency issue. Forces a
+    // default of `info` rather than relying on `RUST_LOG` alone (still
+    // overridable by it) - the previous plain `try_init()` produced no
+    // output at all in testing, which is itself suspicious (`iced_wgpu`
+    // unconditionally logs its `Settings` as the very first thing
+    // `Compositor::request` does, so *something* should have shown up if
+    // `RUST_LOG=info` had actually reached the process). `try_init` (not
+    // `init`) so this can't panic if something else already installed a
+    // logger.
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .try_init();
+    eprintln!("xizor: logger installed, max_level={:?}", log::max_level());
 
     // iced 0.14 moved the boot/init closure to `application`'s first
     // argument (previously supplied last, via `.run_with(...)`) and moved
@@ -57,6 +85,13 @@ pub fn run() -> iced::Result {
         })
         .subscription(XizorApp::subscription)
         .theme(XizorApp::theme)
+        // Scales the window's base background_color (what the renderer
+        // clears the whole surface to before drawing anything) by
+        // `config.alpha.background` - see `XizorApp::style`. Without this,
+        // `.transparent(transparent)` above requests OS-level window
+        // transparency but the window still gets cleared fully opaque, so
+        // nothing actually shows through.
+        .style(XizorApp::style)
         // Don't let iced auto-exit on the window's close button - the app
         // needs a chance to run a last-ditch draft flush first (see
         // `Message::WindowCloseRequested` in `app.rs`), then closes the

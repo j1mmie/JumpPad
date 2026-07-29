@@ -11,7 +11,7 @@ theme = "Kanagawa Wave"
 # 1.0 is fully solid, 0.0 fully invisible. Leaving background at 1.0 (the
 # default) skips enabling OS-level window transparency entirely, avoiding
 # any compositing overhead for the common case of not wanting this at all.
-background = 1.0
+background = 0.5
 foreground = 1.0
 
 [visor]
