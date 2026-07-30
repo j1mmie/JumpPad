@@ -71,6 +71,9 @@ pub struct XizorApp {
     /// Tab ids that asked to close while a prompt was already showing
     close_queue: Vec<u64>,
     file_dialog_active: bool,
+    /// Live keyboard modifier state - iced's mouse events carry no
+    /// modifiers, so shift+click handling reads it from here.
+    modifiers: keyboard::Modifiers,
 }
 
 /// State for the unsaved-changes modal - `focused` indexes the three
@@ -130,6 +133,9 @@ pub enum Message {
     /// its own variant since `Subscription::filter_map`'s closure can't
     /// capture `self.keybind_overrides`.
     KeyPressed(keyboard::Key, keyboard::Modifiers, key::Physical),
+    /// The keyboard modifier state changed - keeps `XizorApp::modifiers`
+    /// current between key presses.
+    ModifiersChanged(keyboard::Modifiers),
 }
 
 /// The three choices offered by the unsaved-changes prompt (see
@@ -224,6 +230,7 @@ impl XizorApp {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            modifiers: keyboard::Modifiers::default(),
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
@@ -606,6 +613,10 @@ impl XizorApp {
                     None => Task::none(),
                 }
             }
+            Message::ModifiersChanged(modifiers) => {
+                self.modifiers = modifiers;
+                Task::none()
+            }
             Message::DismissError => {
                 self.error = None;
                 Task::none()
@@ -617,6 +628,7 @@ impl XizorApp {
                     return Task::none();
                 }
                 if let Some(tab) = self.tabs.get_mut(index) {
+                    let editor_message = editor_message.with_shift_click(self.modifiers.shift());
                     if tab.editor.update(editor_message) {
                         let just_became_dirty = !tab.dirty;
                         tab.dirty = true;
@@ -954,7 +966,8 @@ impl XizorApp {
 
     pub fn subscription(&self) -> Subscription<Message> {
         let mut subscriptions = vec![
-            // Filters the unified keyboard-event stream down to presses only.
+            // Filters the unified keyboard-event stream down to presses and
+            // modifier changes.
             keyboard::listen().filter_map(|event| match event {
                 keyboard::Event::KeyPressed {
                     key,
@@ -962,6 +975,9 @@ impl XizorApp {
                     physical_key,
                     ..
                 } => Some(Message::KeyPressed(key, modifiers, physical_key)),
+                keyboard::Event::ModifiersChanged(modifiers) => {
+                    Some(Message::ModifiersChanged(modifiers))
+                }
                 _ => None,
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
@@ -1467,6 +1483,32 @@ mod tests {
         Box::new(|_text, _extension| Box::new(StubEditor) as Box<dyn TextEditorWidget>)
     }
 
+    /// Records every message it's handed, for asserting on what the app
+    /// actually dispatches to an editor.
+    struct RecordingEditor(std::rc::Rc<std::cell::RefCell<Vec<EditorMessage>>>);
+
+    impl TextEditorWidget for RecordingEditor {
+        fn view(&self) -> Element<'_, EditorMessage> {
+            iced::widget::text("").into()
+        }
+        fn update(&mut self, message: EditorMessage) -> bool {
+            self.0.borrow_mut().push(message);
+            false
+        }
+        fn text(&self) -> String {
+            String::new()
+        }
+        fn set_text(&mut self, _text: &str) {}
+        fn poll_highlighting(&mut self) {}
+        fn cursor_position(&self) -> (usize, usize) {
+            (0, 0)
+        }
+        fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
+        fn has_pending_highlighting(&self) -> bool {
+            false
+        }
+    }
+
     /// Builds an `XizorApp` with `tab_count` untitled tabs, skipping the real I/O `new()` does.
     fn test_app(tab_count: u64) -> XizorApp {
         let factory = stub_factory();
@@ -1493,7 +1535,32 @@ mod tests {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            modifiers: Modifiers::default(),
         }
+    }
+
+    #[test]
+    fn shift_click_reaches_the_editor_as_a_selection_extending_drag() {
+        use iced::widget::text_editor;
+
+        let mut app = test_app(1);
+        let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        app.tabs[0].editor = Box::new(RecordingEditor(log.clone()));
+        let click = EditorMessage::Action(text_editor::Action::Click(iced::Point::ORIGIN));
+
+        let _ = app.update(Message::ModifiersChanged(Modifiers::SHIFT));
+        let _ = app.update(Message::Editor(0, click.clone()));
+        // Releasing shift restores the plain click.
+        let _ = app.update(Message::ModifiersChanged(Modifiers::default()));
+        let _ = app.update(Message::Editor(0, click));
+
+        assert!(matches!(
+            log.borrow().as_slice(),
+            [
+                EditorMessage::Action(text_editor::Action::Drag(_)),
+                EditorMessage::Action(text_editor::Action::Click(_)),
+            ]
+        ));
     }
 
     #[test]
