@@ -156,13 +156,29 @@ re-derive it:
 - It is not the window frame either: reproduced identically with
   `[window] decorations = false`, so it isn't the titlebar's view hierarchy.
 
-The culprit is `NSWindow.preservesContentDuringLiveResize`, which Apple
-documents as optimizing resize by "preserving the content of views that have
-not changed" - on a translucent window that preserved copy is what shows
-through. `crates/xizor/src/macos.rs` turns it off. **A programmatic resize
-does not refresh or clear the copy** - `iced::window::resize` isn't a live
-resize, and `resize_kick` was confirmed by its own log lines to fire with no
-effect whatsoever. That avenue is dead; don't rebuild it.
+The cache is in the **view's root layer**, not the surface and not the
+window. `wgpu` renders into a `CAMetalLayer` added as a *sublayer* of the
+view's AppKit-managed root layer, and deliberately leaves that root layer's
+properties at their defaults (`wgpu_hal::metal::surface` says so in a
+comment). One of those defaults is
+`NSViewLayerContentsRedrawDuringViewResize`, which has AppKit snapshot the
+view's contents into the root layer across a resize - behind the translucent
+sublayer, where it shows through and no redraw of ours can reach it.
+`crates/xizor/src/macos.rs` sets the policy to
+`...RedrawOnSetNeedsDisplay` instead and clears any snapshot already taken.
+
+Not `...RedrawNever`: winit's view implements `drawRect:` and calls
+`handle_redraw` from it, so suppressing those calls stops the app painting
+altogether.
+
+Two dead ends, so they aren't re-attempted:
+
+- **`NSWindow.preservesContentDuringLiveResize`.** Sounds like exactly this
+  bug - Apple documents it as "preserving the content of views that have not
+  changed" - but it caches at the window level. Setting it to `NO` changed
+  nothing.
+- **A programmatic resize.** `iced::window::resize` isn't a live resize;
+  `resize_kick` was confirmed by its own log lines to fire with no effect.
 
 **Also on this path - an upstream alpha-convention mismatch.** Metal offers
 only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,

@@ -698,7 +698,7 @@ impl XizorApp {
                 #[cfg(target_os = "macos")]
                 let appkit_task = match id.filter(|_| self.background_alpha < 1.0) {
                     Some(id) => iced::window::run(id, |window| {
-                        crate::macos::disable_live_resize_content_preservation(window);
+                        crate::macos::disable_resize_content_caching(window);
                     })
                     .discard(),
                     None => Task::none(),
