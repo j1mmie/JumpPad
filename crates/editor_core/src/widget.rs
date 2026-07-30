@@ -34,6 +34,15 @@ pub trait TextEditorWidget {
     /// nearest valid position if the document has since gotten shorter.
     fn move_cursor_to(&mut self, line: usize, column: usize);
 
+    /// The fixed end of the current selection, if text is selected - the
+    /// cursor is the other end. `None` when nothing is selected. Saved by
+    /// the app shell on deselect, like `cursor_position`.
+    fn selection_anchor(&self) -> Option<(usize, usize)>;
+
+    /// Restores a selection spanning `anchor` to `cursor`, clamping both
+    /// like `move_cursor_to` does.
+    fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize));
+
     /// Whether this editor is still waiting on a grammar load - used by the
     /// app shell to decide whether the highlighting-poll subscription needs
     /// to stay active.

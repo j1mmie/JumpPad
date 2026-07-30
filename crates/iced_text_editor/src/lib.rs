@@ -10,7 +10,7 @@ use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
 use iced::widget::text_editor;
-use iced::widget::text_editor::{Binding, Content, KeyPress, Motion, Status};
+use iced::widget::text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status};
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 
@@ -215,20 +215,39 @@ impl TextEditorWidget for IcedTextEditor {
     }
 
     fn move_cursor_to(&mut self, line: usize, column: usize) {
-        // No absolute "jump to (line, column)" action exists, so this walks
-        // there from document start - each step clamps to the nearest
-        // valid position if the document's since gotten shorter.
-        self.content
-            .perform(text_editor::Action::Move(text_editor::Motion::DocumentStart));
-        for _ in 0..line {
-            self.content
-                .perform(text_editor::Action::Move(text_editor::Motion::Down));
-        }
-        for _ in 0..column {
-            self.content
-                .perform(text_editor::Action::Move(text_editor::Motion::Right));
-        }
+        let position = clamp_position(&self.content, (line, column));
+        self.content.move_to(Cursor { position, selection: None });
     }
+
+    fn selection_anchor(&self) -> Option<(usize, usize)> {
+        let cursor = self.content.cursor();
+        cursor
+            .selection
+            .filter(|anchor| *anchor != cursor.position)
+            .map(|anchor| (anchor.line, anchor.column))
+    }
+
+    fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize)) {
+        self.content.move_to(Cursor {
+            position: clamp_position(&self.content, cursor),
+            selection: Some(clamp_position(&self.content, anchor)),
+        });
+    }
+}
+
+/// Clamps a saved (line, column) to the nearest valid position, in case the
+/// document has since gotten shorter - `Content::move_to` does no bounds
+/// checking of its own. `column` is a byte index within the line (matching
+/// what `Content::cursor` reports), so it's also backed up to a `char`
+/// boundary.
+fn clamp_position(content: &Content, (line, column): (usize, usize)) -> Position {
+    let line = line.min(content.line_count().saturating_sub(1));
+    let text = content.line(line).map(|l| l.text.into_owned()).unwrap_or_default();
+    let mut column = column.min(text.len());
+    while !text.is_char_boundary(column) {
+        column -= 1;
+    }
+    Position { line, column }
 }
 
 /// The settings a [`TreeSitterHighlighter`] is built/updated from: the
@@ -517,6 +536,42 @@ mod tests {
             text: text.map(Into::into),
             status: Status::Focused { is_hovered: false },
         }
+    }
+
+    /// An editor with no highlighting and default alpha, for cursor/selection tests.
+    fn plain_editor(text: &str) -> IcedTextEditor {
+        let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+        IcedTextEditor::new(text, &registry, None, Arc::new(EditorOverrides::new()), 1.0)
+    }
+
+    #[test]
+    fn select_range_round_trips_through_selection_anchor_and_cursor() {
+        let mut editor = plain_editor("hello\nworld");
+        editor.select_range((0, 2), (1, 4));
+        assert_eq!(editor.selection_anchor(), Some((0, 2)));
+        assert_eq!(editor.cursor_position(), (1, 4));
+    }
+
+    #[test]
+    fn selection_anchor_is_none_without_a_selection() {
+        let mut editor = plain_editor("hello");
+        editor.move_cursor_to(0, 3);
+        assert_eq!(editor.selection_anchor(), None);
+        assert_eq!(editor.cursor_position(), (0, 3));
+    }
+
+    #[test]
+    fn clamp_position_clamps_line_and_column_to_the_document() {
+        let content = Content::with_text("hello\nhi");
+        assert_eq!(clamp_position(&content, (9, 9)), Position { line: 1, column: 2 });
+        assert_eq!(clamp_position(&content, (0, 3)), Position { line: 0, column: 3 });
+    }
+
+    #[test]
+    fn clamp_position_backs_up_to_a_char_boundary() {
+        // 'é' occupies bytes 1..3, so byte offset 2 is mid-character.
+        let content = Content::with_text("héllo");
+        assert_eq!(clamp_position(&content, (0, 2)), Position { line: 0, column: 1 });
     }
 
     #[test]
