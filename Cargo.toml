@@ -44,3 +44,5 @@ xizor_config = { path = "crates/xizor_config" }
 strip = true
 panic = "abort"
 lto = true
+codegen-units = 1 # Slower, but better planned builds
+opt-level = "z" # "z" for binary size, "s" to favor runtime speed

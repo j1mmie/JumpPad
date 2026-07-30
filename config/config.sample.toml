@@ -9,11 +9,11 @@
 theme = "Kanagawa Wave"
 
 [alpha]
-background = 0.4
+background = 0.9
 foreground = 1.0
 
 [window]
-decorations = false
+decorations = true
 
 [visor]
 enabled = false
