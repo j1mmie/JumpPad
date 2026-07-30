@@ -127,6 +127,16 @@ type solely from which feature(s) are active (both features enabled at
 once, as in the old single-binary setup, would compile in a
 runtime-switchable fallback compositor instead - not the case here).
 
+**Gotcha - on macOS, transparency requires `xizor-gpu`.** `softbuffer`'s
+CoreGraphics backend builds its `CGImage` with
+`CGImageAlphaInfo::NoneSkipFirst` (`softbuffer-0.4.8/src/backends/cg.rs`),
+which discards the alpha channel outright. The `xizor` (tiny-skia) binary
+therefore cannot produce a translucent window on macOS at all, no matter
+what `[alpha] background` says - it renders the alpha and CoreGraphics
+throws it away. Anything transparency-related reported from macOS is by
+definition the wgpu path, so don't debug it against `iced_tiny_skia`'s
+compositor (this mistake has already been made once).
+
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
 `iced`'s tiny-skia compositor skips presenting a frame it thinks looks

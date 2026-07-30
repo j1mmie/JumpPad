@@ -30,9 +30,14 @@ const HEIGHT_COLLAPSE_TEST_WAIT_FRAMES: u8 = 1;
 /// enough: `softbuffer` presents through several buffers in rotation, and
 /// `iced_tiny_skia` only repaints the one it was handed. The buffers it skipped
 /// still hold the previous tab's text, and come back around a frame or two
-/// later - which is the ghost text. Nudging for several frames running repaints
-/// every buffer in the rotation.
-const REDRAW_NUDGE_FRAMES: u8 = 4;
+/// later. Nudging for several frames running repaints every buffer in the
+/// rotation.
+///
+/// Zero on the wgpu backend: it has no damage tracking to defeat (it clears and
+/// redraws the whole surface every frame), so a nudge there buys nothing and
+/// the forced frames are pure waste. Zero also switches the whole mechanism
+/// off, since `theme()` and `subscription()` both gate on the counter.
+const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
 
 pub struct XizorApp {
     tabs: Vec<Tab>,
