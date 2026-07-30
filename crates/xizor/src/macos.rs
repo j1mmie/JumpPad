@@ -68,6 +68,30 @@ pub fn clear_root_layer_snapshot(window: &dyn iced::window::Window) {
     log::debug!("xizor: cleared the view root layer's cached contents");
 }
 
+/// Recomputes the window's shadow.
+///
+/// macOS derives a translucent window's shadow from a window-server-side
+/// snapshot of its content, and that snapshot is also what gets composited
+/// behind the window - stale, it shows old content through at
+/// `1 - background_alpha`. It lives outside the process, which is why no
+/// layer or surface work reaches it. `invalidateShadow` tells the window
+/// server to retake it.
+pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
+    let Some(view) = ns_view(window) else {
+        return;
+    };
+    // SAFETY: `view` is a live `NSView`; `-window` and `-invalidateShadow` are
+    // plain AppKit selectors, called on the main thread.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, invalidateShadow];
+    }
+    log::debug!("xizor: invalidated the window shadow");
+}
+
 /// Hides leftover `wgpu` render layers stacked under the live one.
 ///
 /// **This is the burn-in.** `wgpu` renders into a `CAMetalLayer` it appends as a

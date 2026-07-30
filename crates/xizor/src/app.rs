@@ -436,6 +436,7 @@ impl XizorApp {
             Some(id) => iced::window::run(id, |window| {
                 crate::macos::hide_stale_render_layers(window);
                 crate::macos::clear_root_layer_snapshot(window);
+                crate::macos::invalidate_window_shadow(window);
             })
             .discard(),
             None => Task::none(),
