@@ -1287,18 +1287,26 @@ fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
     Theme::custom("xizor (redraw nudge)".to_string(), palette)
 }
 
-/// Premultiplies a color's RGB by its alpha, in linear space - the space the
-/// clear color is handed to wgpu in (`Color::into_linear`).
+/// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
+/// values - the space the macOS window server composites in.
 ///
-/// **The solid-white-window fix.** The macOS window server composites the
-/// surface as *premultiplied* alpha - `src + (1 - a) * desktop` - but iced's
-/// clear color is written straight, so a straight white background saturates
-/// to solid white at any alpha, while a near-black one (rgb ~ 0) happens to
+/// **The solid-white-window fix.** The window server composites the surface
+/// as *premultiplied* alpha - `src + (1 - a) * desktop` - but iced's clear
+/// color is written straight, so a straight white background saturates to
+/// solid white at any alpha, while a near-black one (rgb ~ 0) happens to
 /// look right; only light themes ever looked broken. Quads and glyphs are
 /// unaffected - iced's shaders premultiply before writing (see AGENTS.md).
+///
+/// Not in linear space: the composite runs on encoded values, and
+/// `encode(linear * a) > encode(linear) * a`, so premultiplying before the
+/// sRGB encode over-brightens - white at alpha 0.1 came out ~3.5x too bright.
 fn premultiply(color: Color) -> Color {
-    let [r, g, b, a] = color.into_linear();
-    Color::from_linear_rgba(r * a, g * a, b * a, a)
+    Color {
+        r: color.r * color.a,
+        g: color.g * color.a,
+        b: color.b * color.a,
+        a: color.a,
+    }
 }
 
 /// Matches a config-file theme name against `Theme::ALL` by display name
@@ -1868,13 +1876,14 @@ mod tests {
     }
 
     #[test]
-    fn premultiply_scales_linear_rgb_by_alpha() {
-        // Linear white is 1.0 per channel, so premultiplied it *is* the alpha.
-        let [r, g, b, a] = premultiply(Color { a: 0.25, ..Color::WHITE }).into_linear();
-        for (channel, value) in [("r", r), ("g", g), ("b", b)] {
-            assert!((value - 0.25).abs() < 1e-5, "{channel} = {value}, wanted 0.25");
-        }
-        assert!((a - 0.25).abs() < 1e-6, "alpha must survive untouched, got {a}");
+    fn premultiply_scales_encoded_rgb_by_alpha() {
+        // White premultiplied is the alpha itself, per channel - directly on
+        // the encoded values, with no linear round-trip to brighten them.
+        let color = premultiply(Color { a: 0.25, ..Color::WHITE });
+        assert_eq!(color.r, 0.25);
+        assert_eq!(color.g, 0.25);
+        assert_eq!(color.b, 0.25);
+        assert_eq!(color.a, 0.25, "alpha must survive untouched");
     }
 
     #[test]
