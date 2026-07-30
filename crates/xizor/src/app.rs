@@ -45,6 +45,12 @@ const RESIZE_KICK_WAIT_FRAMES: u8 = 1;
 /// off, since `theme()` and `subscription()` both gate on the counter.
 const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
 
+/// How many presented frames to wait before refreshing the macOS window
+/// shadow after the content changes (see `macos.rs`). Refreshing on the same
+/// frame re-caches the outgoing content; a couple of frames later, the new
+/// content has actually presented.
+const SHADOW_REFRESH_FRAMES: u8 = 3;
+
 pub struct XizorApp {
     tabs: Vec<Tab>,
     active: usize,
@@ -57,6 +63,9 @@ pub struct XizorApp {
     /// Frames left to hold a nudged background color for, counted down from
     /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
     redraw_nudge_frames: u8,
+    /// Frames left until the macOS window shadow is refreshed - see
+    /// `SHADOW_REFRESH_FRAMES`.
+    shadow_refresh_frames: u8,
     session_dir: PathBuf,
     /// List of tab ids waiting on a save
     pending_close_after_save: Vec<u64>,
@@ -127,7 +136,10 @@ pub enum Message {
     ResizeKickTick,
     /// One presented frame elapsed - counts down `redraw_nudge_frames`.
     RedrawNudgeFrame,
-    /// The window was resized - drops AppKit's snapshot of it on macOS.
+    /// One presented frame elapsed - counts down `shadow_refresh_frames`,
+    /// refreshing the macOS window shadow when it hits zero.
+    ShadowRefreshFrame,
+    /// The window was resized - the macOS shadow cache needs retaking.
     WindowResized,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
     /// wrapping past the last back to the first.
@@ -223,6 +235,7 @@ impl XizorApp {
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
             resize_kick: None,
             redraw_nudge_frames: 0,
+            shadow_refresh_frames: 0,
             session_dir,
             pending_close_after_save: Vec::new(),
             window: None,
@@ -347,6 +360,7 @@ impl XizorApp {
         // didn't move, so `switch_active` would call it a no-op, but the editor
         // sitting at it is brand new and still needs focus and a repaint.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+        self.arm_shadow_refresh();
         self.sync_session_metadata();
         operate(operation::focusable::focus_next())
     }
@@ -409,11 +423,8 @@ impl XizorApp {
             tab.editor.move_cursor_to(line, column);
         }
         self.sync_session_metadata();
-        Task::batch([
-            operate(operation::focusable::focus_next()),
-            self.log_appkit_layers(),
-            self.clear_appkit_snapshot(),
-        ])
+        self.arm_shadow_refresh();
+        operate(operation::focusable::focus_next())
     }
 
     /// Moves the active tab by `delta` positions, wrapping around at either
@@ -427,15 +438,20 @@ impl XizorApp {
         self.switch_active(next)
     }
 
-    /// Drops AppKit's cached copy of the window (see `macos.rs`). Runs after a
-    /// resize, which is when it's taken, and after a tab switch, which is when
-    /// a stale one becomes visible.
+    /// Arms the shadow-refresh countdown (see `macos.rs`): the window server's
+    /// shadow cache goes stale whenever the content changes, and refreshing it
+    /// too early re-caches the outgoing frame, so the invalidation waits
+    /// `SHADOW_REFRESH_FRAMES` presented frames.
+    fn arm_shadow_refresh(&mut self) {
+        if cfg!(target_os = "macos") && self.background_alpha < 1.0 {
+            self.shadow_refresh_frames = SHADOW_REFRESH_FRAMES;
+        }
+    }
+
     #[cfg(target_os = "macos")]
-    fn clear_appkit_snapshot(&self) -> Task<Message> {
-        match self.window.filter(|_| self.background_alpha < 1.0) {
+    fn refresh_window_shadow(&self) -> Task<Message> {
+        match self.window {
             Some(id) => iced::window::run(id, |window| {
-                crate::macos::hide_stale_render_layers(window);
-                crate::macos::clear_root_layer_snapshot(window);
                 crate::macos::invalidate_window_shadow(window);
             })
             .discard(),
@@ -444,26 +460,7 @@ impl XizorApp {
     }
 
     #[cfg(not(target_os = "macos"))]
-    fn clear_appkit_snapshot(&self) -> Task<Message> {
-        Task::none()
-    }
-
-    /// Logs the Core Animation layer tree. Hung off the tab switch rather than
-    /// the resize, since a switch is when the burn-in becomes visible and a
-    /// drag would emit this dozens of times.
-    #[cfg(target_os = "macos")]
-    fn log_appkit_layers(&self) -> Task<Message> {
-        match self.window.filter(|_| self.background_alpha < 1.0) {
-            Some(id) => iced::window::run(id, |window| {
-                crate::macos::log_window_layer_tree(window);
-            })
-            .discard(),
-            None => Task::none(),
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    fn log_appkit_layers(&self) -> Task<Message> {
+    fn refresh_window_shadow(&self) -> Task<Message> {
         Task::none()
     }
 
@@ -744,7 +741,7 @@ impl XizorApp {
                 #[cfg(target_os = "macos")]
                 let appkit_task = match id.filter(|_| self.background_alpha < 1.0) {
                     Some(id) => iced::window::run(id, |window| {
-                        crate::macos::disable_resize_content_caching(window);
+                        crate::macos::apply_translucent_window_fixes(window);
                     })
                     .discard(),
                     None => Task::none(),
@@ -794,10 +791,21 @@ impl XizorApp {
                 self.resize_kick = Some((original, next_waited));
                 Task::none()
             }
-            Message::WindowResized => self.clear_appkit_snapshot(),
+            Message::WindowResized => {
+                self.arm_shadow_refresh();
+                Task::none()
+            }
             Message::RedrawNudgeFrame => {
                 self.redraw_nudge_frames = self.redraw_nudge_frames.saturating_sub(1);
                 Task::none()
+            }
+            Message::ShadowRefreshFrame => {
+                self.shadow_refresh_frames = self.shadow_refresh_frames.saturating_sub(1);
+                if self.shadow_refresh_frames == 0 {
+                    self.refresh_window_shadow()
+                } else {
+                    Task::none()
+                }
             }
         }
     }
@@ -1050,6 +1058,10 @@ impl XizorApp {
         // the platform's buffer rotation, which is counted in frames.
         if self.redraw_nudge_frames > 0 {
             subscriptions.push(iced::window::frames().map(|_| Message::RedrawNudgeFrame));
+        }
+
+        if self.shadow_refresh_frames > 0 {
+            subscriptions.push(iced::window::frames().map(|_| Message::ShadowRefreshFrame));
         }
 
         if self.tabs.iter().any(|tab| tab.editor.has_pending_highlighting()) {
@@ -1537,6 +1549,7 @@ mod tests {
             background_alpha: 1.0,
             resize_kick: None,
             redraw_nudge_frames: 0,
+            shadow_refresh_frames: 0,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
             window: None,

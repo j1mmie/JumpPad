@@ -155,30 +155,45 @@ re-derive it:
 
 - It is not the window frame either: reproduced identically with
   `[window] decorations = false`, so it isn't the titlebar's view hierarchy.
+- It is not in *any* layer in the process: a recursive dump of the whole
+  window's layer tree showed every layer clean while the ghost was on
+  screen.
 
-The cache is in the **view's root layer**, not the surface and not the
-window. `wgpu` renders into a `CAMetalLayer` added as a *sublayer* of the
-view's AppKit-managed root layer, and deliberately leaves that root layer's
-properties at their defaults (`wgpu_hal::metal::surface` says so in a
-comment). One of those defaults is
-`NSViewLayerContentsRedrawDuringViewResize`, which has AppKit snapshot the
-view's contents into the root layer across a resize - behind the translucent
-sublayer, where it shows through and no redraw of ours can reach it.
-`crates/xizor/src/macos.rs` sets the policy to
-`...RedrawOnSetNeedsDisplay` instead and clears any snapshot already taken.
+The cache is the **window server's shadow-content cache** - the window
+server keeps a copy of a translucent window's content to derive its shadow,
+and composites that copy behind the window. It lives outside the process,
+which is why no surface clear, layer clear, or redraw ever touched it.
+Confirmed by elimination: `setHasShadow: NO` kills the ghost outright.
 
-Not `...RedrawNever`: winit's view implements `drawRect:` and calls
-`handle_redraw` from it, so suppressing those calls stops the app painting
-altogether.
+**The fix** (`crates/xizor/src/macos.rs` + `app.rs`): keep the shadow, call
+`NSWindow.invalidateShadow` after the content changes - but only after the
+new frame has *presented*. Calling it the moment the tab switches re-caches
+the outgoing frame and fixes nothing (tried, confirmed useless);
+`shadow_refresh_frames` counts `SHADOW_REFRESH_FRAMES` presented frames
+(via `iced::window::frames()`, gated like the other subscriptions) before
+invalidating. Armed on tab switch, tab creation, and window resize.
 
-Two dead ends, so they aren't re-attempted:
+Also real, though not the burn-in: **leftover wgpu render layers**. The
+layer dump found two `WgpuObserverLayer`s under the view's root layer - the
+older one `opaque=true`, a leftover from the adapter-probe surface -
+stacked behind the live one. `hide_stale_render_layers` hides everything
+below the last (live) sublayer at startup.
 
-- **`NSWindow.preservesContentDuringLiveResize`.** Sounds like exactly this
-  bug - Apple documents it as "preserving the content of views that have not
-  changed" - but it caches at the window level. Setting it to `NO` changed
-  nothing.
-- **A programmatic resize.** `iced::window::resize` isn't a live resize;
-  `resize_kick` was confirmed by its own log lines to fire with no effect.
+Dead ends, so they aren't re-attempted (each confirmed no-op on a real
+machine):
+
+- **`NSWindow.preservesContentDuringLiveResize = NO`.** Sounds like exactly
+  this bug; changed nothing.
+- **`layerContentsRedrawPolicy` / clearing the root layer's `contents`.**
+  The root layer never held the snapshot. (If a policy change is ever
+  needed: not `...RedrawNever` - winit's view drives `handle_redraw` from
+  `drawRect:`, so that stops the app painting.)
+- **A programmatic resize as the *mechanism*.** The 1px `resize_kick` does
+  clear the ghost, but only as a side effect of the swapchain rebuild
+  forcing the window server to retake its snapshot - it re-records a new
+  one, so the ghost returns on the next content change.
+- **`invalidateShadow` at content-change time.** Right lever, wrong moment;
+  it must run after the new frame presents.
 
 **Also on this path - an upstream alpha-convention mismatch.** Metal offers
 only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,

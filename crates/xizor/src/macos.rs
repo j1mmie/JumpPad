@@ -1,4 +1,10 @@
 //! macOS window tweaks that neither iced nor winit exposes.
+//!
+//! Both exist for one bug: the translucent-window "burn-in" (see AGENTS.md).
+//! The ghost lives in the window server's shadow-content cache, *outside the
+//! process* - which is why clearing surfaces, layer contents, or layer trees
+//! never touched it, and why only things that made the window server retake
+//! its snapshot (a drag-resize, a 1px programmatic resize) appeared to help.
 
 // `window_handle()` resolves through `iced::window::Window`'s own supertrait
 // bound, so `HasWindowHandle` doesn't need to be in scope here.
@@ -6,93 +12,25 @@ use iced::window::raw_window_handle::RawWindowHandle;
 use objc2::msg_send;
 use objc2::runtime::{AnyClass, AnyObject, Bool};
 
-/// `NSViewLayerContentsRedrawOnSetNeedsDisplay`. Deliberately not
-/// `...RedrawNever`, which would stop AppKit calling `drawRect:` - winit's view
-/// drives its whole redraw dispatch from there, so the app would simply stop
-/// painting.
-const REDRAW_ON_SET_NEEDS_DISPLAY: isize = 1;
-
-/// Stops AppKit caching the window's contents into the view's root layer.
-///
-/// **The macOS burn-in.** `wgpu` renders into a `CAMetalLayer` added as a
-/// *sublayer* of the view's AppKit-managed root layer, and deliberately leaves
-/// the root layer's properties alone ("we would like to give the user full
-/// control over them" - `wgpu_hal::metal::surface`). The default it leaves in
-/// place is `NSViewLayerContentsRedrawDuringViewResize`, which has AppKit
-/// snapshot the view's rendered contents into that root layer across a resize.
-/// On a translucent window the snapshot sits *behind* the Metal sublayer and
-/// shows through at `1 - background_alpha`: a frozen copy of whatever was on
-/// screen at the last drag-resize, still there when the real content changes
-/// underneath it. Nothing we draw touches it and no number of redraws clears
-/// it, because it isn't in the surface we draw to.
-///
-/// Tried and insufficient, so it isn't re-attempted: `NSWindow`'s
-/// `preservesContentDuringLiveResize`, which sounds like the same thing but
-/// caches at the window level, not the view's layer - setting it to `NO`
-/// changed nothing.
-pub fn disable_resize_content_caching(window: &dyn iced::window::Window) {
-    let Some(view) = ns_view(window) else {
-        return;
-    };
-    // SAFETY: see `with_root_layer`.
-    unsafe {
-        let _: () = msg_send![view, setLayerContentsRedrawPolicy: REDRAW_ON_SET_NEEDS_DISPLAY];
-    }
-    clear_root_layer_snapshot(window);
+/// One-time setup for a translucent window.
+pub fn apply_translucent_window_fixes(window: &dyn iced::window::Window) {
     hide_stale_render_layers(window);
-
-    // DIAGNOSTIC: every layer in the process checks out clean, so the last
-    // suspect for the burn-in is the window server's shadow-content cache -
-    // it keeps a copy of a translucent window's content, with exactly the
-    // observed "snapshot at last resize" semantics. No shadow, no cache. If
-    // the ghost dies with this, the real fix is a well-timed
-    // `invalidateShadow` (after present, not before) rather than losing the
-    // shadow.
-    // SAFETY: same as above; `-window` and `-setHasShadow:` are plain AppKit.
-    unsafe {
-        let ns_window: *mut AnyObject = msg_send![view, window];
-        if !ns_window.is_null() {
-            let _: () = msg_send![ns_window, setHasShadow: Bool::NO];
-            log::info!("xizor: window shadow disabled (burn-in diagnostic)");
-        }
-    }
-
-    log::info!("xizor: disabled AppKit resize-content caching on the view's root layer");
+    log::info!("xizor: applied translucent-window fixes");
 }
 
-/// Drops whatever AppKit has cached in the view's root layer.
+/// Recomputes the window's shadow from the window's *current* content.
 ///
-/// Setting the policy above is meant to stop the snapshot being taken at all,
-/// but it demonstrably doesn't on its own, so this is also called after a
-/// resize (when the snapshot is created) and after a tab switch (when a stale
-/// one becomes visible). If the burn-in outlives *this*, the root layer's
-/// `contents` is not where it lives and the search moves outside the view.
-pub fn clear_root_layer_snapshot(window: &dyn iced::window::Window) {
-    let Some(view) = ns_view(window) else {
-        return;
-    };
-    // SAFETY: `view` is a live `NSView`, `-layer` and `-setContents:` are plain
-    // AppKit and Core Animation selectors, and iced runs window actions on the
-    // main thread, which is where AppKit requires them.
-    unsafe {
-        let root_layer: *mut AnyObject = msg_send![view, layer];
-        if root_layer.is_null() {
-            log::warn!("xizor: NSView is not layer-backed; nothing to clear");
-            return;
-        }
-        let _: () = msg_send![root_layer, setContents: std::ptr::null_mut::<AnyObject>()];
-    }
-    log::debug!("xizor: cleared the view root layer's cached contents");
-}
-
-/// Recomputes the window's shadow.
+/// **This is the burn-in fix.** The window server derives a translucent
+/// window's shadow from a cached copy of its content, and composites that
+/// cache behind the window - so once the real content changes, the stale copy
+/// shows through at `1 - background_alpha`. Confirmed by elimination: with the
+/// shadow disabled outright the ghost is gone, while every layer in the
+/// process was dumped and found clean.
 ///
-/// macOS derives a translucent window's shadow from a window-server-side
-/// snapshot of its content, and that snapshot is also what gets composited
-/// behind the window - stale, it shows old content through at
-/// `1 - background_alpha`. It lives outside the process, which is why no
-/// layer or surface work reaches it. `invalidateShadow` tells the window
-/// server to retake it.
+/// **Timing is the trap.** Calling this the moment the content changes
+/// re-caches the *outgoing* frame - it must run after the new frame has
+/// actually presented, which is why the caller counts a few presented frames
+/// first.
 pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
     let Some(view) = ns_view(window) else {
         return;
@@ -111,21 +49,16 @@ pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
 
 /// Hides leftover `wgpu` render layers stacked under the live one.
 ///
-/// **This is the burn-in.** `wgpu` renders into a `CAMetalLayer` it appends as a
-/// sublayer of the view's root layer, and more than one ends up there - the
-/// observed tree has two, the older one still `opaque=true` because it was
-/// configured before the surface knew it was translucent. Sublayers draw
-/// back-to-front, so that leftover sits *behind* the live layer holding
-/// whatever frame it last presented, and shows through at
-/// `1 - background_alpha`. Nothing we render reaches it: it isn't the surface
-/// we draw to, it isn't the root layer's `contents`, and clearing or redrawing
-/// either one leaves it untouched. Only a swapchain rebuild disturbed it, which
-/// is why a drag-resize appeared to be the cure.
-///
-/// The live layer is the last sublayer, since `wgpu` appends and the leftover is
-/// older, so everything below it is fair game. Each one is logged before being
-/// touched - if this ever hides the wrong layer the window goes blank, and the
-/// log says exactly what went.
+/// `wgpu` renders into a `CAMetalLayer` it appends as a sublayer of the view's
+/// root layer, and more than one ends up there - the observed tree has two,
+/// the older one still `opaque=true` because it was configured before the
+/// surface knew it was translucent. Sublayers draw back-to-front, so on a
+/// translucent window the leftover's last frame would show through the live
+/// layer. (It was not the burn-in - that was the shadow cache above - but an
+/// opaque layer behind a translucent one is a straightforward compositing
+/// hazard.) The live layer is the last sublayer, since `wgpu` appends and the
+/// leftover is older; each hidden layer is logged, so if this ever hides the
+/// wrong one the window goes blank and the log names it.
 pub fn hide_stale_render_layers(window: &dyn iced::window::Window) {
     let Some(view) = ns_view(window) else {
         return;
@@ -154,58 +87,6 @@ pub fn hide_stale_render_layers(window: &dyn iced::window::Window) {
             let _: () = msg_send![layer, setContents: std::ptr::null_mut::<AnyObject>()];
             let _: () = msg_send![layer, setHidden: Bool::YES];
         }
-    }
-}
-
-/// Dumps the layer tree of the *entire window*, from the frame view down.
-///
-/// The ghost survives clearing everything under our own view's layer, so it
-/// must live in a layer we haven't looked at - AppKit's live-resize snapshot
-/// machinery operates on the window's frame view (`NSThemeFrame`), which is an
-/// ancestor of the content view. This walks the whole tree recursively so the
-/// layer actually holding stale contents shows up by class name.
-pub fn log_window_layer_tree(window: &dyn iced::window::Window) {
-    let Some(view) = ns_view(window) else {
-        return;
-    };
-    // SAFETY: live `NSView`, plain AppKit getters, main thread.
-    unsafe {
-        // Walk up to the window's topmost view (the theme frame).
-        let mut top: *mut AnyObject = view;
-        loop {
-            let superview: *mut AnyObject = msg_send![top, superview];
-            if superview.is_null() {
-                break;
-            }
-            top = superview;
-        }
-        let root: *mut AnyObject = msg_send![top, layer];
-        if root.is_null() {
-            log::info!("xizor: window layer tree: frame view is not layer-backed");
-            return;
-        }
-        log::info!("xizor: window layer tree:");
-        log_layer_recursive(root, 0);
-    }
-}
-
-/// # Safety
-///
-/// `layer` must be a live `CALayer`.
-unsafe fn log_layer_recursive(layer: *mut AnyObject, depth: usize) {
-    log::info!(
-        "xizor:   {}{}",
-        "  ".repeat(depth),
-        describe_layer(layer)
-    );
-    let sublayers: *mut AnyObject = msg_send![layer, sublayers];
-    if sublayers.is_null() {
-        return;
-    }
-    let count: usize = msg_send![sublayers, count];
-    for index in 0..count {
-        let sublayer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
-        log_layer_recursive(sublayer, depth + 1);
     }
 }
 
