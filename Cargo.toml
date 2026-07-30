@@ -4,8 +4,8 @@ members = [
     "crates/editor_core",
     "crates/iced_text_editor",
     "crates/syntax_registry",
-    "crates/xizor",
-    "crates/xizor_config",
+    "crates/jumppad",
+    "crates/jumppad_config",
 ]
 
 [workspace.package]
@@ -14,8 +14,8 @@ edition = "2021"
 
 [workspace.dependencies]
 # `wgpu`/`tiny-skia` (iced's two compositor backends) are deliberately left
-# out of this shared default feature set. `xizor`'s Cargo.toml picks exactly
-# one of them per binary target (see `xizor` and `xizor-gpu` there) - if a
+# out of this shared default feature set. `jumppad`'s Cargo.toml picks exactly
+# one of them per binary target (see `jumppad` and `jumppad-gpu` there) - if a
 # library crate here requested one directly, Cargo's feature unification
 # would compile both backends into every binary regardless of what the
 # binary crate asked for, defeating the point of having two builds.
@@ -24,7 +24,7 @@ edition = "2021"
 # have to be requested explicitly here since `default-features = false`
 # above turns them off along with everything else.
 iced = { version = "0.14", default-features = false, features = ["fira-sans", "x11", "wayland"] }
-# Only needed by `xizor_config`, to convert `global-hotkey`/`keyboard-types`
+# Only needed by `jumppad_config`, to convert `global-hotkey`/`keyboard-types`
 # key-chord config into iced-native `keyboard::{Modifiers, key::Code}` in one
 # place. `iced_core` is the crate that actually defines those types, with
 # none of `iced`'s winit/wgpu/rendering weight - appropriate for a
@@ -38,7 +38,7 @@ display-info = "0.5"
 editor_core = { path = "crates/editor_core" }
 iced_text_editor = { path = "crates/iced_text_editor" }
 syntax_registry = { path = "crates/syntax_registry" }
-xizor_config = { path = "crates/xizor_config" }
+jumppad_config = { path = "crates/jumppad_config" }
 
 [profile.release]
 strip = true

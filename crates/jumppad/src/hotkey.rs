@@ -22,13 +22,13 @@ impl Hotkey {
         let manager = match GlobalHotKeyManager::new() {
             Ok(manager) => manager,
             Err(err) => {
-                eprintln!("xizor: couldn't create global hotkey manager: {err}");
+                eprintln!("jumppad: couldn't create global hotkey manager: {err}");
                 return None;
             }
         };
         if let Err(err) = manager.register(hotkey) {
             eprintln!(
-                "xizor: couldn't register global hotkey {hotkey} \
+                "jumppad: couldn't register global hotkey {hotkey} \
                  (already in use by another application?): {err}"
             );
             return None;

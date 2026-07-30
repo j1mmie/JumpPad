@@ -39,7 +39,7 @@ const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
 /// content has actually presented.
 const SHADOW_REFRESH_FRAMES: u8 = 3;
 
-pub struct XizorApp {
+pub struct JumpPadApp {
     tabs: Vec<Tab>,
     active: usize,
     next_id: u64,
@@ -133,7 +133,7 @@ pub enum Message {
     /// its own variant since `Subscription::filter_map`'s closure can't
     /// capture `self.keybind_overrides`.
     KeyPressed(keyboard::Key, keyboard::Modifiers, key::Physical),
-    /// The keyboard modifier state changed - keeps `XizorApp::modifiers`
+    /// The keyboard modifier state changed - keeps `JumpPadApp::modifiers`
     /// current between key presses.
     ModifiersChanged(keyboard::Modifiers),
 }
@@ -165,16 +165,16 @@ pub enum SaveError {
     },
 }
 
-impl XizorApp {
+impl JumpPadApp {
     /// Takes the already-loaded config rather than loading it itself: `run()`
     /// (in `lib.rs`) loads it before the iced runtime starts, which is
     /// before this constructor ever runs.
-    pub fn new(config: xizor_config::Config) -> (Self, Task<Message>) {
+    pub fn new(config: jumppad_config::Config) -> (Self, Task<Message>) {
         let search_dirs = default_search_dirs();
         log_wasm_files_found(&search_dirs);
         // No push-based wake-up needed (unlike egui's `ctx.request_repaint()`) -
         // the highlighting-poll subscription below re-checks periodically instead.
-        let keybinds = xizor_config::load_keybinds();
+        let keybinds = jumppad_config::load_keybinds();
         let keybind_overrides = Arc::new(build_app_overrides(&keybinds));
         let editor_overrides = Arc::new(build_editor_overrides(&keybinds));
         warn_unrecognized_overrides(&keybinds.overrides);
@@ -756,7 +756,7 @@ impl XizorApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!("xizor: couldn't determine the primary monitor's bounds");
+            eprintln!("jumppad: couldn't determine the primary monitor's bounds");
             return Task::none();
         };
         Task::batch([
@@ -775,7 +775,7 @@ impl XizorApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!("xizor: couldn't determine the primary monitor's bounds");
+            eprintln!("jumppad: couldn't determine the primary monitor's bounds");
             return Task::none();
         };
 
@@ -1036,7 +1036,7 @@ pub const APP_COMMAND_NAMES: &[&str] = &[
 /// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical
 /// key + modifiers, matching what `handle_hotkey` checks incoming presses against.
 fn build_app_overrides(
-    keybinds: &xizor_config::KeybindsConfig,
+    keybinds: &jumppad_config::KeybindsConfig,
 ) -> HashMap<(keyboard::Modifiers, key::Code), Message> {
     let resolved = keybinds.resolved_overrides();
     let mut map = HashMap::new();
@@ -1058,9 +1058,9 @@ fn build_app_overrides(
 }
 
 /// Mirror of `build_app_overrides` for editor-level commands - built here so
-/// `iced_text_editor` doesn't need to depend on `xizor_config`/`global_hotkey`.
+/// `iced_text_editor` doesn't need to depend on `jumppad_config`/`global_hotkey`.
 fn build_editor_overrides(
-    keybinds: &xizor_config::KeybindsConfig,
+    keybinds: &jumppad_config::KeybindsConfig,
 ) -> HashMap<(keyboard::Modifiers, key::Code), iced_text_editor::EditorCommand> {
     let resolved = keybinds.resolved_overrides();
     let mut map = HashMap::new();
@@ -1083,7 +1083,7 @@ fn warn_unrecognized_overrides(overrides: &HashMap<String, global_hotkey::hotkey
                 .any(|(known_name, _)| known_name == name);
         if !known {
             eprintln!(
-                "xizor_config: keybinds.toml overrides an unrecognized command {name:?}, ignoring"
+                "jumppad_config: keybinds.toml overrides an unrecognized command {name:?}, ignoring"
             );
         }
     }
@@ -1300,7 +1300,7 @@ fn modal_scrim_style(_theme: &Theme) -> container::Style {
 fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
     let mut palette = theme.palette();
     palette.background.a -= 0.001 * f32::from(frames_left);
-    Theme::custom("xizor (redraw nudge)".to_string(), palette)
+    Theme::custom("jumppad (redraw nudge)".to_string(), palette)
 }
 
 /// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
@@ -1343,7 +1343,7 @@ fn resolve_theme(name: &str) -> Theme {
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!(
-                "xizor: unknown theme {name:?}, using default. Valid options: {valid}"
+                "jumppad: unknown theme {name:?}, using default. Valid options: {valid}"
             );
             Theme::Light
         }
@@ -1377,10 +1377,10 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                     .collect();
                 wasm_files.sort();
                 if wasm_files.is_empty() {
-                    eprintln!("xizor: {}: exists but no .wasm files found", dir.display());
+                    eprintln!("jumppad: {}: exists but no .wasm files found", dir.display());
                 } else {
                     eprintln!(
-                        "xizor: {}: found {} .wasm file(s): {}",
+                        "jumppad: {}: found {} .wasm file(s): {}",
                         dir.display(),
                         wasm_files.len(),
                         wasm_files.join(", ")
@@ -1388,7 +1388,7 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                 }
             }
             Err(err) => {
-                eprintln!("xizor: {}: couldn't read directory: {err}", dir.display());
+                eprintln!("jumppad: {}: couldn't read directory: {err}", dir.display());
             }
         }
     }
@@ -1509,11 +1509,11 @@ mod tests {
         }
     }
 
-    /// Builds an `XizorApp` with `tab_count` untitled tabs, skipping the real I/O `new()` does.
-    fn test_app(tab_count: u64) -> XizorApp {
+    /// Builds an `JumpPadApp` with `tab_count` untitled tabs, skipping the real I/O `new()` does.
+    fn test_app(tab_count: u64) -> JumpPadApp {
         let factory = stub_factory();
         let tabs = (0..tab_count).map(|id| Tab::untitled(id, &factory)).collect();
-        XizorApp {
+        JumpPadApp {
             tabs,
             active: 0,
             next_id: tab_count,
@@ -1675,7 +1675,7 @@ mod tests {
 
     #[test]
     fn build_app_overrides_ignores_unrecognized_command_name() {
-        let mut keybinds = xizor_config::KeybindsConfig::default();
+        let mut keybinds = jumppad_config::KeybindsConfig::default();
         keybinds.overrides.insert(
             "frobnicate".to_string(),
             global_hotkey::hotkey::HotKey::new(

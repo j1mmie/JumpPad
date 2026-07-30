@@ -1,5 +1,5 @@
 [package]
-name = "xizor_config"
+name = "jumppad_config"
 version.workspace = true
 edition.workspace = true
 

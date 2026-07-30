@@ -67,7 +67,7 @@ fn reuses_already_loaded_grammar_and_unloads_when_last_tab_closes() {
 #[test]
 fn multiple_extensions_mapped_to_one_grammar_share_a_single_load() {
     // "yaml" and "yml" both configured to use the same "yaml" grammar,
-    // mirroring xizor_config's default `yaml = ["yaml", "yml"]` entry.
+    // mirroring jumppad_config's default `yaml = ["yaml", "yml"]` entry.
     let (tx, rx) = mpsc::channel();
     let registry = SyntaxRegistry::new(
         fixtures_dir(),

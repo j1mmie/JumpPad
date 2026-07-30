@@ -2073,6 +2073,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jumppad"
+version = "0.1.0"
+dependencies = [
+ "display-info",
+ "editor_core",
+ "env_logger",
+ "global-hotkey",
+ "iced",
+ "iced_text_editor",
+ "jumppad_config",
+ "log",
+ "objc2 0.6.4",
+ "rfd",
+ "serde",
+ "syntax_registry",
+ "tokio",
+ "toml",
+]
+
+[[package]]
+name = "jumppad_config"
+version = "0.1.0"
+dependencies = [
+ "global-hotkey",
+ "iced_core",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5202,36 +5232,6 @@ name = "xcursor"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bec9e4a500ca8864c5b47b8b482a73d62e4237670e5b5f1d6b9e3cae50f28f2b"
-
-[[package]]
-name = "xizor"
-version = "0.1.0"
-dependencies = [
- "display-info",
- "editor_core",
- "env_logger",
- "global-hotkey",
- "iced",
- "iced_text_editor",
- "log",
- "objc2 0.6.4",
- "rfd",
- "serde",
- "syntax_registry",
- "tokio",
- "toml",
- "xizor_config",
-]
-
-[[package]]
-name = "xizor_config"
-version = "0.1.0"
-dependencies = [
- "global-hotkey",
- "iced_core",
- "serde",
- "toml",
-]
 
 [[package]]
 name = "xkbcommon-dl"

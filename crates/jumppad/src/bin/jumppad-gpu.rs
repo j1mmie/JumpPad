@@ -1,3 +1,3 @@
 fn main() -> iced::Result {
-    xizor::run()
+    jumppad::run()
 }

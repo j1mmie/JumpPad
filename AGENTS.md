@@ -7,7 +7,7 @@ you don't know about them going in.
 
 ## What this is, in one paragraph
 
-xizor is a lightweight plaintext editor built on `iced` (Rust, Elm-style
+JumpPad is a lightweight plaintext editor built on `iced` (Rust, Elm-style
 GUI framework). It targets config files, notes, and structured data
 (YAML/XML/CSV/etc.) - not source code. The overriding design constraint is
 low idle memory footprint; every feature (rendering backend, syntax
@@ -32,21 +32,21 @@ Comments stay short and sit right next to what they describe:
 
 ```
 crates/
-  xizor/            the application shell: iced::Program, tabs, menus, file I/O, theming
+  jumppad/           the application shell: iced::Program, tabs, menus, file I/O, theming
   editor_core/       the abstraction boundary between the shell and the actual text widget
   iced_text_editor/  the one TextEditorWidget impl today, wrapping iced::widget::text_editor
   syntax_registry/   loads/caches/refcounts tree-sitter WASM grammars; no iced dependency
-  xizor_config/      config.toml loading + defaults; no iced dependency
+  jumppad_config/    config.toml loading + defaults; no iced dependency
 syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
 ```
 
-Dependency direction is one-way: `xizor` depends on everything;
-`editor_core`, `syntax_registry`, and `xizor_config` depend on nothing
+Dependency direction is one-way: `jumppad` depends on everything;
+`editor_core`, `syntax_registry`, and `jumppad_config` depend on nothing
 inside this workspace. `iced_text_editor` depends on `editor_core` (to
 implement its trait) and `syntax_registry` (to drive highlighting), but
-not on `xizor`. This is deliberate - see `editor_core::widget::TextEditorWidget`'s
+not on `jumppad`. This is deliberate - see `editor_core::widget::TextEditorWidget`'s
 doc comment: a future non-iced or non-text_editor-based editor widget
-should be a new crate implementing that trait, not a rewrite of `xizor`.
+should be a new crate implementing that trait, not a rewrite of `jumppad`.
 
 ## The `TextEditorWidget` boundary
 
@@ -59,12 +59,12 @@ time, so there's no need to thread a generic `Message` type through the
 whole app for it.
 
 `Tab` (`editor_core::tab::Tab`) owns one `Box<dyn TextEditorWidget>` plus
-tab metadata (path, dirty flag, id). `XizorApp` in `crates/xizor/src/app.rs`
+tab metadata (path, dirty flag, id). `JumpPadApp` in `crates/jumppad/src/app.rs`
 holds `Vec<Tab>` and an `active: usize` index; only the active tab's
 `.view()` is ever placed in the widget tree, one tab at a time.
 
 `poll_highlighting()` exists because iced, unlike egui, doesn't re-run
-application code every frame - it only reacts to messages. `XizorApp`'s
+application code every frame - it only reacts to messages. `JumpPadApp`'s
 `subscription()` runs a 50ms timer (`Message::PollHighlighting`) *only*
 while some tab has a grammar load in flight, and stops it once nothing is
 pending, so there's no permanent background timer once everything's
@@ -108,17 +108,17 @@ settled.
 
 Which iced compositor backend gets compiled in is a build-time choice, not
 a runtime one - `iced`'s `wgpu` and `tiny-skia` features are mutually
-exclusive per binary (see `crates/xizor/Cargo.toml`'s `[features]` and its
+exclusive per binary (see `crates/jumppad/Cargo.toml`'s `[features]` and its
 two `[[bin]]` entries). This produces two binaries from the same
-`xizor` package:
+`jumppad` package:
 
-- `xizor` - `tiny-skia` (default), pure software, ~22MB idle vs. ~146MB
+- `jumppad` - `tiny-skia` (default), pure software, ~22MB idle vs. ~146MB
   for `wgpu` in this app.
-- `xizor-gpu` - `wgpu`, hardware-accelerated.
+- `jumppad-gpu` - `wgpu`, hardware-accelerated.
 
 Each `[[bin]]` has `required-features` set to the matching Cargo feature,
 so plain `cargo build`/`cargo run` (default features) only ever touches
-`xizor`; building `xizor-gpu` requires
+`jumppad`; building `jumppad-gpu` requires
 `--no-default-features --features wgpu` explicitly (see
 `scripts/build-release.sh`/`.ps1`). Since only one backend is ever
 compiled into a given binary, there's no `ICED_BACKEND` env var or other
@@ -127,10 +127,10 @@ type solely from which feature(s) are active (both features enabled at
 once, as in the old single-binary setup, would compile in a
 runtime-switchable fallback compositor instead - not the case here).
 
-**Gotcha - on macOS, transparency requires `xizor-gpu`.** `softbuffer`'s
+**Gotcha - on macOS, transparency requires `jumppad-gpu`.** `softbuffer`'s
 CoreGraphics backend builds its `CGImage` with
 `CGImageAlphaInfo::NoneSkipFirst` (`softbuffer-0.4.8/src/backends/cg.rs`),
-which discards the alpha channel outright. The `xizor` (tiny-skia) binary
+which discards the alpha channel outright. The `jumppad` (tiny-skia) binary
 therefore cannot produce a translucent window on macOS at all, no matter
 what `[alpha] background` says - it renders the alpha and CoreGraphics
 throws it away. Anything transparency-related reported from macOS is by
@@ -138,7 +138,7 @@ definition the wgpu path, so don't debug it against `iced_tiny_skia`'s
 compositor (this mistake has already been made once).
 
 **Gotcha - macOS burns in a snapshot of the window taken at resize.** With
-`xizor-gpu` on a translucent window, content from an earlier moment stays
+`jumppad-gpu` on a translucent window, content from an earlier moment stays
 visible *behind* the live content. Established by testing, so don't
 re-derive it:
 
@@ -165,7 +165,7 @@ and composites that copy behind the window. It lives outside the process,
 which is why no surface clear, layer clear, or redraw ever touched it.
 Confirmed by elimination: `setHasShadow: NO` kills the ghost outright.
 
-**The fix** (`crates/xizor/src/macos.rs` + `app.rs`): keep the shadow, call
+**The fix** (`crates/jumppad/src/macos.rs` + `app.rs`): keep the shadow, call
 `NSWindow.invalidateShadow` after the content changes - but only after the
 new frame has *presented*. Calling it the moment the tab switches re-caches
 the outgoing frame and fixes nothing (tried, confirmed useless);
@@ -220,7 +220,7 @@ unnoticed. (An earlier revision of this file reasoned from the
 `PostMultiplied` label and predicted the opposite - bare regions right,
 quad regions too dark - and called it unfixable from here. The
 solid-white-window evidence settled it.) **The fix** (`premultiply` in
-`app.rs`): `XizorApp::style` premultiplies the translucent background color
+`app.rs`): `JumpPadApp::style` premultiplies the translucent background color
 itself. Gated to macOS + `wgpu`: `tiny-skia` premultiplies internally, so
 feeding it a premultiplied color would double-darken.
 
@@ -242,7 +242,7 @@ identical to the last one (a damage-tracking optimization). Its equality
 check for a `text_editor`'s rendered content
 (`iced_graphics::text::editor::Internal::eq`, in the `iced` crate itself,
 confirmed still present as of iced 0.14.0) only compares font, bounds, and
-line metrics - **never the actual text**. Switching xizor's active tab
+line metrics - **never the actual text**. Switching JumpPad's active tab
 lands on a different editor with identical font/bounds/metrics (same
 pane), so the compositor concludes nothing changed and skips the repaint -
 the old tab's text stays on screen until some unrelated redraw (hovering
@@ -256,14 +256,14 @@ whole frame's reported background color against last frame's
 (`surface.background_color == background_color` in
 `iced_tiny_skia::window::compositor::present`); if that differs at all, it
 skips the per-widget check entirely and repaints the *entire* viewport.
-That's the lever xizor actually uses (see below). This was also not fixed
+That's the lever JumpPad actually uses (see below). This was also not fixed
 by switching to `wgpu`-only (that backend has no damage-tracking at all
 and isn't a real option here anyway - `tiny-skia`'s memory footprint is
 the whole point of this project, see `README.md`).
 
-**The fix in place:** `XizorApp::redraw_nudge_frames: u8` is set to
+**The fix in place:** `JumpPadApp::redraw_nudge_frames: u8` is set to
 `REDRAW_NUDGE_FRAMES` every time the active tab changes (`switch_active`
-and `new_tab`, `crates/xizor/src/app.rs`). `XizorApp::theme()` checks it:
+and `new_tab`, `crates/jumppad/src/app.rs`). `JumpPadApp::theme()` checks it:
 while it's non-zero, it returns the app's real theme run through
 `nudge_background`, which drops the palette's background alpha by
 `0.001 * frames_left` and rebuilds it as `Theme::custom(...)`. That's an
@@ -321,7 +321,7 @@ off.
 
 ## Transparent windows: why nothing repaints the background
 
-With `[alpha] background < 1.0`, `XizorApp::style` hands iced a
+With `[alpha] background < 1.0`, `JumpPadApp::style` hands iced a
 `background_color` whose alpha is the configured value. The compositor
 writes that straight into the framebuffer (`BlendMode::Source`, so it
 *replaces* rather than blends), then every widget quad blends **on top**
@@ -381,7 +381,7 @@ pixel-snapping mechanism for exactly this: `renderer::Quad::snap`, exposed
 as `container::Style::snap` / `button::Style::snap` and defaulted from
 iced's `crisp` Cargo feature. `iced_tiny_skia` never reads the field -
 zero occurrences in the whole backend - so setting it changes nothing in
-`xizor` and only takes effect in `xizor-gpu` (`iced_wgpu` passes it
+`jumppad` and only takes effect in `jumppad-gpu` (`iced_wgpu` passes it
 through to its quad shader). Don't reach for it expecting a fix on the
 default build, and weigh the two binaries rendering differently before
 turning it on for the wgpu one.
@@ -392,7 +392,7 @@ take a `[patch.crates-io]` fork - and it's global, meaning every rounded
 corner and stroked border in the app (the modal, its focused button, the
 scrollbar) would go jagged to fix a seam the tab bar no longer has.
 
-## Config (`xizor_config`)
+## Config (`jumppad_config`)
 
 `config.toml` is looked for next to the running executable first, then
 in the current directory (a `cargo run` convenience). If nothing is
@@ -407,9 +407,9 @@ get added.
 
 `syntaxes/` at the repo root holds the `.wasm` grammars and
 `.injections.scm` queries actually used by this checkout.
-`default_search_dirs()` in `crates/xizor/src/app.rs` looks next to the
+`default_search_dirs()` in `crates/jumppad/src/app.rs` looks next to the
 executable first, then `./syntaxes` for `cargo run` convenience -
-mirroring `config_paths()`'s search order in `xizor_config`.
+mirroring `config_paths()`'s search order in `jumppad_config`.
 
 `syntaxes/` is gitignored, not committed - these are compiled binaries
 built from *other projects'* tree-sitter grammar sources, not something

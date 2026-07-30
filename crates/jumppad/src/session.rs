@@ -49,7 +49,7 @@ pub fn load_manifest(candidates: &[PathBuf]) -> Option<SessionManifest> {
             Ok(manifest) => Some(manifest),
             Err(err) => {
                 eprintln!(
-                    "xizor: {}: {err}, starting without a restored session",
+                    "jumppad: {}: {err}, starting without a restored session",
                     path.display()
                 );
                 None
@@ -82,16 +82,16 @@ pub fn build_manifest(tabs: &[Tab], active: usize) -> SessionManifest {
 /// file that no longer belongs to a dirty tab in `manifest`.
 pub fn write_manifest_sync(dir: &Path, manifest: &SessionManifest) {
     if let Err(err) = std::fs::create_dir_all(dir) {
-        eprintln!("xizor: couldn't create {}: {err}", dir.display());
+        eprintln!("jumppad: couldn't create {}: {err}", dir.display());
         return;
     }
     match toml::to_string_pretty(manifest) {
         Ok(text) => {
             if let Err(err) = std::fs::write(dir.join(MANIFEST_FILE), text) {
-                eprintln!("xizor: couldn't write session manifest: {err}");
+                eprintln!("jumppad: couldn't write session manifest: {err}");
             }
         }
-        Err(err) => eprintln!("xizor: couldn't serialize session manifest: {err}"),
+        Err(err) => eprintln!("jumppad: couldn't serialize session manifest: {err}"),
     }
 
     prune_orphaned_drafts(dir, manifest);
@@ -120,7 +120,7 @@ fn prune_orphaned_drafts(dir: &Path, manifest: &SessionManifest) {
             .is_some_and(|id| live_ids.contains(&id));
         if !is_live {
             if let Err(err) = std::fs::remove_file(&path) {
-                eprintln!("xizor: couldn't remove stale draft {}: {err}", path.display());
+                eprintln!("jumppad: couldn't remove stale draft {}: {err}", path.display());
             }
         }
     }
@@ -139,11 +139,11 @@ pub fn stale_tabs(tabs: &[Tab]) -> Vec<(u64, u64, String)> {
 /// logged, not surfaced. Returns `(id, generation)` for the caller to mark flushed.
 pub async fn flush_draft_async(dir: PathBuf, id: u64, generation: u64, text: String) -> (u64, u64) {
     if let Err(err) = tokio::fs::create_dir_all(&dir).await {
-        eprintln!("xizor: couldn't create {}: {err}", dir.display());
+        eprintln!("jumppad: couldn't create {}: {err}", dir.display());
         return (id, generation);
     }
     if let Err(err) = tokio::fs::write(draft_path(&dir, id), text).await {
-        eprintln!("xizor: couldn't write draft for tab {id}: {err}");
+        eprintln!("jumppad: couldn't write draft for tab {id}: {err}");
     }
     (id, generation)
 }
@@ -155,7 +155,7 @@ pub fn flush_on_exit(dir: &Path, tabs: &[Tab], active: usize) {
     write_manifest_sync(dir, &manifest);
     for (id, _generation, text) in stale_tabs(tabs) {
         if let Err(err) = std::fs::write(draft_path(dir, id), text) {
-            eprintln!("xizor: couldn't write draft for tab {id} on exit: {err}");
+            eprintln!("jumppad: couldn't write draft for tab {id} on exit: {err}");
         }
     }
 }
@@ -203,7 +203,7 @@ mod tests {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "xizor-session-test-{}-{id}",
+            "jumppad-session-test-{}-{id}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);

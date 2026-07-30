@@ -6,10 +6,11 @@
 #               Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
 #               Moonfly, Nightfly, Oxocarbon, Ferra
 
-theme = "Kanagawa Wave"
+theme = "Tokyo Night Storm"
+# theme = "Light"
 
 [alpha]
-background = 0.9
+background = 0.925
 foreground = 1.0
 
 [window]

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 pub use keybind_overrides::ResolvedKeybind;
 
-/// xizor's user-editable settings. Each concern gets its own section so a
+/// JumpPad's user-editable settings. Each concern gets its own section so a
 /// missing section falls back to its own defaults rather than failing the file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,7 +30,7 @@ impl Default for Config {
     }
 }
 
-/// Controls whether xizor runs as a drop-down "visor" (undecorated,
+/// Controls whether JumpPad runs as a drop-down "visor" (undecorated,
 /// always-on-top, hidden until summoned) or as an ordinary window.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -72,13 +72,13 @@ impl Default for AlphaConfig {
     }
 }
 
-/// xizor's global keybindings, loaded from `keybinds.toml`.
+/// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindsConfig {
     /// Shows/hides the visor from anywhere, even without focus.
     pub toggle: HotKey,
-    /// Command-name -> key-chord overrides for xizor's in-app shortcuts,
+    /// Command-name -> key-chord overrides for JumpPad's in-app shortcuts,
     /// e.g. `new_tab = "control+alt+n"` - takes precedence over the
     /// hardcoded default when present. An unrecognized name is silently
     /// ignored (logged once at startup).
@@ -143,15 +143,15 @@ pub fn load() -> Config {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        eprintln!("xizor_config: found config at {}", path.display());
-        eprintln!("xizor_config: --- contents of {} ---", path.display());
+        eprintln!("jumppad_config: found config at {}", path.display());
+        eprintln!("jumppad_config: --- contents of {} ---", path.display());
         eprintln!("{text}");
-        eprintln!("xizor_config: --- end contents ---");
+        eprintln!("jumppad_config: --- end contents ---");
         return match toml::from_str(&text) {
             Ok(config) => config,
             Err(err) => {
                 eprintln!(
-                    "xizor_config: {}: {err}, using built-in defaults instead",
+                    "jumppad_config: {}: {err}, using built-in defaults instead",
                     path.display()
                 );
                 Config::default()
@@ -160,7 +160,7 @@ pub fn load() -> Config {
     }
 
     eprintln!(
-        "xizor_config: no config file found (checked: {}), writing built-in defaults",
+        "jumppad_config: no config file found (checked: {}), writing built-in defaults",
         paths
             .iter()
             .map(|p| p.display().to_string())
@@ -179,19 +179,19 @@ fn write_default(path: &std::path::Path, config: &Config) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("xizor_config: couldn't create {}: {err}", parent.display());
+        eprintln!("jumppad_config: couldn't create {}: {err}", parent.display());
         return;
     }
     match toml::to_string_pretty(config) {
         Ok(text) => {
             if let Err(err) = std::fs::write(path, text) {
                 eprintln!(
-                    "xizor_config: couldn't write default config to {}: {err}",
+                    "jumppad_config: couldn't write default config to {}: {err}",
                     path.display()
                 );
             }
         }
-        Err(err) => eprintln!("xizor_config: couldn't serialize default config: {err}"),
+        Err(err) => eprintln!("jumppad_config: couldn't serialize default config: {err}"),
     }
 }
 
@@ -216,12 +216,12 @@ pub fn load_keybinds() -> KeybindsConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        eprintln!("xizor_config: found keybinds at {}", path.display());
+        eprintln!("jumppad_config: found keybinds at {}", path.display());
         return match toml::from_str(&text) {
             Ok(keybinds) => keybinds,
             Err(err) => {
                 eprintln!(
-                    "xizor_config: {}: {err}, using built-in default keybinds instead",
+                    "jumppad_config: {}: {err}, using built-in default keybinds instead",
                     path.display()
                 );
                 KeybindsConfig::default()
@@ -230,7 +230,7 @@ pub fn load_keybinds() -> KeybindsConfig {
     }
 
     eprintln!(
-        "xizor_config: no keybinds file found (checked: {}), writing built-in defaults",
+        "jumppad_config: no keybinds file found (checked: {}), writing built-in defaults",
         paths
             .iter()
             .map(|p| p.display().to_string())
@@ -249,19 +249,19 @@ fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("xizor_config: couldn't create {}: {err}", parent.display());
+        eprintln!("jumppad_config: couldn't create {}: {err}", parent.display());
         return;
     }
     match toml::to_string_pretty(keybinds) {
         Ok(text) => {
             if let Err(err) = std::fs::write(path, text) {
                 eprintln!(
-                    "xizor_config: couldn't write default keybinds to {}: {err}",
+                    "jumppad_config: couldn't write default keybinds to {}: {err}",
                     path.display()
                 );
             }
         }
-        Err(err) => eprintln!("xizor_config: couldn't serialize default keybinds: {err}"),
+        Err(err) => eprintln!("jumppad_config: couldn't serialize default keybinds: {err}"),
     }
 }
 

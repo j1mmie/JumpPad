@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds both release binaries: `xizor` (tiny-skia, software rendering,
-# the default) and `xizor-gpu` (wgpu, hardware rendering). They're two
-# [[bin]] targets in the same `xizor` package, each requiring the Cargo
+# Builds both release binaries: `jumppad` (tiny-skia, software rendering,
+# the default) and `jumppad-gpu` (wgpu, hardware rendering). They're two
+# [[bin]] targets in the same `jumppad` package, each requiring the Cargo
 # feature that selects its iced compositor backend - see
-# `crates/xizor/Cargo.toml`. Cargo names/extensions the output per-target
-# automatically (e.g. `xizor.exe` for `x86_64-pc-windows-gnu`), no
-# renaming needed here.
+# `crates/jumppad/Cargo.toml`.
 #
 # Usage:
 #   ./scripts/build-release.sh                        # host target
@@ -25,13 +23,13 @@ cd "$root"
 # `set -u` (`"${target_args[@]}"`) throws "unbound variable" on bash 3.2,
 # which is what `/usr/bin/env bash` resolves to by default on macOS.
 if [ $# -ge 1 ]; then
-    cargo build --release --target "$1" -p xizor --bin xizor
-    cargo build --release --target "$1" -p xizor --bin xizor-gpu --no-default-features --features wgpu
+    cargo build --release --target "$1" -p jumppad --bin jumppad
+    cargo build --release --target "$1" -p jumppad --bin jumppad-gpu --no-default-features --features wgpu
     out_dir="target/$1/release"
 else
-    cargo build --release -p xizor --bin xizor
-    cargo build --release -p xizor --bin xizor-gpu --no-default-features --features wgpu
+    cargo build --release -p jumppad --bin jumppad
+    cargo build --release -p jumppad --bin jumppad-gpu --no-default-features --features wgpu
     out_dir="target/release"
 fi
 
-echo "done: $out_dir/xizor*, $out_dir/xizor-gpu*"
+echo "done: $out_dir/jumppad*, $out_dir/jumppad-gpu*"

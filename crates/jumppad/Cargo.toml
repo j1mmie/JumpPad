@@ -1,14 +1,14 @@
 [package]
-name = "xizor"
+name = "jumppad"
 version.workspace = true
 edition.workspace = true
 # Ambiguous otherwise: with two [[bin]] targets below, plain `cargo run`
 # would refuse to guess which one to launch.
-default-run = "xizor"
+default-run = "jumppad"
 
 [features]
 default = ["tiny-skia"]
-# Mutually exclusive per build - see the `xizor`/`xizor-gpu` bin entries
+# Mutually exclusive per build - see the `jumppad`/`jumppad-gpu` bin entries
 # below, each gated to the matching feature via `required-features`.
 #
 # On macOS specifically, `tiny-skia` (the default) can never honor
@@ -25,18 +25,18 @@ default = ["tiny-skia"]
 # widgets can also show up as visibly different shades ("gaps") instead of a
 # uniform translucent surface. `wgpu` drives a real `CAMetalLayer` on macOS
 # instead and doesn't have this limitation - the fix for a user wanting
-# transparency there is to build/run `xizor-gpu`, not a code change here.
+# transparency there is to build/run `jumppad-gpu`, not a code change here.
 tiny-skia = ["iced/tiny-skia"]
 wgpu = ["iced/wgpu"]
 
 [[bin]]
-name = "xizor"
-path = "src/bin/xizor.rs"
+name = "jumppad"
+path = "src/bin/jumppad.rs"
 required-features = ["tiny-skia"]
 
 [[bin]]
-name = "xizor-gpu"
-path = "src/bin/xizor-gpu.rs"
+name = "jumppad-gpu"
+path = "src/bin/jumppad-gpu.rs"
 required-features = ["wgpu"]
 
 [dependencies]
@@ -44,7 +44,7 @@ iced = { workspace = true, features = ["tokio"] }
 editor_core.workspace = true
 iced_text_editor.workspace = true
 syntax_registry.workspace = true
-xizor_config.workspace = true
+jumppad_config.workspace = true
 rfd = "0.15"
 tokio = { version = "1", features = ["fs"] }
 serde.workspace = true

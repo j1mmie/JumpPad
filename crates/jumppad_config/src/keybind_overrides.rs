@@ -90,7 +90,7 @@ pub(crate) fn resolved_overrides(
             Some(resolved) => Some((name.clone(), resolved)),
             None => {
                 eprintln!(
-                    "xizor_config: override {name:?} uses a key with no iced equivalent, ignoring"
+                    "jumppad_config: override {name:?} uses a key with no iced equivalent, ignoring"
                 );
                 None
             }

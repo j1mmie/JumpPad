@@ -9,11 +9,11 @@ pub(crate) mod macos;
 mod session;
 mod visor;
 
-use app::XizorApp;
+use app::JumpPadApp;
 
-/// Shared entry point for both the `xizor` (tiny-skia) and `xizor-gpu` (wgpu) binaries.
+/// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {
-    let config = xizor_config::load();
+    let config = jumppad_config::load();
     let visor_enabled = config.visor.enabled;
     // Visor mode wins: a drop-down visor is undecorated by definition.
     let decorations = config.window.decorations && !visor_enabled;
@@ -27,8 +27,8 @@ pub fn run() -> iced::Result {
         .try_init();
 
     // `config` is cloned per call since the boot closure must be `Fn`, not just `FnOnce`.
-    iced::application(move || XizorApp::new(config.clone()), XizorApp::update, XizorApp::view)
-        .title("xizor")
+    iced::application(move || JumpPadApp::new(config.clone()), JumpPadApp::update, JumpPadApp::view)
+        .title("JumpPad")
         .window_size(iced::Size::new(900.0, 600.0))
         .decorations(decorations)
         .transparent(transparent)
@@ -43,9 +43,9 @@ pub fn run() -> iced::Result {
         } else {
             iced::window::Level::Normal
         })
-        .subscription(XizorApp::subscription)
-        .theme(XizorApp::theme)
-        .style(XizorApp::style)
+        .subscription(JumpPadApp::subscription)
+        .theme(JumpPadApp::theme)
+        .style(JumpPadApp::style)
         // Runs a last-ditch draft flush before actually closing the window.
         .exit_on_close_request(false)
         .run()
