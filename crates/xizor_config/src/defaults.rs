@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::{AlphaConfig, Config, SyntaxesConfig, VisorConfig};
+use crate::{AlphaConfig, Config, SyntaxesConfig, VisorConfig, WindowConfig};
 
 /// Built-in defaults, written out as the config file on first run.
 pub(crate) fn config() -> Config {
@@ -34,5 +34,6 @@ pub(crate) fn config() -> Config {
         theme: "Light".to_string(),
         visor: VisorConfig::default(),
         alpha: AlphaConfig::default(),
+        window: WindowConfig::default(),
     }
 }

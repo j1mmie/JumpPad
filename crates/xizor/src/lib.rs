@@ -13,6 +13,8 @@ use app::XizorApp;
 pub fn run() -> iced::Result {
     let config = xizor_config::load();
     let visor_enabled = config.visor.enabled;
+    // Visor mode wins: a drop-down visor is undecorated by definition.
+    let decorations = config.window.decorations && !visor_enabled;
     // Skipped entirely (not just requested-then-ignored) at the default
     // alpha of `1.0`, since transparent windows use a costlier compositing path.
     let transparent = config.alpha.background < 1.0;
@@ -26,8 +28,7 @@ pub fn run() -> iced::Result {
     iced::application(move || XizorApp::new(config.clone()), XizorApp::update, XizorApp::view)
         .title("xizor")
         .window_size(iced::Size::new(900.0, 600.0))
-        // No native titlebar/frame while the visor is enabled.
-        .decorations(!visor_enabled)
+        .decorations(decorations)
         .transparent(transparent)
         // iced defaults this on, but its MSAA only ever applies to triangle
         // primitives - meshes, canvases, gradient quads - and this app draws

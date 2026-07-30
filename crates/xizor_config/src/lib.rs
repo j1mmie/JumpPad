@@ -21,6 +21,7 @@ pub struct Config {
     pub theme: String,
     pub visor: VisorConfig,
     pub alpha: AlphaConfig,
+    pub window: WindowConfig,
 }
 
 impl Default for Config {
@@ -35,6 +36,21 @@ impl Default for Config {
 #[serde(default)]
 pub struct VisorConfig {
     pub enabled: bool,
+}
+
+/// Window frame options. Visor mode overrides `decorations` - a drop-down
+/// visor is undecorated by definition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WindowConfig {
+    /// The OS titlebar and frame.
+    pub decorations: bool,
+}
+
+impl Default for WindowConfig {
+    fn default() -> Self {
+        Self { decorations: true }
+    }
 }
 
 /// Independent transparency for the editor's background versus its text -
@@ -311,6 +327,28 @@ mod tests {
     #[test]
     fn default_alpha_is_fully_solid() {
         assert_eq!(AlphaConfig::default(), AlphaConfig { background: 1.0, foreground: 1.0 });
+    }
+
+    #[test]
+    fn config_toml_with_no_window_section_keeps_decorations() {
+        // Old config files predate the section and must stay valid.
+        let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
+        assert_eq!(config.window, WindowConfig::default());
+        assert!(config.window.decorations);
+    }
+
+    #[test]
+    fn config_toml_can_turn_decorations_off() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [window]
+            decorations = false
+            "#,
+        )
+        .unwrap();
+        assert!(!config.window.decorations);
     }
 
     #[test]

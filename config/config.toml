@@ -14,6 +14,13 @@ theme = "Kanagawa Wave"
 background = 0.7
 foreground = 1.0
 
+[window]
+# The OS titlebar and frame. Turning this off gives a borderless window that
+# can't be dragged or resized by its edges, so it's off-by-default territory -
+# but on macOS a decorated translucent window burns in a snapshot of itself
+# taken at resize time, and an undecorated one may not.
+decorations = true
+
 [visor]
 # Drop-down "visor" mode: undecorated, always-on-top, hidden until summoned
 # by the global toggle hotkey (see keybinds.toml). Still a bit buggy on some
