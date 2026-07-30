@@ -221,9 +221,19 @@ unnoticed. (An earlier revision of this file reasoned from the
 quad regions too dark - and called it unfixable from here. The
 solid-white-window evidence settled it.) **The fix** (`premultiply` in
 `app.rs`): `XizorApp::style` premultiplies the translucent background color
-itself, in linear space to match what `into_linear()` hands wgpu's clear.
-Gated to macOS + `wgpu`: `tiny-skia` premultiplies internally, so feeding
-it a premultiplied color would double-darken.
+itself. Gated to macOS + `wgpu`: `tiny-skia` premultiplies internally, so
+feeding it a premultiplied color would double-darken.
+
+**Gotcha - the premultiply is per sRGB-encoded channel, not linear.** The
+window server composites on *encoded* values, and
+`encode(linear * a) > encode(linear) * a`, so premultiplying in linear
+space before the surface's sRGB encode over-brightens: white at alpha 0.1
+stores as `encode(0.1) ~ 0.35` and showed the desktop through a wash ~3.5x
+brighter than configured (confirmed on a real machine; dark themes hide it
+since 0 encodes to 0). This also means iced's own shaders - which
+premultiply in *linear* space - land slightly bright under this compositor,
+but every translucent quad this app paints is black (`darkening_wash`, the
+modal scrim), and black is immune, so nothing visible is affected.
 
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
