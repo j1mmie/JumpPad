@@ -137,6 +137,41 @@ throws it away. Anything transparency-related reported from macOS is by
 definition the wgpu path, so don't debug it against `iced_tiny_skia`'s
 compositor (this mistake has already been made once).
 
+**Gotcha - macOS burns in a snapshot of the window taken at resize.** With
+`xizor-gpu` on a translucent window, content from an earlier moment stays
+visible *behind* the live content. Established by testing, so don't
+re-derive it:
+
+- Its strength tracks `1 - background_alpha`, so it is *behind* what we
+  draw, not something we draw.
+- It is frozen, not accumulating. Forcing 128 extra frames does nothing;
+  if each frame composited over the last, it would decay as `0.6^n`.
+- It is a snapshot of the window as it looked at **the last drag-resize**.
+  Resize, and it matches the live content so nothing looks wrong; change
+  tabs, and the old content shows through.
+- `iced_wgpu` is not the culprit: `present()` always passes
+  `Some(background_color)`, so every frame does `LoadOp::Clear` over the
+  whole surface. It has no damage tracking at all.
+
+So AppKit is caching the window's contents at live-resize time into a layer
+that sits under the translucent `CAMetalLayer`. **A programmatic resize does
+not refresh or clear it** - `iced::window::resize` isn't a live resize, and
+the `resize_kick` was confirmed by its own log lines to fire with no effect
+whatsoever. That whole avenue is dead; don't rebuild it. Fixing this
+properly means reaching the `NSView`'s backing layer through
+`raw-window-handle` + `objc2` and making it non-opaque, which is what
+Electron did for the same symptom (their PR #46353, issue #45932).
+
+**Also on this path - an upstream alpha-convention mismatch.** Metal offers
+only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,
+which expects *straight* alpha. But its quad shader emits
+`premultiply(input.color)` with `PREMULTIPLIED_ALPHA_BLENDING`, while the
+clear color goes through `Color::into_linear()`, which does *not*
+premultiply. Net effect on a translucent window: regions that paint no quad
+composite correctly, and regions with a quad or glyph over them get their
+RGB multiplied by alpha a second time and come out too dark. Not something
+this repo can fix from the outside.
+
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
 `iced`'s tiny-skia compositor skips presenting a frame it thinks looks

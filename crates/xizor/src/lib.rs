@@ -29,6 +29,11 @@ pub fn run() -> iced::Result {
         // No native titlebar/frame while the visor is enabled.
         .decorations(!visor_enabled)
         .transparent(transparent)
+        // iced defaults this on, but its MSAA only ever applies to triangle
+        // primitives - meshes, canvases, gradient quads - and this app draws
+        // none. Quads and text are always `count: 1` regardless. So it buys
+        // nothing visually and costs pipelines plus a 4x-sampled render target.
+        .antialiasing(false)
         // The visor floats above whatever else has focus; an ordinary window doesn't.
         .level(if visor_enabled {
             iced::window::Level::AlwaysOnTop
