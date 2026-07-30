@@ -19,11 +19,17 @@ use crate::visor::{self, Animation};
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// Tick rate for the wgpu-transparency resize-kick wait (see `TriggerHeightCollapseTest`).
-const HEIGHT_COLLAPSE_TEST_TICK: Duration = Duration::from_millis(16);
+/// Tick rate for the wgpu-transparency resize-kick wait (see `TriggerResizeKick`).
+const RESIZE_KICK_TICK: Duration = Duration::from_millis(16);
+
+/// How much height the resize kick gives up before restoring it. This used to
+/// collapse the window to zero, which never actually kicked anything: a
+/// zero-height surface can't be configured, so the resize gets clamped or
+/// dropped and no reconfigure happens. One pixel is a real resize.
+const RESIZE_KICK_DELTA: f32 = 1.0;
 
 /// How many ticks to wait with the window collapsed before restoring it.
-const HEIGHT_COLLAPSE_TEST_WAIT_FRAMES: u8 = 1;
+const RESIZE_KICK_WAIT_FRAMES: u8 = 1;
 
 /// How many consecutive frames to hold a nudged background color for after the
 /// active tab changes (see AGENTS.md's stale-content bug). One frame is not
@@ -47,7 +53,7 @@ pub struct XizorApp {
     editor_factory: EditorFactory,
     theme: Theme,
     background_alpha: f32,
-    height_collapse_test: Option<(iced::Size, u8)>,
+    resize_kick: Option<(iced::Size, u8)>,
     /// Frames left to hold a nudged background color for, counted down from
     /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
     redraw_nudge_frames: u8,
@@ -113,12 +119,12 @@ pub enum Message {
     /// goes through a real resize (seen on Windows): collapses the window's
     /// height to 0, then restores it. Fires once at startup when
     /// transparency is on, and manually via Ctrl+` for re-testing.
-    TriggerHeightCollapseTest,
-    /// The window size from `TriggerHeightCollapseTest`, resolved - arms the
+    TriggerResizeKick,
+    /// The window size from `TriggerResizeKick`, resolved - arms the
     /// wait and collapses the window's height to 0.
-    HeightCollapseTestSized(iced::Size),
+    ResizeKickSized(iced::Size),
     /// Counts down the collapse wait, restoring the window once it elapses.
-    HeightCollapseTestTick,
+    ResizeKickTick,
     /// One presented frame elapsed - counts down `redraw_nudge_frames`.
     RedrawNudgeFrame,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
@@ -213,7 +219,7 @@ impl XizorApp {
             editor_factory,
             theme: resolve_theme(&config.theme),
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
-            height_collapse_test: None,
+            resize_kick: None,
             redraw_nudge_frames: 0,
             session_dir,
             pending_close_after_save: Vec::new(),
@@ -683,7 +689,7 @@ impl XizorApp {
                 // thing that leaves a stale window snapshot behind elsewhere.
                 // Still reachable by hand everywhere via Ctrl+` for re-testing.
                 let collapse_task = if self.background_alpha < 1.0 && cfg!(target_os = "windows") {
-                    Task::done(Message::TriggerHeightCollapseTest)
+                    Task::done(Message::TriggerResizeKick)
                 } else {
                     Task::none()
                 };
@@ -700,31 +706,34 @@ impl XizorApp {
                 }
             }
             Message::AnimationTick => self.advance_animation(),
-            Message::TriggerHeightCollapseTest => match self.window {
-                Some(id) => iced::window::size(id).map(Message::HeightCollapseTestSized),
+            Message::TriggerResizeKick => match self.window {
+                Some(id) => iced::window::size(id).map(Message::ResizeKickSized),
                 None => Task::none(),
             },
-            Message::HeightCollapseTestSized(size) => {
+            Message::ResizeKickSized(size) => {
                 let Some(id) = self.window else {
                     return Task::none();
                 };
-                self.height_collapse_test = Some((size, 0));
-                iced::window::resize(id, iced::Size::new(size.width, 0.0))
+                let kicked = iced::Size::new(size.width, size.height - RESIZE_KICK_DELTA);
+                log::info!("resize kick: {size:?} -> {kicked:?}");
+                self.resize_kick = Some((size, 0));
+                iced::window::resize(id, kicked)
             }
-            Message::HeightCollapseTestTick => {
-                let Some((original, waited)) = self.height_collapse_test else {
+            Message::ResizeKickTick => {
+                let Some((original, waited)) = self.resize_kick else {
                     return Task::none();
                 };
                 let Some(id) = self.window else {
-                    self.height_collapse_test = None;
+                    self.resize_kick = None;
                     return Task::none();
                 };
                 let next_waited = waited + 1;
-                if next_waited >= HEIGHT_COLLAPSE_TEST_WAIT_FRAMES {
-                    self.height_collapse_test = None;
+                if next_waited >= RESIZE_KICK_WAIT_FRAMES {
+                    self.resize_kick = None;
+                    log::info!("resize kick: restoring {original:?}");
                     return iced::window::resize(id, original);
                 }
-                self.height_collapse_test = Some((original, next_waited));
+                self.resize_kick = Some((original, next_waited));
                 Task::none()
             }
             Message::RedrawNudgeFrame => {
@@ -970,10 +979,10 @@ impl XizorApp {
                 .push(iced::time::every(VISOR_ANIM_TICK).map(|_| Message::AnimationTick));
         }
 
-        if self.height_collapse_test.is_some() {
+        if self.resize_kick.is_some() {
             subscriptions.push(
-                iced::time::every(HEIGHT_COLLAPSE_TEST_TICK)
-                    .map(|_| Message::HeightCollapseTestTick),
+                iced::time::every(RESIZE_KICK_TICK)
+                    .map(|_| Message::ResizeKickTick),
             );
         }
 
@@ -1096,7 +1105,7 @@ fn handle_hotkey(
         return Some(Message::SelectPreviousActiveTab);
     }
 
-    // Ctrl+` - re-triggers `TriggerHeightCollapseTest`, matched by physical
+    // Ctrl+` - re-triggers `TriggerResizeKick`, matched by physical
     // code since backquote/backtick shifts around by keyboard layout.
     if modifiers.control()
         && !modifiers.shift()
@@ -1104,7 +1113,7 @@ fn handle_hotkey(
         && !modifiers.logo()
         && matches!(physical_key, key::Physical::Code(key::Code::Backquote))
     {
-        return Some(Message::TriggerHeightCollapseTest);
+        return Some(Message::TriggerResizeKick);
     }
 
     if !modifiers.command() {
@@ -1466,7 +1475,7 @@ mod tests {
             editor_factory: factory,
             theme: Theme::ALL[0].clone(),
             background_alpha: 1.0,
-            height_collapse_test: None,
+            resize_kick: None,
             redraw_nudge_frames: 0,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
