@@ -153,14 +153,16 @@ re-derive it:
   `Some(background_color)`, so every frame does `LoadOp::Clear` over the
   whole surface. It has no damage tracking at all.
 
-So AppKit is caching the window's contents at live-resize time into a layer
-that sits under the translucent `CAMetalLayer`. **A programmatic resize does
-not refresh or clear it** - `iced::window::resize` isn't a live resize, and
-the `resize_kick` was confirmed by its own log lines to fire with no effect
-whatsoever. That whole avenue is dead; don't rebuild it. Fixing this
-properly means reaching the `NSView`'s backing layer through
-`raw-window-handle` + `objc2` and making it non-opaque, which is what
-Electron did for the same symptom (their PR #46353, issue #45932).
+- It is not the window frame either: reproduced identically with
+  `[window] decorations = false`, so it isn't the titlebar's view hierarchy.
+
+The culprit is `NSWindow.preservesContentDuringLiveResize`, which Apple
+documents as optimizing resize by "preserving the content of views that have
+not changed" - on a translucent window that preserved copy is what shows
+through. `crates/xizor/src/macos.rs` turns it off. **A programmatic resize
+does not refresh or clear the copy** - `iced::window::resize` isn't a live
+resize, and `resize_kick` was confirmed by its own log lines to fire with no
+effect whatsoever. That avenue is dead; don't rebuild it.
 
 **Also on this path - an upstream alpha-convention mismatch.** Metal offers
 only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,

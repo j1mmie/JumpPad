@@ -693,7 +693,19 @@ impl XizorApp {
                 } else {
                     Task::none()
                 };
-                Task::batch([snap_task, collapse_task])
+                // Only matters while translucent - it's the transparency that
+                // lets AppKit's preserved copy show through.
+                #[cfg(target_os = "macos")]
+                let appkit_task = match id.filter(|_| self.background_alpha < 1.0) {
+                    Some(id) => iced::window::run(id, |window| {
+                        crate::macos::disable_live_resize_content_preservation(window);
+                    })
+                    .discard(),
+                    None => Task::none(),
+                };
+                #[cfg(not(target_os = "macos"))]
+                let appkit_task = Task::none();
+                Task::batch([snap_task, collapse_task, appkit_task])
             }
             Message::HotkeyEvent(event) => {
                 let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {
