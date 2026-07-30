@@ -677,8 +677,12 @@ impl XizorApp {
             Message::WindowReady(id) => {
                 self.window = id;
                 let snap_task = self.snap_to_monitor();
-                // Only needed when the window was actually created transparent.
-                let collapse_task = if self.background_alpha < 1.0 {
+                // Only needed when the window was actually created transparent,
+                // and only on the platform the bug it works around was seen on -
+                // collapsing the window to zero height is exactly the sort of
+                // thing that leaves a stale window snapshot behind elsewhere.
+                // Still reachable by hand everywhere via Ctrl+` for re-testing.
+                let collapse_task = if self.background_alpha < 1.0 && cfg!(target_os = "windows") {
                     Task::done(Message::TriggerHeightCollapseTest)
                 } else {
                     Task::none()
