@@ -204,15 +204,26 @@ never produced a resize at all (clamped/dropped), so that workaround had
 been a no-op from the start. If the Windows bug resurfaces, git history has
 the working 1px version.
 
-**Also on this path - an upstream alpha-convention mismatch.** Metal offers
-only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,
-which expects *straight* alpha. But its quad shader emits
-`premultiply(input.color)` with `PREMULTIPLIED_ALPHA_BLENDING`, while the
-clear color goes through `Color::into_linear()`, which does *not*
-premultiply. Net effect on a translucent window: regions that paint no quad
-composite correctly, and regions with a quad or glyph over them get their
-RGB multiplied by alpha a second time and come out too dark. Not something
-this repo can fix from the outside.
+**Also on this path - an alpha-convention mismatch, fixed app-side.** Metal
+offers only `[Opaque, PostMultiplied]` and `iced_wgpu` picks
+`PostMultiplied`, but that label is wrong upstream: the macOS window server
+composites a `CAMetalLayer` as **premultiplied** alpha regardless. iced's
+quad and glyph shaders premultiply before writing, so they come out right.
+The *clear color* goes through `Color::into_linear()`, which does *not*
+premultiply - and since the editor and active tab deliberately paint no
+quad (see the transparency section below), the clear color is most of the
+window. Composited as `src_rgb + (1 - a) * desktop`, a straight near-black
+background (rgb ~ 0) happens to look right, but a straight white one
+saturates to solid white at any alpha - light themes rendered as a fully
+opaque window while dark themes looked fine, which is how this shipped
+unnoticed. (An earlier revision of this file reasoned from the
+`PostMultiplied` label and predicted the opposite - bare regions right,
+quad regions too dark - and called it unfixable from here. The
+solid-white-window evidence settled it.) **The fix** (`premultiply` in
+`app.rs`): `XizorApp::style` premultiplies the translucent background color
+itself, in linear space to match what `into_linear()` hands wgpu's clear.
+Gated to macOS + `wgpu`: `tiny-skia` premultiplies internally, so feeding
+it a premultiplied color would double-darken.
 
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
