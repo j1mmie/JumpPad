@@ -173,11 +173,13 @@ the outgoing frame and fixes nothing (tried, confirmed useless);
 (via `iced::window::frames()`, gated like the other subscriptions) before
 invalidating. Armed on tab switch, tab creation, and window resize.
 
-Also real, though not the burn-in: **leftover wgpu render layers**. The
-layer dump found two `WgpuObserverLayer`s under the view's root layer - the
-older one `opaque=true`, a leftover from the adapter-probe surface -
-stacked behind the live one. `hide_stale_render_layers` hides everything
-below the last (live) sublayer at startup.
+One oddity found along the way, currently left alone: the layer dump showed
+**two** `WgpuObserverLayer`s under the view's root layer - the older one a
+leftover from the adapter-probe surface, `opaque=true`, stacked behind the
+live one. It is visually inert (transparency worked correctly with it
+present and un-hidden), so the code that hid it was removed in cleanup; if
+an opaque-rectangle artifact ever appears on macOS, that layer is the first
+suspect, and the hiding code is in git history.
 
 Dead ends, so they aren't re-attempted (each confirmed no-op on a real
 machine):
@@ -188,12 +190,19 @@ machine):
   The root layer never held the snapshot. (If a policy change is ever
   needed: not `...RedrawNever` - winit's view drives `handle_redraw` from
   `drawRect:`, so that stops the app painting.)
-- **A programmatic resize as the *mechanism*.** The 1px `resize_kick` does
+- **A programmatic 1px resize** (a "resize kick", removed in cleanup) does
   clear the ghost, but only as a side effect of the swapchain rebuild
   forcing the window server to retake its snapshot - it re-records a new
   one, so the ghost returns on the next content change.
 - **`invalidateShadow` at content-change time.** Right lever, wrong moment;
   it must run after the new frame presents.
+
+Removed along with the kick: its startup trigger on Windows, which existed
+for a "wgpu renders fully opaque until a real resize" report from there.
+The original implementation collapsed the window to zero height, which
+never produced a resize at all (clamped/dropped), so that workaround had
+been a no-op from the start. If the Windows bug resurfaces, git history has
+the working 1px version.
 
 **Also on this path - an upstream alpha-convention mismatch.** Metal offers
 only `[Opaque, PostMultiplied]` and `iced_wgpu` picks `PostMultiplied`,

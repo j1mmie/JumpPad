@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,18 +18,6 @@ use crate::visor::{self, Animation};
 
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
-
-/// Tick rate for the wgpu-transparency resize-kick wait (see `TriggerResizeKick`).
-const RESIZE_KICK_TICK: Duration = Duration::from_millis(16);
-
-/// How much height the resize kick gives up before restoring it. This used to
-/// collapse the window to zero, which never actually kicked anything: a
-/// zero-height surface can't be configured, so the resize gets clamped or
-/// dropped and no reconfigure happens. One pixel is a real resize.
-const RESIZE_KICK_DELTA: f32 = 1.0;
-
-/// How many ticks to wait with the window collapsed before restoring it.
-const RESIZE_KICK_WAIT_FRAMES: u8 = 1;
 
 /// How many consecutive frames to hold a nudged background color for after the
 /// active tab changes (see AGENTS.md's stale-content bug). One frame is not
@@ -59,7 +47,6 @@ pub struct XizorApp {
     editor_factory: EditorFactory,
     theme: Theme,
     background_alpha: f32,
-    resize_kick: Option<(iced::Size, u8)>,
     /// Frames left to hold a nudged background color for, counted down from
     /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
     redraw_nudge_frames: u8,
@@ -124,16 +111,6 @@ pub enum Message {
     HotkeyEvent(GlobalHotKeyEvent),
     /// Advances the visor's slide animation by one frame.
     AnimationTick,
-    /// Works around wgpu surfaces rendering fully opaque until the window
-    /// goes through a real resize (seen on Windows): collapses the window's
-    /// height to 0, then restores it. Fires once at startup when
-    /// transparency is on, and manually via Ctrl+` for re-testing.
-    TriggerResizeKick,
-    /// The window size from `TriggerResizeKick`, resolved - arms the
-    /// wait and collapses the window's height to 0.
-    ResizeKickSized(iced::Size),
-    /// Counts down the collapse wait, restoring the window once it elapses.
-    ResizeKickTick,
     /// One presented frame elapsed - counts down `redraw_nudge_frames`.
     RedrawNudgeFrame,
     /// One presented frame elapsed - counts down `shadow_refresh_frames`,
@@ -233,7 +210,6 @@ impl XizorApp {
             editor_factory,
             theme: resolve_theme(&config.theme),
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
-            resize_kick: None,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
             session_dir,
@@ -725,30 +701,7 @@ impl XizorApp {
             }
             Message::WindowReady(id) => {
                 self.window = id;
-                let snap_task = self.snap_to_monitor();
-                // Only needed when the window was actually created transparent,
-                // and only on the platform the bug it works around was seen on -
-                // collapsing the window to zero height is exactly the sort of
-                // thing that leaves a stale window snapshot behind elsewhere.
-                // Still reachable by hand everywhere via Ctrl+` for re-testing.
-                let collapse_task = if self.background_alpha < 1.0 && cfg!(target_os = "windows") {
-                    Task::done(Message::TriggerResizeKick)
-                } else {
-                    Task::none()
-                };
-                // Only matters while translucent - it's the transparency that
-                // lets AppKit's preserved copy show through.
-                #[cfg(target_os = "macos")]
-                let appkit_task = match id.filter(|_| self.background_alpha < 1.0) {
-                    Some(id) => iced::window::run(id, |window| {
-                        crate::macos::apply_translucent_window_fixes(window);
-                    })
-                    .discard(),
-                    None => Task::none(),
-                };
-                #[cfg(not(target_os = "macos"))]
-                let appkit_task = Task::none();
-                Task::batch([snap_task, collapse_task, appkit_task])
+                self.snap_to_monitor()
             }
             Message::HotkeyEvent(event) => {
                 let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {
@@ -761,36 +714,6 @@ impl XizorApp {
                 }
             }
             Message::AnimationTick => self.advance_animation(),
-            Message::TriggerResizeKick => match self.window {
-                Some(id) => iced::window::size(id).map(Message::ResizeKickSized),
-                None => Task::none(),
-            },
-            Message::ResizeKickSized(size) => {
-                let Some(id) = self.window else {
-                    return Task::none();
-                };
-                let kicked = iced::Size::new(size.width, size.height - RESIZE_KICK_DELTA);
-                log::info!("resize kick: {size:?} -> {kicked:?}");
-                self.resize_kick = Some((size, 0));
-                iced::window::resize(id, kicked)
-            }
-            Message::ResizeKickTick => {
-                let Some((original, waited)) = self.resize_kick else {
-                    return Task::none();
-                };
-                let Some(id) = self.window else {
-                    self.resize_kick = None;
-                    return Task::none();
-                };
-                let next_waited = waited + 1;
-                if next_waited >= RESIZE_KICK_WAIT_FRAMES {
-                    self.resize_kick = None;
-                    log::info!("resize kick: restoring {original:?}");
-                    return iced::window::resize(id, original);
-                }
-                self.resize_kick = Some((original, next_waited));
-                Task::none()
-            }
             Message::WindowResized => {
                 self.arm_shadow_refresh();
                 Task::none()
@@ -1047,13 +970,6 @@ impl XizorApp {
                 .push(iced::time::every(VISOR_ANIM_TICK).map(|_| Message::AnimationTick));
         }
 
-        if self.resize_kick.is_some() {
-            subscriptions.push(
-                iced::time::every(RESIZE_KICK_TICK)
-                    .map(|_| Message::ResizeKickTick),
-            );
-        }
-
         // Real presented frames, not a wall-clock tick - the point is to outlast
         // the platform's buffer rotation, which is counted in frames.
         if self.redraw_nudge_frames > 0 {
@@ -1175,17 +1091,6 @@ fn handle_hotkey(
         && matches!(key, keyboard::Key::Named(keyboard::key::Named::Tab))
     {
         return Some(Message::SelectPreviousActiveTab);
-    }
-
-    // Ctrl+` - re-triggers `TriggerResizeKick`, matched by physical
-    // code since backquote/backtick shifts around by keyboard layout.
-    if modifiers.control()
-        && !modifiers.shift()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(physical_key, key::Physical::Code(key::Code::Backquote))
-    {
-        return Some(Message::TriggerResizeKick);
     }
 
     if !modifiers.command() {
@@ -1475,20 +1380,19 @@ async fn save_to(
     text: String,
     force_dialog: bool,
 ) -> Result<PathBuf, SaveError> {
-    let path = if force_dialog || existing_path.is_none() {
-        let mut dialog = rfd::AsyncFileDialog::new();
-        if let Some(existing) = &existing_path {
-            if let Some(dir) = existing.parent() {
+    let path = match existing_path {
+        Some(existing) if !force_dialog => existing,
+        existing_path => {
+            let mut dialog = rfd::AsyncFileDialog::new();
+            if let Some(dir) = existing_path.as_deref().and_then(Path::parent) {
                 dialog = dialog.set_directory(dir);
             }
+            dialog
+                .save_file()
+                .await
+                .map(|handle| handle.path().to_owned())
+                .ok_or(SaveError::DialogClosed)?
         }
-        dialog
-            .save_file()
-            .await
-            .map(|handle| handle.path().to_owned())
-            .ok_or(SaveError::DialogClosed)?
-    } else {
-        existing_path.expect("checked above: existing_path is Some when not force_dialog")
     };
 
     tokio::fs::write(&path, text)
@@ -1547,7 +1451,6 @@ mod tests {
             editor_factory: factory,
             theme: Theme::ALL[0].clone(),
             background_alpha: 1.0,
-            resize_kick: None,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
             session_dir: PathBuf::from("/tmp"),

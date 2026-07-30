@@ -233,7 +233,7 @@ mod tests {
         std::fs::write(draft_path(&dir, 0), "hello").unwrap();
         std::fs::write(draft_path(&dir, 2), "edited").unwrap();
 
-        let loaded = load_manifest(&[dir.clone()]).expect("manifest should parse back");
+        let loaded = load_manifest(std::slice::from_ref(&dir)).expect("manifest should parse back");
         assert_eq!(loaded.active, 2);
         assert_eq!(loaded.tabs.len(), 3);
         assert_eq!(loaded.tabs[0].id, 0);
@@ -309,11 +309,11 @@ mod tests {
     #[test]
     fn load_manifest_returns_none_when_missing_or_corrupt() {
         let dir = scratch_dir();
-        assert!(load_manifest(&[dir.clone()]).is_none());
+        assert!(load_manifest(std::slice::from_ref(&dir)).is_none());
 
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(MANIFEST_FILE), "not valid toml {{{").unwrap();
-        assert!(load_manifest(&[dir.clone()]).is_none());
+        assert!(load_manifest(std::slice::from_ref(&dir)).is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
