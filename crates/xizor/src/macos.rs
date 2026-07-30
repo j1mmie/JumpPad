@@ -1,6 +1,8 @@
 //! macOS window tweaks that neither iced nor winit exposes.
 
-use iced::window::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+// `window_handle()` resolves through `iced::window::Window`'s own supertrait
+// bound, so `HasWindowHandle` doesn't need to be in scope here.
+use iced::window::raw_window_handle::RawWindowHandle;
 use objc2::msg_send;
 use objc2::runtime::{AnyObject, Bool};
 
