@@ -411,6 +411,7 @@ impl XizorApp {
         self.sync_session_metadata();
         Task::batch([
             operate(operation::focusable::focus_next()),
+            self.log_appkit_layers(),
             self.clear_appkit_snapshot(),
         ])
     }
@@ -442,6 +443,25 @@ impl XizorApp {
 
     #[cfg(not(target_os = "macos"))]
     fn clear_appkit_snapshot(&self) -> Task<Message> {
+        Task::none()
+    }
+
+    /// Logs the Core Animation layer tree. Hung off the tab switch rather than
+    /// the resize, since a switch is when the burn-in becomes visible and a
+    /// drag would emit this dozens of times.
+    #[cfg(target_os = "macos")]
+    fn log_appkit_layers(&self) -> Task<Message> {
+        match self.window.filter(|_| self.background_alpha < 1.0) {
+            Some(id) => iced::window::run(id, |window| {
+                crate::macos::log_layer_tree(window);
+            })
+            .discard(),
+            None => Task::none(),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn log_appkit_layers(&self) -> Task<Message> {
         Task::none()
     }
 

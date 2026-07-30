@@ -4,7 +4,7 @@
 // bound, so `HasWindowHandle` doesn't need to be in scope here.
 use iced::window::raw_window_handle::RawWindowHandle;
 use objc2::msg_send;
-use objc2::runtime::AnyObject;
+use objc2::runtime::{AnyClass, AnyObject, Bool};
 
 /// `NSViewLayerContentsRedrawOnSetNeedsDisplay`. Deliberately not
 /// `...RedrawNever`, which would stop AppKit calling `drawRect:` - winit's view
@@ -65,6 +65,65 @@ pub fn clear_root_layer_snapshot(window: &dyn iced::window::Window) {
         let _: () = msg_send![root_layer, setContents: std::ptr::null_mut::<AnyObject>()];
     }
     log::debug!("xizor: cleared the view root layer's cached contents");
+}
+
+/// Dumps the view's Core Animation layer tree.
+///
+/// The burn-in is behind our content, frozen, and survives having the root
+/// layer's `contents` cleared - but a drag-resize does clear it, and the one
+/// thing a drag does that nothing else does is make `wgpu` rebuild the
+/// swapchain. This prints what is actually in the tree so the next step isn't
+/// another guess: how many sublayers there are, whether more than one
+/// `CAMetalLayer` has accumulated, and which layers are holding `contents`.
+pub fn log_layer_tree(window: &dyn iced::window::Window) {
+    let Some(view) = ns_view(window) else {
+        return;
+    };
+    // SAFETY: `view` is a live `NSView` and these are all plain AppKit and Core
+    // Animation getters, called on the main thread.
+    unsafe {
+        let root: *mut AnyObject = msg_send![view, layer];
+        if root.is_null() {
+            log::info!("xizor: layer tree: view is not layer-backed");
+            return;
+        }
+        log::info!("xizor: layer tree: root {}", describe_layer(root));
+
+        let sublayers: *mut AnyObject = msg_send![root, sublayers];
+        if sublayers.is_null() {
+            log::info!("xizor: layer tree: root has no sublayers");
+            return;
+        }
+        let count: usize = msg_send![sublayers, count];
+        log::info!("xizor: layer tree: {count} sublayer(s)");
+        for index in 0..count {
+            let layer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
+            log::info!("xizor: layer tree:   [{index}] {}", describe_layer(layer));
+        }
+    }
+}
+
+/// # Safety
+///
+/// `layer` must be a live `CALayer`.
+unsafe fn describe_layer(layer: *mut AnyObject) -> String {
+    let class: *const AnyClass = msg_send![layer, class];
+    let name = if class.is_null() {
+        "<null class>".to_string()
+    } else {
+        (*class).name().to_string_lossy().into_owned()
+    };
+
+    let contents: *mut AnyObject = msg_send![layer, contents];
+    let opaque: Bool = msg_send![layer, isOpaque];
+    let hidden: Bool = msg_send![layer, isHidden];
+
+    format!(
+        "{name} contents={} opaque={} hidden={}",
+        if contents.is_null() { "none" } else { "SET" },
+        opaque.as_bool(),
+        hidden.as_bool(),
+    )
 }
 
 fn ns_view(window: &dyn iced::window::Window) -> Option<*mut AnyObject> {
