@@ -127,6 +127,8 @@ pub enum Message {
     ResizeKickTick,
     /// One presented frame elapsed - counts down `redraw_nudge_frames`.
     RedrawNudgeFrame,
+    /// The window was resized - drops AppKit's snapshot of it on macOS.
+    WindowResized,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
     /// wrapping past the last back to the first.
     SelectNextTab,
@@ -407,7 +409,10 @@ impl XizorApp {
             tab.editor.move_cursor_to(line, column);
         }
         self.sync_session_metadata();
-        operate(operation::focusable::focus_next())
+        Task::batch([
+            operate(operation::focusable::focus_next()),
+            self.clear_appkit_snapshot(),
+        ])
     }
 
     /// Moves the active tab by `delta` positions, wrapping around at either
@@ -419,6 +424,25 @@ impl XizorApp {
         let len = self.tabs.len() as isize;
         let next = (self.active as isize + delta).rem_euclid(len) as usize;
         self.switch_active(next)
+    }
+
+    /// Drops AppKit's cached copy of the window (see `macos.rs`). Runs after a
+    /// resize, which is when it's taken, and after a tab switch, which is when
+    /// a stale one becomes visible.
+    #[cfg(target_os = "macos")]
+    fn clear_appkit_snapshot(&self) -> Task<Message> {
+        match self.window.filter(|_| self.background_alpha < 1.0) {
+            Some(id) => iced::window::run(id, |window| {
+                crate::macos::clear_root_layer_snapshot(window);
+            })
+            .discard(),
+            None => Task::none(),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn clear_appkit_snapshot(&self) -> Task<Message> {
+        Task::none()
     }
 
     /// Rewrites the session manifest, pruning orphaned draft files.
@@ -748,6 +772,7 @@ impl XizorApp {
                 self.resize_kick = Some((original, next_waited));
                 Task::none()
             }
+            Message::WindowResized => self.clear_appkit_snapshot(),
             Message::RedrawNudgeFrame => {
                 self.redraw_nudge_frames = self.redraw_nudge_frames.saturating_sub(1);
                 Task::none()
@@ -982,6 +1007,7 @@ impl XizorApp {
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
             hotkey::subscription(),
+            iced::window::resize_events().map(|_| Message::WindowResized),
         ];
 
         // Gated timers below: each only ticks while its condition holds, so

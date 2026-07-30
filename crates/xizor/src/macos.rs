@@ -31,28 +31,49 @@ const REDRAW_ON_SET_NEEDS_DISPLAY: isize = 1;
 /// caches at the window level, not the view's layer - setting it to `NO`
 /// changed nothing.
 pub fn disable_resize_content_caching(window: &dyn iced::window::Window) {
-    let Ok(handle) = window.window_handle() else {
-        log::warn!("xizor: no window handle; leaving AppKit's layer caching alone");
+    let Some(view) = ns_view(window) else {
         return;
     };
-    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
-        return;
-    };
-
-    // SAFETY: the handle guarantees a live `NSView`, these are plain AppKit and
-    // Core Animation selectors, and iced runs window actions on the main
-    // thread, which is where AppKit requires them.
+    // SAFETY: see `with_root_layer`.
     unsafe {
-        let view: *mut AnyObject = handle.ns_view.as_ptr().cast();
         let _: () = msg_send![view, setLayerContentsRedrawPolicy: REDRAW_ON_SET_NEEDS_DISPLAY];
+    }
+    clear_root_layer_snapshot(window);
+    log::info!("xizor: disabled AppKit resize-content caching on the view's root layer");
+}
 
-        // The policy stops new snapshots; this drops one already taken.
+/// Drops whatever AppKit has cached in the view's root layer.
+///
+/// Setting the policy above is meant to stop the snapshot being taken at all,
+/// but it demonstrably doesn't on its own, so this is also called after a
+/// resize (when the snapshot is created) and after a tab switch (when a stale
+/// one becomes visible). If the burn-in outlives *this*, the root layer's
+/// `contents` is not where it lives and the search moves outside the view.
+pub fn clear_root_layer_snapshot(window: &dyn iced::window::Window) {
+    let Some(view) = ns_view(window) else {
+        return;
+    };
+    // SAFETY: `view` is a live `NSView`, `-layer` and `-setContents:` are plain
+    // AppKit and Core Animation selectors, and iced runs window actions on the
+    // main thread, which is where AppKit requires them.
+    unsafe {
         let root_layer: *mut AnyObject = msg_send![view, layer];
         if root_layer.is_null() {
-            log::warn!("xizor: NSView is not layer-backed yet; nothing to clear");
+            log::warn!("xizor: NSView is not layer-backed; nothing to clear");
             return;
         }
         let _: () = msg_send![root_layer, setContents: std::ptr::null_mut::<AnyObject>()];
     }
-    log::info!("xizor: disabled AppKit resize-content caching on the view's root layer");
+    log::debug!("xizor: cleared the view root layer's cached contents");
+}
+
+fn ns_view(window: &dyn iced::window::Window) -> Option<*mut AnyObject> {
+    let Ok(handle) = window.window_handle() else {
+        log::warn!("xizor: no window handle; leaving AppKit's layers alone");
+        return None;
+    };
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return None;
+    };
+    Some(handle.ns_view.as_ptr().cast())
 }
