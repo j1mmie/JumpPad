@@ -140,39 +140,55 @@ pub fn hide_stale_render_layers(window: &dyn iced::window::Window) {
     }
 }
 
-/// Dumps the view's Core Animation layer tree.
+/// Dumps the layer tree of the *entire window*, from the frame view down.
 ///
-/// The burn-in is behind our content, frozen, and survives having the root
-/// layer's `contents` cleared - but a drag-resize does clear it, and the one
-/// thing a drag does that nothing else does is make `wgpu` rebuild the
-/// swapchain. This prints what is actually in the tree so the next step isn't
-/// another guess: how many sublayers there are, whether more than one
-/// `CAMetalLayer` has accumulated, and which layers are holding `contents`.
-pub fn log_layer_tree(window: &dyn iced::window::Window) {
+/// The ghost survives clearing everything under our own view's layer, so it
+/// must live in a layer we haven't looked at - AppKit's live-resize snapshot
+/// machinery operates on the window's frame view (`NSThemeFrame`), which is an
+/// ancestor of the content view. This walks the whole tree recursively so the
+/// layer actually holding stale contents shows up by class name.
+pub fn log_window_layer_tree(window: &dyn iced::window::Window) {
     let Some(view) = ns_view(window) else {
         return;
     };
-    // SAFETY: `view` is a live `NSView` and these are all plain AppKit and Core
-    // Animation getters, called on the main thread.
+    // SAFETY: live `NSView`, plain AppKit getters, main thread.
     unsafe {
-        let root: *mut AnyObject = msg_send![view, layer];
+        // Walk up to the window's topmost view (the theme frame).
+        let mut top: *mut AnyObject = view;
+        loop {
+            let superview: *mut AnyObject = msg_send![top, superview];
+            if superview.is_null() {
+                break;
+            }
+            top = superview;
+        }
+        let root: *mut AnyObject = msg_send![top, layer];
         if root.is_null() {
-            log::info!("xizor: layer tree: view is not layer-backed");
+            log::info!("xizor: window layer tree: frame view is not layer-backed");
             return;
         }
-        log::info!("xizor: layer tree: root {}", describe_layer(root));
+        log::info!("xizor: window layer tree:");
+        log_layer_recursive(root, 0);
+    }
+}
 
-        let sublayers: *mut AnyObject = msg_send![root, sublayers];
-        if sublayers.is_null() {
-            log::info!("xizor: layer tree: root has no sublayers");
-            return;
-        }
-        let count: usize = msg_send![sublayers, count];
-        log::info!("xizor: layer tree: {count} sublayer(s)");
-        for index in 0..count {
-            let layer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
-            log::info!("xizor: layer tree:   [{index}] {}", describe_layer(layer));
-        }
+/// # Safety
+///
+/// `layer` must be a live `CALayer`.
+unsafe fn log_layer_recursive(layer: *mut AnyObject, depth: usize) {
+    log::info!(
+        "xizor:   {}{}",
+        "  ".repeat(depth),
+        describe_layer(layer)
+    );
+    let sublayers: *mut AnyObject = msg_send![layer, sublayers];
+    if sublayers.is_null() {
+        return;
+    }
+    let count: usize = msg_send![sublayers, count];
+    for index in 0..count {
+        let sublayer: *mut AnyObject = msg_send![sublayers, objectAtIndex: index];
+        log_layer_recursive(sublayer, depth + 1);
     }
 }
 

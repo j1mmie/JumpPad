@@ -455,7 +455,7 @@ impl XizorApp {
     fn log_appkit_layers(&self) -> Task<Message> {
         match self.window.filter(|_| self.background_alpha < 1.0) {
             Some(id) => iced::window::run(id, |window| {
-                crate::macos::log_layer_tree(window);
+                crate::macos::log_window_layer_tree(window);
             })
             .discard(),
             None => Task::none(),
