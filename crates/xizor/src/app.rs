@@ -942,6 +942,12 @@ impl XizorApp {
         let mut style = iced::theme::default(theme);
         if self.background_alpha < 1.0 {
             style.background_color = style.background_color.scale_alpha(self.background_alpha);
+            // macOS composites the wgpu surface as premultiplied alpha, but
+            // the clear color reaches it straight (see `premultiply`). Not on
+            // tiny-skia: it premultiplies internally and would double-darken.
+            if cfg!(all(target_os = "macos", feature = "wgpu")) {
+                style.background_color = premultiply(style.background_color);
+            }
         }
         style
     }
@@ -1279,6 +1285,20 @@ fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
     let mut palette = theme.palette();
     palette.background.a -= 0.001 * f32::from(frames_left);
     Theme::custom("xizor (redraw nudge)".to_string(), palette)
+}
+
+/// Premultiplies a color's RGB by its alpha, in linear space - the space the
+/// clear color is handed to wgpu in (`Color::into_linear`).
+///
+/// **The solid-white-window fix.** The macOS window server composites the
+/// surface as *premultiplied* alpha - `src + (1 - a) * desktop` - but iced's
+/// clear color is written straight, so a straight white background saturates
+/// to solid white at any alpha, while a near-black one (rgb ~ 0) happens to
+/// look right; only light themes ever looked broken. Quads and glyphs are
+/// unaffected - iced's shaders premultiply before writing (see AGENTS.md).
+fn premultiply(color: Color) -> Color {
+    let [r, g, b, a] = color.into_linear();
+    Color::from_linear_rgba(r * a, g * a, b * a, a)
 }
 
 /// Matches a config-file theme name against `Theme::ALL` by display name
@@ -1845,6 +1865,26 @@ mod tests {
             },
         );
         assert_eq!(darkening_wash(&theme, TAB_ROW_DARKEN).a, 0.0);
+    }
+
+    #[test]
+    fn premultiply_scales_linear_rgb_by_alpha() {
+        // Linear white is 1.0 per channel, so premultiplied it *is* the alpha.
+        let [r, g, b, a] = premultiply(Color { a: 0.25, ..Color::WHITE }).into_linear();
+        for (channel, value) in [("r", r), ("g", g), ("b", b)] {
+            assert!((value - 0.25).abs() < 1e-5, "{channel} = {value}, wanted 0.25");
+        }
+        assert!((a - 0.25).abs() < 1e-6, "alpha must survive untouched, got {a}");
+    }
+
+    #[test]
+    fn premultiply_leaves_black_black() {
+        // Why dark themes never showed the bug: rgb ~ 0 premultiplies to itself.
+        let color = premultiply(Color { a: 0.25, ..Color::BLACK });
+        assert_eq!(color.r, 0.0);
+        assert_eq!(color.g, 0.0);
+        assert_eq!(color.b, 0.0);
+        assert!((color.a - 0.25).abs() < 1e-6);
     }
 
     #[test]
