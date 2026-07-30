@@ -434,6 +434,7 @@ impl XizorApp {
     fn clear_appkit_snapshot(&self) -> Task<Message> {
         match self.window.filter(|_| self.background_alpha < 1.0) {
             Some(id) => iced::window::run(id, |window| {
+                crate::macos::hide_stale_render_layers(window);
                 crate::macos::clear_root_layer_snapshot(window);
             })
             .discard(),
