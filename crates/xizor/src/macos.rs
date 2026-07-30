@@ -40,6 +40,23 @@ pub fn disable_resize_content_caching(window: &dyn iced::window::Window) {
     }
     clear_root_layer_snapshot(window);
     hide_stale_render_layers(window);
+
+    // DIAGNOSTIC: every layer in the process checks out clean, so the last
+    // suspect for the burn-in is the window server's shadow-content cache -
+    // it keeps a copy of a translucent window's content, with exactly the
+    // observed "snapshot at last resize" semantics. No shadow, no cache. If
+    // the ghost dies with this, the real fix is a well-timed
+    // `invalidateShadow` (after present, not before) rather than losing the
+    // shadow.
+    // SAFETY: same as above; `-window` and `-setHasShadow:` are plain AppKit.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![view, window];
+        if !ns_window.is_null() {
+            let _: () = msg_send![ns_window, setHasShadow: Bool::NO];
+            log::info!("xizor: window shadow disabled (burn-in diagnostic)");
+        }
+    }
+
     log::info!("xizor: disabled AppKit resize-content caching on the view's root layer");
 }
 
