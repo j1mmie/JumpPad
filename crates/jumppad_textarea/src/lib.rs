@@ -1,4 +1,6 @@
 mod history;
+mod scrollbar;
+pub mod text_editor;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -9,8 +11,7 @@ use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
-use iced::widget::text_editor;
-use iced::widget::text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status};
+use text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status, text_editor};
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
 

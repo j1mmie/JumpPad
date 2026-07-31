@@ -1,4 +1,4 @@
-use iced::widget::text_editor;
+use iced::advanced::text::editor as text_editor;
 
 use crate::find::FindMatch;
 
