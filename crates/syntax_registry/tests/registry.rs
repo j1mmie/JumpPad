@@ -238,3 +238,68 @@ fn static_injection_highlights_yaml_frontmatter_via_markdown() {
          after waiting for markdown and its injection targets to load; got: {last_spans:?}"
     );
 }
+
+/// Highlights `source` with the markdown grammar, re-highlighting as
+/// injection targets load until `done` is satisfied. Returns the last spans
+/// produced either way, so a failing caller can report what it actually got.
+fn highlight_markdown_until(
+    source: &str,
+    done: impl Fn(&[HighlightCategory], &[syntax_registry::HighlightSpan]) -> bool,
+) -> Arc<Vec<syntax_registry::HighlightSpan>> {
+    let (tx, rx) = mpsc::channel();
+    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("markdown", "markdown")]), move || {
+        let _ = tx.send(());
+    });
+    let handle = registry.acquire("markdown");
+
+    let mut last_spans = Arc::new(Vec::new());
+    for _ in 0..8 {
+        if let PollResult::Ready(grammar) = handle.poll() {
+            last_spans = grammar.highlight(source);
+            let categories: Vec<_> = last_spans.iter().map(|span| span.category).collect();
+            if done(&categories, &last_spans) {
+                break;
+            }
+        }
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+    }
+    last_spans
+}
+
+#[test]
+fn inline_injection_colors_a_link_the_block_grammar_leaves_bare() {
+    // The inline grammar loads separately from - and later than - the
+    // markdown grammar that injects it, so a link stayed uncolored until
+    // some unrelated edit happened to invalidate the cached parse.
+    let source = "A [link](https://example.com) here.\n";
+    let spans = highlight_markdown_until(source, |categories, _| {
+        categories.contains(&HighlightCategory::Link)
+    });
+    assert!(
+        spans.iter().any(|span| span.category == HighlightCategory::Link),
+        "expected markdown_inline to contribute a Link span: {spans:?}"
+    );
+}
+
+#[test]
+fn an_injection_only_overrides_the_bytes_it_actually_colors() {
+    // `# Title`'s text is an injection target (markdown_inline), but the
+    // inline grammar has nothing to say about plain words - so the heading
+    // must keep its color across the whole line rather than shrinking to
+    // the `#` once the inline grammar loads.
+    let source = "# Title\n\nA [link](https://example.com) here.\n";
+    let title_end = "# Title".len();
+    let spans = highlight_markdown_until(source, |categories, _| {
+        categories.contains(&HighlightCategory::Link)
+    });
+    assert!(
+        spans.iter().any(|span| span.category == HighlightCategory::Link),
+        "the inline grammar never loaded, so this proves nothing: {spans:?}"
+    );
+    assert!(
+        spans.iter().any(|span| {
+            span.category == HighlightCategory::Heading && span.start == 0 && span.end >= title_end
+        }),
+        "expected the heading span to still cover all of `# Title`: {spans:?}"
+    );
+}

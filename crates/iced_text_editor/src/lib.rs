@@ -52,6 +52,10 @@ pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorComma
 pub struct IcedTextEditor {
     content: Content,
     highlighting: Highlighting,
+    /// Read for its load revision on every `view` - an injection target
+    /// resolving is otherwise invisible to iced, which re-runs the
+    /// highlighter only when `HighlighterSettings` compare unequal.
+    registry: Arc<SyntaxRegistry>,
     history: History,
     overrides: Arc<EditorOverrides>,
     /// Scales the editor's own background color (see `editor_style`).
@@ -104,6 +108,7 @@ impl IcedTextEditor {
         Self {
             content: Content::with_text(text),
             highlighting,
+            registry: registry.clone(),
             history: History::new(),
             overrides,
             background_alpha: background_alpha.clamp(0.0, 1.0),
@@ -158,6 +163,7 @@ impl TextEditorWidget for IcedTextEditor {
         let settings = HighlighterSettings {
             source: self.content.text(),
             grammar: self.grammar(),
+            revision: self.registry.revision(),
             matches: self.find_matches.clone(),
             current_match: self.find_current,
         };
@@ -216,7 +222,15 @@ impl TextEditorWidget for IcedTextEditor {
     }
 
     fn has_pending_highlighting(&self) -> bool {
-        matches!(self.highlighting, Highlighting::Pending(_))
+        match &self.highlighting {
+            Highlighting::Pending(_) => true,
+            // A loaded grammar is not necessarily done: its injection
+            // targets (markdown's inline grammar, say) load separately and
+            // later, and the spans it yields until then are missing
+            // everything they would have colored.
+            Highlighting::Ready(_, grammar) => grammar.injections_unresolved(),
+            Highlighting::None | Highlighting::Unavailable(_) => false,
+        }
     }
 
     fn cursor_position(&self) -> (usize, usize) {
@@ -308,6 +322,11 @@ fn clamp_position(content: &Content, (line, column): (usize, usize)) -> Position
 struct HighlighterSettings {
     source: String,
     grammar: Option<Arc<Grammar>>,
+    /// The registry's load revision. The grammar `Arc` stays the same object
+    /// as its injection targets resolve, so without this the settings would
+    /// still compare equal and the incomplete first parse would stay on
+    /// screen until an unrelated edit changed `source`.
+    revision: u64,
     matches: Arc<Vec<FindMatch>>,
     current_match: Option<usize>,
 }
@@ -315,6 +334,7 @@ struct HighlighterSettings {
 impl PartialEq for HighlighterSettings {
     fn eq(&self, other: &Self) -> bool {
         self.source == other.source
+            && self.revision == other.revision
             && match (&self.grammar, &other.grammar) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
                 (None, None) => true,
@@ -886,6 +906,7 @@ mod tests {
         TreeSitterHighlighter::new(&HighlighterSettings {
             source: source.to_string(),
             grammar: None,
+            revision: 0,
             matches: Arc::new(matches),
             current_match: current,
         })
@@ -944,6 +965,7 @@ mod tests {
         let base = HighlighterSettings {
             source: "ab".to_string(),
             grammar: None,
+            revision: 0,
             matches: matches.clone(),
             current_match: None,
         };
@@ -962,6 +984,21 @@ mod tests {
             ..base.clone()
         };
         assert!(base != other_matches, "a new match list must invalidate");
+    }
+
+    #[test]
+    fn settings_differing_only_in_registry_revision_are_not_equal() {
+        // The whole mechanism for picking up a late-loading injection
+        // target: nothing else about the settings moves when one resolves.
+        let base = HighlighterSettings {
+            source: "ab".to_string(),
+            grammar: None,
+            revision: 0,
+            matches: Arc::new(Vec::new()),
+            current_match: None,
+        };
+        let loaded_something = HighlighterSettings { revision: 1, ..base.clone() };
+        assert!(base != loaded_something);
     }
 
     #[test]

@@ -49,6 +49,19 @@ impl Grammar {
         }
     }
 
+    /// Whether the spans this grammar produces are missing injected content:
+    /// either the last highlight had to skip an injection target that was
+    /// still loading, or one is still loading right now. True on both sides
+    /// of the first highlight, so a caller polling on it can't slip through
+    /// the gap between the grammar becoming ready and its first parse.
+    pub fn injections_unresolved(&self) -> bool {
+        self.inner.lock().unwrap().injections_pending
+            || self
+                .injected
+                .values()
+                .any(|handle| matches!(handle.poll(), PollResult::Loading))
+    }
+
     /// Returns highlight spans for `source`, reparsing only if `source`
     /// changed or a pending injection might have resolved since.
     pub fn highlight(&self, source: &str) -> Arc<Vec<HighlightSpan>> {
@@ -74,9 +87,9 @@ impl Grammar {
                 .iter()
                 .position(|&name| name == "injection.content");
 
-            // Staged rather than spliced in per-match, since `QueryCursor::matches`
+            // Collected rather than spliced in per-match, since `QueryCursor::matches`
             // isn't guaranteed to yield matches in byte order.
-            let mut staged: Vec<(usize, usize, Vec<HighlightSpan>)> = Vec::new();
+            let mut injected_spans: Vec<HighlightSpan> = Vec::new();
 
             let mut cursor = QueryCursor::new();
             let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
@@ -112,31 +125,35 @@ impl Grammar {
                     let Some(sub_source) = source.get(start..end) else {
                         continue;
                     };
-                    let inner_spans = inner_grammar
-                        .highlight(sub_source)
-                        .iter()
-                        .map(|span| HighlightSpan {
+                    injected_spans.extend(inner_grammar.highlight(sub_source).iter().map(|span| {
+                        HighlightSpan {
                             start: start + span.start,
                             end: start + span.end,
                             category: span.category,
-                        })
-                        .collect();
-                    staged.push((start, end, inner_spans));
+                        }
+                    }));
+                    // An injected grammar can have injections of its own, and
+                    // its result is just as incomplete while they load.
+                    injections_pending |= inner_grammar.injections_unresolved();
                 }
             }
 
-            if !staged.is_empty() {
-                // Cut each injection range out of the base spans it
-                // overlaps, keeping the non-overlapping parts - e.g. a
+            if !injected_spans.is_empty() {
+                // Only the bytes an injected span actually covers are cut out
+                // of the base spans, not the whole injected region - e.g. a
                 // heading like `# **bold**` keeps heading color on `# `
-                // even though `**bold**` is overridden by an injected span.
-                let mut result = Vec::with_capacity(spans.len() + staged.len());
+                // where `**bold**` is overridden, and a plain `# Title`, which
+                // the inline grammar has nothing to say about, stays heading
+                // colored end to end.
+                let mut result = Vec::with_capacity(spans.len() + injected_spans.len());
                 for span in &spans {
                     let mut pieces = vec![(span.start, span.end)];
-                    for &(inj_start, inj_end, _) in &staged {
+                    for injected in &injected_spans {
                         pieces = pieces
                             .into_iter()
-                            .flat_map(|piece| subtract_range(piece, (inj_start, inj_end)))
+                            .flat_map(|piece| {
+                                subtract_range(piece, (injected.start, injected.end))
+                            })
                             .collect();
                     }
                     result.extend(pieces.into_iter().map(|(start, end)| HighlightSpan {
@@ -145,11 +162,7 @@ impl Grammar {
                         category: span.category,
                     }));
                 }
-                for (_, _, inner_spans) in staged {
-                    result.extend(inner_spans);
-                }
-                // Assumes injection matches never overlap each other (true
-                // for the real markdown query) - not enforced at runtime.
+                result.extend(injected_spans);
                 result.sort_by_key(|span| span.start);
                 spans = result;
             }

@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tree_sitter::{wasmtime, Language, Query};
@@ -37,6 +38,12 @@ pub struct SyntaxRegistry {
     // was observed to hang indefinitely. Grammars can still be requested
     // concurrently; only the compile itself is serialized.
     compile_lock: Mutex<()>,
+    /// Bumped every time a load resolves. A grammar that had to skip an
+    /// injection because its target wasn't loaded yet caches an incomplete
+    /// result; watching this is how a consumer knows to ask again. Covers
+    /// injections nested any number of levels deep, since every load - at
+    /// any depth - bumps the same counter.
+    revision: AtomicU64,
 }
 
 impl SyntaxRegistry {
@@ -52,7 +59,13 @@ impl SyntaxRegistry {
             on_ready: Box::new(on_ready),
             state: Mutex::new(HashMap::new()),
             compile_lock: Mutex::new(()),
+            revision: AtomicU64::new(0),
         })
+    }
+
+    /// How many grammar loads have resolved so far - see `revision`.
+    pub fn revision(&self) -> u64 {
+        self.revision.load(Ordering::Acquire)
     }
 
     /// Registers interest in the grammar configured for `extension`. If none
@@ -129,6 +142,10 @@ impl SyntaxRegistry {
                     Entry::Unavailable(reason)
                 }
             };
+            // Released while the entry is still under the lock, so anyone who
+            // reads the new revision is guaranteed to see the entry it
+            // announces rather than the `Loading` it replaced.
+            self.revision.fetch_add(1, Ordering::Release);
         } // lock released here, before calling out
 
         (self.on_ready)();

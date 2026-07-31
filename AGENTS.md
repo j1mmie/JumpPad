@@ -87,6 +87,34 @@ settled.
   referencing a grammar evicts it. Injection targets (e.g. embedded YAML
   inside Markdown, via `<grammar>.injections.scm`) are just more grammars
   acquired recursively through the same path.
+- **Gotcha - an injection target loads *after* the grammar that injects
+  it,** so a grammar going `Ready` is not the end of the story. Markdown is
+  the visible case: `markdown.wasm` resolves first and colors headings and
+  code fences, but everything inline (links, bold) comes from
+  `markdown_inline.wasm`, acquired only once markdown itself has finished
+  loading. Nothing about the tab changes when it lands - the grammar `Arc`
+  is the same object - so two things have to notice it, and both are
+  required:
+  - `SyntaxRegistry.revision` counts resolved loads and rides along in
+    `HighlighterSettings`. iced re-runs a `Highlighter` only when its
+    settings compare unequal, and `source`/`grammar` don't move here; without
+    the revision the incomplete first parse stayed on screen until an
+    unrelated edit changed `source` (typing anywhere above the text was
+    enough - that's the bug's signature). Registry-wide, not per grammar, so
+    it covers injections nested any number of levels deep.
+  - `Grammar::injections_unresolved` keeps `has_pending_highlighting` - and
+    so the 50ms poll subscription - alive until the targets land. It ORs the
+    flag recorded by the last `highlight` with a live check of the injected
+    handles, because the subscription is re-evaluated *before* the first
+    `view` after the grammar goes `Ready` (`iced_winit`'s `update` re-tracks
+    recipes at the end of the message pass; `view` runs later, on the
+    redraw). At that instant the recorded flag is still `false`, so the timer
+    would shut off before anything had parsed.
+- **An injected span overrides only the bytes it actually colors,** not the
+  whole injected region. `# Title`'s text is an injection target, but the
+  inline grammar has nothing to say about plain words - subtracting the
+  region wholesale left the heading color on `# ` alone, so a heading
+  visibly *lost* color the moment the inline grammar loaded.
 - **Gotcha - compile serialization:** `SyntaxRegistry.compile_lock`
   serializes the actual wasmtime compile step across all background
   loader threads. This was not a defensive guess - concurrent first-time
