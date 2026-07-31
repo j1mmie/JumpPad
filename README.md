@@ -1,12 +1,15 @@
+
+<div align="center">
+  
+<img src="assets/JumpPad.svg" width="128px" />
+
 # JumpPad
 
 A lightweight, cross-platform, Rust-based plaintext editor with modern features and minimal bloat
 
-```
-cargo install jumppad
-```
+</div>
 
-## Why
+## Motivation
 
 JumpPad is a learning project in the Rust ecosystem. It can be seen as a
 replacement for Notepad or Textedit - a handy, plaintext editor with a
