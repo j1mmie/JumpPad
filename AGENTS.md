@@ -221,8 +221,35 @@ unnoticed. (An earlier revision of this file reasoned from the
 quad regions too dark - and called it unfixable from here. The
 solid-white-window evidence settled it.) **The fix** (`premultiply` in
 `app.rs`): `JumpPadApp::style` premultiplies the translucent background color
-itself. Gated to macOS + `wgpu`: `tiny-skia` premultiplies internally, so
-feeding it a premultiplied color would double-darken.
+itself. Gated on `CLEAR_COLOR_NEEDS_PREMULTIPLY` (also in `app.rs`) rather
+than applied unconditionally, because `tiny-skia` premultiplies internally
+and feeding it a premultiplied color would double-darken.
+
+**Not a macOS bug - Windows' DWM has the same convention.** Reported from
+Windows as "the theme is much lighter in wgpu than in the software
+renderer", with side-by-side screenshots of a dark theme at the same
+`[alpha] background`. Same root cause: `transparent(true)` on Windows gets
+per-pixel alpha through winit's `DwmEnableBlurBehindWindow`, and DWM's
+composition model is premultiplied, so a straight clear color lands
+`(1 - a) * rgb` too bright. It reads as a wash rather than the
+solid-white saturation macOS light themes showed, because a mid-tone
+background sits between "rgb ~ 0, immune" and "rgb ~ 1, saturates". The
+software binary is the correct reference on that platform: `tiny-skia`
+stores premultiplied `PremultipliedColorU8` and softbuffer blits those
+bytes straight to the DIB, so it satisfies DWM by construction. So
+`CLEAR_COLOR_NEEDS_PREMULTIPLY` covers macOS *and* Windows on `wgpu`.
+
+The premultiplied clear color is the same value on both backends, not
+merely close: `iced_wgpu` takes the clear color through
+`Color::into_linear()` and the sRGB surface encodes it back on write, so
+the encoded bytes presented match what `tiny-skia` stores. That is the
+point - the two binaries should be indistinguishable on screen.
+
+**Linux is deliberately not in the gate.** Wayland and compositing X11 are
+premultiplied as well, so it probably belongs there too, but nobody has
+reproduced the symptom on either. Turning it on blind would cost real
+opacity on a window that currently looks right; wait for a screenshot the
+way Windows got one.
 
 **Gotcha - the premultiply is per sRGB-encoded channel, not linear.** The
 window server composites on *encoded* values, and
