@@ -1221,10 +1221,7 @@ impl JumpPadApp {
         let mut style = iced::theme::default(theme);
         if self.background_alpha < 1.0 {
             style.background_color = style.background_color.scale_alpha(self.background_alpha);
-            // macOS composites the wgpu surface as premultiplied alpha, but
-            // the clear color reaches it straight (see `premultiply`). Not on
-            // tiny-skia: it premultiplies internally and would double-darken.
-            if cfg!(all(target_os = "macos", feature = "wgpu")) {
+            if CLEAR_COLOR_NEEDS_PREMULTIPLY {
                 style.background_color = premultiply(style.background_color);
             }
         }
@@ -1639,19 +1636,48 @@ fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
     Theme::custom("jumppad (redraw nudge)".to_string(), palette)
 }
 
-/// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
-/// values - the space the macOS window server composites in.
+/// Whether this build has to premultiply the window's clear color before
+/// handing it to iced - see `premultiply` for what goes wrong without it.
 ///
-/// **The solid-white-window fix.** The window server composites the surface
+/// Two conditions have to hold. The backend must be `wgpu`, since only its
+/// clear-color path writes straight alpha (`tiny-skia` premultiplies
+/// internally, so feeding it a premultiplied color would double-darken). And
+/// the platform compositor must read the presented surface as premultiplied:
+/// true of the macOS window server and of Windows' DWM, which is what
+/// `transparent(true)` opts into there (winit enables per-pixel alpha via
+/// `DwmEnableBlurBehindWindow`, and the DWM composition model is
+/// premultiplied).
+///
+/// Linux is deliberately left out. Wayland and compositing X11 are
+/// premultiplied too, but nobody has confirmed the symptom there, and a
+/// wrong guess costs real opacity on a window that currently looks right.
+const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool = cfg!(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "wgpu"
+));
+
+/// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
+/// values - the space desktop compositors composite in.
+///
+/// **The solid-white-window fix.** The compositor composites the surface
 /// as *premultiplied* alpha - `src + (1 - a) * desktop` - but iced's clear
 /// color is written straight, so a straight white background saturates to
 /// solid white at any alpha, while a near-black one (rgb ~ 0) happens to
-/// look right; only light themes ever looked broken. Quads and glyphs are
-/// unaffected - iced's shaders premultiply before writing (see AGENTS.md).
+/// look right; only light themes ever looked broken on macOS. Quads and
+/// glyphs are unaffected - iced's shaders premultiply before writing (see
+/// AGENTS.md).
+///
+/// A mid-tone theme lands between those two extremes: it doesn't saturate,
+/// it just sits `(1 - a) * rgb` too bright, which is what a dark-but-not-black
+/// theme looks like on Windows' wgpu build next to the tiny-skia one.
 ///
 /// Not in linear space: the composite runs on encoded values, and
 /// `encode(linear * a) > encode(linear) * a`, so premultiplying before the
 /// sRGB encode over-brightens - white at alpha 0.1 came out ~3.5x too bright.
+/// This also lands the wgpu build on exactly the bytes `tiny-skia` presents:
+/// `iced_wgpu`'s clear color round-trips through `Color::into_linear()` and
+/// back out through the sRGB surface's encode, so the encoded value written
+/// is the one passed in here.
 fn premultiply(color: Color) -> Color {
     Color {
         r: color.r * color.a,
@@ -2776,6 +2802,44 @@ mod tests {
         assert_eq!(color.g, 0.0);
         assert_eq!(color.b, 0.0);
         assert!((color.a - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_translucent_window_hands_the_compositor_whatever_the_gate_asks_for() {
+        // The two binaries have to agree on screen, so `style` is the single
+        // place the premultiply decision is made - not a per-platform branch
+        // that can drift. Asserted against the gate rather than a literal so
+        // this test says the same thing on every host it runs on.
+        let mut app = test_app(1);
+        app.background_alpha = 0.5;
+        let theme = app.theme();
+
+        let scaled = iced::theme::default(&theme).background_color.scale_alpha(0.5);
+        let expected = if CLEAR_COLOR_NEEDS_PREMULTIPLY { premultiply(scaled) } else { scaled };
+
+        assert_eq!(app.style(&theme).background_color, expected);
+    }
+
+    #[test]
+    fn premultiplying_leaves_the_configured_alpha_alone() {
+        // Whatever the RGB does, the alpha channel *is* the transparency the
+        // user configured - premultiplying must not eat into it.
+        let mut app = test_app(1);
+        app.background_alpha = 0.5;
+        assert!((app.style(&app.theme()).background_color.a - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn an_opaque_window_is_never_premultiplied() {
+        // At alpha 1.0 the window isn't transparent at all and premultiplying
+        // would be a no-op anyway - but the branch is skipped outright, so a
+        // solid window renders identically on both backends.
+        let app = test_app(1);
+        let theme = app.theme();
+        assert_eq!(
+            app.style(&theme).background_color,
+            iced::theme::default(&theme).background_color
+        );
     }
 
     #[test]
