@@ -256,7 +256,39 @@ premultiply in *linear* space - land slightly bright under this compositor,
 but every translucent quad this app paints is black (`darkening_wash`, the
 modal scrim), and black is immune, so nothing visible is affected.
 
-**Always test this bug with a light theme.** It is invisible on a dark one,
+**Gotcha - Windows 11 paints its own backdrop behind a decorated window.**
+Separate bug from the premultiply above, found while chasing it, and the two
+stack: on `jumppad-gpu` with `[window] decorations = true` a translucent
+window came out far brighter and more solid than configured even after the
+premultiply landed. `[window] decorations = false` fixed it outright, which
+is the whole diagnosis - an undecorated window has no frame for DWM to hang
+a backdrop on.
+
+winit calls `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, ...)`
+unconditionally at window creation, with whatever
+`WindowAttributes::platform_specific.backdrop_type` holds. iced never
+surfaces that field, so it stays at winit's default `BackdropType::Auto` =
+`DWMSBT_AUTO`, "let DWM pick" - and on Windows 11 DWM's pick for a decorated
+window is a Mica-style material drawn behind the client area. The window's
+alpha then reveals *that*, not the desktop. Because the material is a light,
+wallpaper-derived wash, a light theme is hit hardest, which is exactly the
+confound that made the premultiply bug so hard to read: both symptoms are
+"too bright, worst on light themes".
+
+**The fix** (`crates/jumppad/src/windows.rs`, wired from
+`JumpPadApp::disable_system_backdrop` on `WindowReady`): re-set the attribute
+to `DWMSBT_NONE` once the window exists. Only on a translucent window - on a
+solid one the backdrop is hidden anyway, and turning it off would be a
+gratuitous difference from every other Windows app. Older Windows returns a
+failure `HRESULT` and changes nothing, which is already the desired
+behaviour there.
+
+`tiny-skia` never showed this: softbuffer presents through a GDI blit into
+the window's redirection bitmap rather than a flip-model swapchain
+composited by DWM. That difference is also why comparing the two binaries
+was misleading for so long - they do not reach the screen the same way.
+
+**Always test the premultiply bug with a light theme.** It is invisible on a dark one,
 and that asymmetry has now cost two wrong diagnoses. `src_rgb + (1 - a) *
 desktop` saturates the channel from `src_rgb` alone once `rgb` nears 1, so
 alpha stops mattering completely: a light theme reads as a fully opaque

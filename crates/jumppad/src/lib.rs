@@ -9,6 +9,8 @@ mod hotkey;
 pub(crate) mod macos;
 mod session;
 mod visor;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows;
 
 use app::JumpPadApp;
 

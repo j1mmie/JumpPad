@@ -574,6 +574,27 @@ impl JumpPadApp {
         Task::none()
     }
 
+    /// Drops the Windows 11 system backdrop from behind a translucent window
+    /// (see `windows.rs`). Runs once, as soon as the window exists - winit has
+    /// already set `DWMSBT_AUTO` by then, so this is strictly an override.
+    /// Skipped on a solid window, where the backdrop is hidden anyway and
+    /// turning it off would be a gratuitous difference from every other app.
+    #[cfg(target_os = "windows")]
+    fn disable_system_backdrop(&self) -> Task<Message> {
+        match self.window {
+            Some(id) if self.background_alpha < 1.0 => iced::window::run(id, |window| {
+                crate::windows::disable_system_backdrop(window);
+            })
+            .discard(),
+            _ => Task::none(),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn disable_system_backdrop(&self) -> Task<Message> {
+        Task::none()
+    }
+
     /// Rewrites the session manifest, pruning orphaned draft files.
     fn sync_session_metadata(&self) {
         let manifest = session::build_manifest(&self.tabs, self.active);
@@ -920,7 +941,7 @@ impl JumpPadApp {
             }
             Message::WindowReady(id) => {
                 self.window = id;
-                self.snap_to_monitor()
+                Task::batch([self.disable_system_backdrop(), self.snap_to_monitor()])
             }
             Message::HotkeyEvent(event) => {
                 let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {

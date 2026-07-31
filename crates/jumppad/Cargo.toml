@@ -62,3 +62,10 @@ log = "0.4"
 # winit, so it costs nothing to build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+
+# Same deal on Windows, for one `DwmSetWindowAttribute` call - see `windows.rs`.
+# winit already depends on this exact version with `Win32_Graphics_Dwm`
+# enabled (it makes the same call for the attributes it *does* expose), so
+# both features here are already on and this adds nothing to the build.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
