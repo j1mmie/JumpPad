@@ -415,10 +415,19 @@ opened, and live search anchors there rather than at the live cursor -
 selecting a match moves the cursor, so re-anchoring per keystroke would
 walk the selection down the document as the user types.
 
-Escape closes the palette whenever it is open, including when focus is in
-the editor. iced exposes no way to ask which widget holds focus, and the
-global `keyboard::listen()` subscription fires either way; VSCode behaves
-the same.
+**Gotcha - Escape needs its own event listener.** `keyboard::listen()`
+only yields events whose status is `Ignored`, i.e. ones no widget
+captured (`iced_futures::keyboard::listen` filters on exactly that), and a
+focused `text_input` handles Escape by unfocusing itself and calling
+`shell.capture_event()`. So the app never saw the first Escape and the
+palette took *two* presses to close. `subscription()` therefore has a
+dedicated `iced::event::listen_with` entry that ignores capture status and
+maps Escape to `Message::CloseFind`.
+
+Two consequences of that listener firing unconditionally: `CloseFind`
+no-ops while `pending_close` is up, so the unsaved-changes modal keeps
+first claim on Escape; and Escape closes the palette even when focus is in
+the editor, which matches VSCode.
 
 ## Transparent windows: why nothing repaints the background
 

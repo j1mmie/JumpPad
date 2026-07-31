@@ -735,13 +735,6 @@ impl JumpPadApp {
                         _ => return Task::none(),
                     }
                 }
-                // Escape closes the palette whenever it is open, including
-                // from the editor - iced exposes no way to ask which widget
-                // holds focus, and the global key subscription fires either
-                // way. VSCode behaves the same.
-                if matches!(key, keyboard::Key::Named(key::Named::Escape)) && self.find_is_open() {
-                    return self.update(Message::CloseFind);
-                }
                 match handle_hotkey(key, modifiers, physical_key, &self.keybind_overrides) {
                     Some(resolved) => self.update(resolved),
                     None => Task::none(),
@@ -802,6 +795,10 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::CloseFind => {
+                // The unsaved-changes modal owns Escape while it is up.
+                if self.pending_close.is_some() || !self.find_is_open() {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get(self.active) {
                     if let Some(state) = self.find.get_mut(&tab.id) {
                         // Closed, not cleared - the query is there next time.
@@ -1248,6 +1245,18 @@ impl JumpPadApp {
                 keyboard::Event::ModifiersChanged(modifiers) => {
                     Some(Message::ModifiersChanged(modifiers))
                 }
+                _ => None,
+            }),
+            // Escape needs its own listener: `keyboard::listen()` only
+            // yields events with `Status::Ignored`, and a focused
+            // `text_input` swallows Escape with `capture_event()` (it
+            // unfocuses itself). Without this the find palette needed two
+            // presses to close - one eaten by the field, one seen here.
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key: keyboard::Key::Named(key::Named::Escape),
+                    ..
+                }) => Some(Message::CloseFind),
                 _ => None,
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
@@ -2105,11 +2114,10 @@ mod tests {
         let _ = app.update(Message::FindQueryChanged("two".into()));
         assert!(app.find_is_open());
 
-        let _ = app.update(Message::KeyPressed(
-            Key::Named(Named::Escape),
-            Modifiers::empty(),
-            key::Physical::Code(key::Code::Escape),
-        ));
+        // Escape arrives as `CloseFind` from the dedicated event listener -
+        // `keyboard::listen()` never sees it, since a focused `text_input`
+        // captures Escape.
+        let _ = app.update(Message::CloseFind);
         assert!(!app.find_is_open(), "escape closes the palette");
         assert_eq!(
             app.active_find().map(|state| state.query.as_str()),
@@ -2121,6 +2129,23 @@ mod tests {
         let _ = app.update(Message::OpenFind);
         assert!(app.find_is_open());
         assert_eq!(app.active_find().unwrap().matches.len(), 1);
+    }
+
+    #[test]
+    fn escape_leaves_the_find_palette_alone_while_the_modal_is_up() {
+        // Escape now reaches the app from a listener that fires regardless
+        // of which widget has focus, so the modal has to keep first claim on
+        // it - cancelling the prompt, not quietly closing find behind it.
+        let mut app = app_with_text(&["one two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        app.tabs[0].dirty = true;
+        let _ = app.request_close(0);
+        assert!(app.pending_close.is_some());
+
+        let _ = app.update(Message::CloseFind);
+        assert!(app.find_is_open(), "the modal owns Escape while it is up");
+        assert!(app.pending_close.is_some());
     }
 
     #[test]
