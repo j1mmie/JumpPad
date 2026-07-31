@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use editor_core::{EditorFactory, EditorMessage, SavedSelection, SelectionKind, Tab};
+use editor_core::{
+    EditorFactory, EditorMessage, SavedSelection, SelectionKind, Tab, darkening_wash,
+};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
 use iced::keyboard::key;
@@ -1540,32 +1542,6 @@ const TAB_CLOSE_LINE_HEIGHT: Pixels = Pixels(16.0); // 12px text, 1.3x rounded u
 const INACTIVE_TAB_DARKEN: f32 = 0.035; // ~9/255 per channel
 const TAB_ROW_DARKEN: f32 = 0.09; // ~23/255 per channel
 
-/// How opaque a `darkening_wash` is ever allowed to get. Themes whose
-/// background is near-black hit this before reaching the full step above -
-/// darkening a transparent window costs opacity, and a solid tab row is a
-/// worse trade than a shallower one.
-const WASH_ALPHA_CEILING: f32 = 0.8;
-
-/// A translucent black overlay that darkens whatever it covers by roughly
-/// `amount`, rather than a pre-darkened copy of the background - on a
-/// transparent window a full-alpha copy stacks with the window background and
-/// leaves a visible opacity step (see AGENTS.md's hairline-seam gotcha).
-/// Solid, it matches the subtractive darkening it replaced on average, shading
-/// channels proportionally instead of uniformly.
-fn darkening_wash(theme: &Theme, amount: f32) -> Color {
-    let base = theme.extended_palette().background.base.color;
-    let luminance = (base.r + base.g + base.b) / 3.0;
-    // A background not much brighter than `amount` can't give up that much
-    // light without a solid wash, which would turn the tab row into an opaque
-    // bar on a transparent window. Those themes get a shallower step instead.
-    let alpha = if luminance > 0.0 {
-        (amount / luminance).clamp(0.0, WASH_ALPHA_CEILING)
-    } else {
-        0.0
-    };
-    Color { a: alpha, ..Color::BLACK }
-}
-
 /// A tab's text color - shared by the title button and the close button so
 /// they always agree exactly, rather than each computing it separately and
 /// risking drift.
@@ -1929,6 +1905,7 @@ async fn save_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use editor_core::WASH_ALPHA_CEILING;
     use editor_core::{SavedSelection, SelectionKind, TextEditorWidget};
     use iced::keyboard::key::Named;
     use iced::keyboard::{Key, Modifiers};
