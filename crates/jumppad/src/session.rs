@@ -196,6 +196,12 @@ mod tests {
             _cursor: (usize, usize),
         ) {
         }
+        fn set_find_matches(
+            &mut self,
+            _matches: Vec<editor_core::FindMatch>,
+            _current: Option<usize>,
+        ) {
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }

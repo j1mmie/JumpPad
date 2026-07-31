@@ -3,6 +3,7 @@
 // again: #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod find;
 mod hotkey;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use editor_core::{EditorMessage, SavedSelection, SelectionKind, TextEditorWidget};
+use editor_core::{EditorMessage, FindMatch, SavedSelection, SelectionKind, TextEditorWidget};
 use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
@@ -58,6 +58,11 @@ pub struct IcedTextEditor {
     /// Captured per-instance, unlike `foreground_alpha`, since it's only
     /// used inside a `.style()` closure that's allowed to capture state.
     background_alpha: f32,
+    /// Find-palette matches to recolor, and which one is current. `Arc` so
+    /// rebuilding `HighlighterSettings` on every `view` is a refcount bump
+    /// rather than a copy of the whole match list.
+    find_matches: Arc<Vec<FindMatch>>,
+    find_current: Option<usize>,
 }
 
 /// Scales every syntax-highlighted color `color_for` produces. Global
@@ -102,6 +107,8 @@ impl IcedTextEditor {
             history: History::new(),
             overrides,
             background_alpha: background_alpha.clamp(0.0, 1.0),
+            find_matches: Arc::new(Vec::new()),
+            find_current: None,
         }
     }
 
@@ -151,6 +158,8 @@ impl TextEditorWidget for IcedTextEditor {
         let settings = HighlighterSettings {
             source: self.content.text(),
             grammar: self.grammar(),
+            matches: self.find_matches.clone(),
+            current_match: self.find_current,
         };
         let overrides = self.overrides.clone();
         let background_alpha = self.background_alpha;
@@ -226,6 +235,11 @@ impl TextEditorWidget for IcedTextEditor {
         self.content.move_to(Cursor { position, selection: None });
     }
 
+    fn set_find_matches(&mut self, matches: Vec<FindMatch>, current: Option<usize>) {
+        self.find_matches = Arc::new(matches);
+        self.find_current = current;
+    }
+
     fn selection(&self) -> Option<SavedSelection> {
         let cursor = self.content.cursor();
         let anchor = cursor.selection?;
@@ -294,6 +308,8 @@ fn clamp_position(content: &Content, (line, column): (usize, usize)) -> Position
 struct HighlighterSettings {
     source: String,
     grammar: Option<Arc<Grammar>>,
+    matches: Arc<Vec<FindMatch>>,
+    current_match: Option<usize>,
 }
 
 impl PartialEq for HighlighterSettings {
@@ -304,7 +320,23 @@ impl PartialEq for HighlighterSettings {
                 (None, None) => true,
                 _ => false,
             }
+            // Comparing the find state matters as much as the source: iced
+            // only re-runs the highlighter when these settings change, so
+            // leaving it out here would freeze the match coloring.
+            && self.current_match == other.current_match
+            && Arc::ptr_eq(&self.matches, &other.matches)
     }
+}
+
+/// What a highlighted range is: ordinary syntax, or a find-palette match.
+/// Local to this crate rather than a new `HighlightCategory` variant -
+/// `syntax_registry` describes grammars and has no business knowing the
+/// editor has a find feature.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Highlighted {
+    Syntax(HighlightCategory),
+    Match,
+    CurrentMatch,
 }
 
 struct TreeSitterHighlighter {
@@ -312,18 +344,22 @@ struct TreeSitterHighlighter {
     /// Byte offset of the start of each line within `source`, in order.
     line_starts: Vec<usize>,
     current_line: usize,
+    matches: Arc<Vec<FindMatch>>,
+    current_match: Option<usize>,
 }
 
 impl Highlighter for TreeSitterHighlighter {
     type Settings = HighlighterSettings;
-    type Highlight = HighlightCategory;
-    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, HighlightCategory)>;
+    type Highlight = Highlighted;
+    type Iterator<'a> = std::vec::IntoIter<(Range<usize>, Highlighted)>;
 
     fn new(settings: &Self::Settings) -> Self {
         let mut highlighter = Self {
             spans: Arc::new(Vec::new()),
             line_starts: vec![0],
             current_line: 0,
+            matches: Arc::new(Vec::new()),
+            current_match: None,
         };
         highlighter.update(settings);
         highlighter
@@ -336,6 +372,8 @@ impl Highlighter for TreeSitterHighlighter {
         };
         self.line_starts = line_starts(&settings.source);
         self.current_line = 0;
+        self.matches = settings.matches.clone();
+        self.current_match = settings.current_match;
     }
 
     fn change_line(&mut self, line: usize) {
@@ -351,16 +389,40 @@ impl Highlighter for TreeSitterHighlighter {
         };
         let end = start + line.len();
 
-        self.spans
+        let mut ranges: Vec<(Range<usize>, Highlighted)> = self
+            .spans
             .iter()
             .filter(|span| span.start < end && span.end > start)
             .map(|span| {
                 let range_start = span.start.max(start) - start;
                 let range_end = span.end.min(end) - start;
-                (range_start..range_end, span.category)
+                (range_start..range_end, Highlighted::Syntax(span.category))
             })
-            .collect::<Vec<_>>()
-            .into_iter()
+            .collect();
+
+        // Appended *after* the syntax spans on purpose: iced feeds these to
+        // `AttrsList::add_span`, whose range map overwrites on overlap, so
+        // the last span covering a byte wins. Match coloring has to outrank
+        // syntax coloring to be visible at all.
+        //
+        // Match columns are already line-relative, so unlike the syntax
+        // spans above they need no offset arithmetic.
+        ranges.extend(
+            self.matches
+                .iter()
+                .enumerate()
+                .filter(|(_, found)| found.line == line_index)
+                .map(|(index, found)| {
+                    let kind = if Some(index) == self.current_match {
+                        Highlighted::CurrentMatch
+                    } else {
+                        Highlighted::Match
+                    };
+                    (found.start..found.end, kind)
+                }),
+        );
+
+        ranges.into_iter()
     }
 
     fn current_line(&self) -> usize {
@@ -378,16 +440,23 @@ fn line_starts(source: &str) -> Vec<usize> {
     starts
 }
 
-fn to_format(category: &HighlightCategory, _theme: &Theme) -> Format<Font> {
+fn to_format(highlighted: &Highlighted, _theme: &Theme) -> Format<Font> {
     Format {
-        color: Some(color_for(*category)),
+        color: Some(color_for(*highlighted)),
         font: None,
     }
 }
 
-fn color_for(category: HighlightCategory) -> iced::Color {
-    apply_alpha(base_color_for(category), foreground_alpha())
+fn color_for(highlighted: Highlighted) -> iced::Color {
+    apply_alpha(base_color_for(highlighted), foreground_alpha())
 }
+
+/// Find matches are recolored rather than given a highlight box: iced's
+/// `highlighter::Format` carries only a color and a font, with no background
+/// to fill. The current match is the brighter of the two so it stands out
+/// from its neighbours.
+const MATCH_COLOR: iced::Color = iced::Color::from_rgb(0.85, 0.62, 0.24);
+const CURRENT_MATCH_COLOR: iced::Color = iced::Color::from_rgb(1.0, 0.85, 0.35);
 
 /// Scales `color`'s alpha by `alpha`, skipping the multiply at `1.0`.
 fn apply_alpha(color: iced::Color, alpha: f32) -> iced::Color {
@@ -398,7 +467,12 @@ fn apply_alpha(color: iced::Color, alpha: f32) -> iced::Color {
     }
 }
 
-fn base_color_for(category: HighlightCategory) -> iced::Color {
+fn base_color_for(highlighted: Highlighted) -> iced::Color {
+    let category = match highlighted {
+        Highlighted::Match => return MATCH_COLOR,
+        Highlighted::CurrentMatch => return CURRENT_MATCH_COLOR,
+        Highlighted::Syntax(category) => category,
+    };
     match category {
         HighlightCategory::String => iced::Color::from_rgb8(152, 195, 121),
         HighlightCategory::Comment => iced::Color::from_rgb8(140, 140, 140),
@@ -795,10 +869,110 @@ mod tests {
         // rather than assuming 0.25 won.
         let _ = FOREGROUND_ALPHA.set(0.25);
         let alpha = foreground_alpha();
-        let color = color_for(HighlightCategory::Keyword);
-        let base = base_color_for(HighlightCategory::Keyword);
+        let keyword = Highlighted::Syntax(HighlightCategory::Keyword);
+        let color = color_for(keyword);
+        let base = base_color_for(keyword);
         assert_eq!((color.r, color.g, color.b), (base.r, base.g, base.b));
         let expected_alpha = if alpha >= 1.0 { base.a } else { base.a * alpha };
         assert!((color.a - expected_alpha).abs() < f32::EPSILON);
+    }
+
+    /// Builds a highlighter over `source` with `matches` already applied.
+    fn highlighter_with(
+        source: &str,
+        matches: Vec<FindMatch>,
+        current: Option<usize>,
+    ) -> TreeSitterHighlighter {
+        TreeSitterHighlighter::new(&HighlighterSettings {
+            source: source.to_string(),
+            grammar: None,
+            matches: Arc::new(matches),
+            current_match: current,
+        })
+    }
+
+    #[test]
+    fn highlight_line_emits_a_span_per_match_on_that_line() {
+        let source = "find me\nand me";
+        let matches = vec![
+            FindMatch { line: 0, start: 5, end: 7 },
+            FindMatch { line: 1, start: 4, end: 6 },
+        ];
+        let mut highlighter = highlighter_with(source, matches, Some(1));
+
+        let first: Vec<_> = highlighter.highlight_line("find me").collect();
+        assert_eq!(first, vec![(5..7, Highlighted::Match)]);
+
+        // The second is the current match, so it gets the distinct color.
+        let second: Vec<_> = highlighter.highlight_line("and me").collect();
+        assert_eq!(second, vec![(4..6, Highlighted::CurrentMatch)]);
+    }
+
+    #[test]
+    fn match_spans_come_after_syntax_spans_so_they_win_on_overlap() {
+        // iced feeds these to `AttrsList::add_span`, where the last span
+        // covering a byte wins - so a match must be emitted last to be seen.
+        let mut highlighter = highlighter_with(
+            "keyword",
+            vec![FindMatch { line: 0, start: 0, end: 7 }],
+            None,
+        );
+        // Stand in for a grammar by injecting a syntax span directly.
+        highlighter.spans = Arc::new(vec![syntax_registry::HighlightSpan {
+            start: 0,
+            end: 7,
+            category: HighlightCategory::Keyword,
+        }]);
+
+        let spans: Vec<_> = highlighter.highlight_line("keyword").collect();
+        assert_eq!(
+            spans,
+            vec![
+                (0..7, Highlighted::Syntax(HighlightCategory::Keyword)),
+                (0..7, Highlighted::Match),
+            ],
+            "the match span must be last"
+        );
+    }
+
+    #[test]
+    fn settings_differing_only_in_find_state_are_not_equal() {
+        // Guards the hand-written `PartialEq`: iced re-runs the highlighter
+        // only when settings compare unequal, so dropping the find fields
+        // there would leave match coloring frozen on screen.
+        let matches = Arc::new(vec![FindMatch { line: 0, start: 0, end: 2 }]);
+        let base = HighlighterSettings {
+            source: "ab".to_string(),
+            grammar: None,
+            matches: matches.clone(),
+            current_match: None,
+        };
+
+        let same = HighlighterSettings { ..base.clone() };
+        assert!(base == same);
+
+        let moved_current = HighlighterSettings {
+            current_match: Some(0),
+            ..base.clone()
+        };
+        assert!(base != moved_current, "a new current match must invalidate");
+
+        let other_matches = HighlighterSettings {
+            matches: Arc::new(vec![FindMatch { line: 9, start: 1, end: 2 }]),
+            ..base.clone()
+        };
+        assert!(base != other_matches, "a new match list must invalidate");
+    }
+
+    #[test]
+    fn set_find_matches_reaches_the_highlighter_settings() {
+        let mut editor = plain_editor("find me");
+        editor.set_find_matches(vec![FindMatch { line: 0, start: 5, end: 7 }], Some(0));
+        assert_eq!(editor.find_matches.len(), 1);
+        assert_eq!(editor.find_current, Some(0));
+
+        editor.set_find_matches(Vec::new(), None);
+        assert!(editor.find_matches.is_empty());
+        assert_eq!(editor.find_current, None);
     }
 }

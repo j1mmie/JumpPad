@@ -3,15 +3,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use editor_core::{EditorFactory, EditorMessage, Tab};
+use editor_core::{EditorFactory, EditorMessage, SavedSelection, SelectionKind, Tab};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
 use iced::keyboard::key;
 use iced::widget::{
     button, center, column, container, keyed_column, mouse_area, row, scrollable, stack, text,
+    text_input,
 };
-use iced::{Center, Color, Element, Fill, Pixels, Point, Subscription, Task, Theme, keyboard};
+use iced::{
+    Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task, Theme, Top, keyboard,
+};
 
+use crate::find::FindState;
 use crate::hotkey::{self, Hotkey};
 use crate::session;
 use crate::visor::{self, Animation};
@@ -49,6 +53,20 @@ fn focus_editor() -> Task<Message> {
     operate(operation::focusable::focus(Id::new(editor_core::EDITOR_WIDGET_ID)))
 }
 
+/// The find palette's query field, targeted by id for the same reason
+/// `focus_editor` is - `focus_next` depends on what happens to be focused.
+const FIND_INPUT_ID: &str = "find-input";
+
+/// Focuses the query field and selects whatever is already in it, so
+/// reopening the palette and typing replaces the old query instead of
+/// appending to it (`the` + `the` = `thethe`).
+fn focus_find() -> Task<Message> {
+    Task::batch([
+        operate(operation::focusable::focus(Id::new(FIND_INPUT_ID))),
+        operate(operation::text_input::select_all(Id::new(FIND_INPUT_ID))),
+    ])
+}
+
 pub struct JumpPadApp {
     tabs: Vec<Tab>,
     active: usize,
@@ -81,6 +99,9 @@ pub struct JumpPadApp {
     /// Tab ids that asked to close while a prompt was already showing
     close_queue: Vec<u64>,
     file_dialog_active: bool,
+    /// Each tab's find palette, keyed by `Tab::id` rather than living on
+    /// `Tab` - see `find.rs`. An entry is dropped when its tab closes.
+    find: HashMap<u64, FindState>,
     /// Live keyboard modifier state - iced's mouse events carry no
     /// modifiers, so shift+click handling reads it from here.
     modifiers: keyboard::Modifiers,
@@ -139,6 +160,16 @@ pub enum Message {
     SelectPreviousTab,
     /// Ctrl+Tab - swap back to whichever tab was active immediately before this one.
     SelectPreviousActiveTab,
+    /// Show the find palette for the active tab, or refocus it if already open.
+    OpenFind,
+    /// The find query changed - re-searches and jumps to the first match.
+    FindQueryChanged(String),
+    /// Select the next match, wrapping past the last.
+    FindNext,
+    /// Select the previous match, wrapping past the first.
+    FindPrevious,
+    /// Hide the find palette, keeping its query for next time.
+    CloseFind,
     /// A raw key press, resolved into a command by `handle_hotkey`. Kept as
     /// its own variant since `Subscription::filter_map`'s closure can't
     /// capture `self.keybind_overrides`.
@@ -240,6 +271,7 @@ impl JumpPadApp {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            find: HashMap::new(),
             modifiers: keyboard::Modifiers::default(),
         };
 
@@ -389,7 +421,8 @@ impl JumpPadApp {
         if index >= self.tabs.len() {
             return Task::none();
         }
-        self.tabs.remove(index);
+        let closed = self.tabs.remove(index);
+        self.find.remove(&closed.id);
         let task = if self.tabs.is_empty() {
             self.new_tab()
         } else if self.active >= self.tabs.len() {
@@ -399,6 +432,76 @@ impl JumpPadApp {
         };
         self.sync_session_metadata();
         task
+    }
+
+    /// Whether the active tab's find palette is currently showing.
+    fn find_is_open(&self) -> bool {
+        self.tabs
+            .get(self.active)
+            .and_then(|tab| self.find.get(&tab.id))
+            .is_some_and(|state| state.open)
+    }
+
+    /// Re-points the counter at whichever match the cursor now touches,
+    /// without re-searching - for cursor moves that changed no text.
+    fn sync_find_counter(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        let Some(state) = self.find.get_mut(&tab.id) else {
+            return;
+        };
+        if !state.open {
+            return;
+        }
+        let cursor = tab.editor.cursor_position();
+        if let Some(touched) = state.index_at(cursor) {
+            state.current = Some(touched);
+            tab.editor.set_find_matches(state.matches.clone(), state.current);
+        }
+    }
+
+    /// Re-runs the active tab's search against its current text and pushes
+    /// the result to its editor for coloring. Called whenever either side
+    /// can have moved: the query, the document, or which tab is active.
+    fn refresh_find(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(state) = self.find.get_mut(&tab.id) else {
+            return;
+        };
+        if state.open {
+            state.search(&tab.editor.text());
+            tab.editor.set_find_matches(state.matches.clone(), state.current);
+        } else {
+            tab.editor.set_find_matches(Vec::new(), None);
+        }
+    }
+
+    /// Selects the active tab's current match in the editor, and repaints
+    /// the match coloring so the newly-current one stands out.
+    fn select_current_match(&mut self) {
+        let Some(tab) = self.tabs.get_mut(self.active) else {
+            return;
+        };
+        let Some(state) = self.find.get(&tab.id) else {
+            return;
+        };
+        tab.editor.set_find_matches(state.matches.clone(), state.current);
+        let Some(found) = state.current_match() else {
+            return;
+        };
+        // Cursor at the end of the match so typing continues past it, the
+        // same shape a drag-selection leaves. `move_to` underneath marks the
+        // cursor moved, which scrolls an off-screen match into view.
+        tab.editor.restore_selection(
+            SavedSelection {
+                anchor: (found.line, found.start),
+                kind: SelectionKind::Range,
+            },
+            (found.line, found.end),
+        );
     }
 
     fn switch_active(&mut self, index: usize) -> Task<Message> {
@@ -421,6 +524,9 @@ impl JumpPadApp {
         }
         self.sync_session_metadata();
         self.arm_shadow_refresh();
+        // The incoming tab's document may have changed since its palette
+        // last searched, and its editor widget state started fresh.
+        self.refresh_find();
         focus_editor()
     }
 
@@ -622,10 +728,66 @@ impl JumpPadApp {
                         _ => return Task::none(),
                     }
                 }
+                // Escape closes the palette whenever it is open, including
+                // from the editor - iced exposes no way to ask which widget
+                // holds focus, and the global key subscription fires either
+                // way. VSCode behaves the same.
+                if matches!(key, keyboard::Key::Named(key::Named::Escape)) && self.find_is_open() {
+                    return self.update(Message::CloseFind);
+                }
                 match handle_hotkey(key, modifiers, physical_key, &self.keybind_overrides) {
                     Some(resolved) => self.update(resolved),
                     None => Task::none(),
                 }
+            }
+            Message::OpenFind => {
+                let Some(tab) = self.tabs.get(self.active) else {
+                    return Task::none();
+                };
+                let origin = tab.editor.cursor_position();
+                let state = self.find.entry(tab.id).or_default();
+                // Reopening re-anchors to wherever the cursor is now, so the
+                // next search runs from there rather than from wherever the
+                // palette was last used.
+                state.origin = origin;
+                state.open = true;
+                self.refresh_find();
+                self.select_current_match();
+                // Already-open is not a no-op: Cmd+F should pull focus back
+                // to the field from wherever it went.
+                focus_find()
+            }
+            Message::FindQueryChanged(query) => {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    let state = self.find.entry(tab.id).or_default();
+                    state.query = query;
+                    self.refresh_find();
+                    self.select_current_match();
+                }
+                Task::none()
+            }
+            Message::FindNext | Message::FindPrevious => {
+                let delta = if matches!(message, Message::FindNext) { 1 } else { -1 };
+                if let Some(tab) = self.tabs.get(self.active) {
+                    if let Some(state) = self.find.get_mut(&tab.id) {
+                        state.step(delta);
+                    }
+                    self.select_current_match();
+                }
+                // Focus stays in the query field so Enter keeps stepping.
+                Task::none()
+            }
+            Message::CloseFind => {
+                if let Some(tab) = self.tabs.get(self.active) {
+                    if let Some(state) = self.find.get_mut(&tab.id) {
+                        // Closed, not cleared - the query is there next time.
+                        state.open = false;
+                    }
+                }
+                self.refresh_find();
+                // Non-optional: without it the editor stays unfocused and
+                // typing goes nowhere (see AGENTS.md).
+                focus_editor()
             }
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
@@ -641,9 +803,11 @@ impl JumpPadApp {
                 if self.pending_close.is_some() {
                     return Task::none();
                 }
+                let mut edited = false;
                 if let Some(tab) = self.tabs.get_mut(index) {
                     let editor_message = editor_message.with_shift_click(self.modifiers.shift());
                     if tab.editor.update(editor_message) {
+                        edited = true;
                         let just_became_dirty = !tab.dirty;
                         tab.dirty = true;
                         tab.draft_generation += 1;
@@ -652,6 +816,14 @@ impl JumpPadApp {
                             self.sync_session_metadata();
                         }
                     }
+                }
+                if edited {
+                    // The document moved under the match list.
+                    self.refresh_find();
+                } else {
+                    // No edit, but the cursor may have moved (a click), and
+                    // the counter reports whichever match it now touches.
+                    self.sync_find_counter(index);
                 }
                 Task::none()
             }
@@ -836,6 +1008,50 @@ impl JumpPadApp {
         iced::window::move_to(id, point)
     }
 
+    /// The active tab's find state, if it has any.
+    fn active_find(&self) -> Option<&FindState> {
+        self.find.get(&self.tabs.get(self.active)?.id)
+    }
+
+    /// The find palette: query field, match counter, previous/next, close.
+    fn find_palette(&self, state: &FindState) -> Element<'_, Message> {
+        let query = text_input("Find", &state.query)
+            .id(Id::new(FIND_INPUT_ID))
+            .on_input(Message::FindQueryChanged)
+            .on_submit(Message::FindNext)
+            .padding([4, 8])
+            .size(14)
+            .width(Pixels(180.0))
+            .style(find_input_style);
+
+        let counter: Element<'_, Message> = match state.counter() {
+            Some(label) => text(label).size(12).line_height(FIND_TEXT_LINE_HEIGHT).into(),
+            None => text("").into(),
+        };
+
+        let step = |label: &'static str, message: Message| {
+            button(text(label).size(12).line_height(FIND_TEXT_LINE_HEIGHT))
+                .padding([4, 6])
+                .style(find_button_style)
+                .on_press(message)
+        };
+
+        container(
+            row![
+                query,
+                counter,
+                step("\u{2191}", Message::FindPrevious),
+                step("\u{2193}", Message::FindNext),
+                step("\u{2715}", Message::CloseFind),
+            ]
+            .spacing(6)
+            .align_y(Center),
+        )
+        .padding(6)
+        .style(find_palette_style)
+        .into()
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
         let tab_chips = self.tabs.iter().enumerate().map(|(index, tab)| {
             let is_active = index == self.active;
@@ -902,6 +1118,22 @@ impl JumpPadApp {
             keyed_column([(tab_id, view)]).width(Fill).height(Fill).into()
         } else {
             text("No open tabs").into()
+        };
+
+        // Floated over the editor rather than the whole window, so it never
+        // covers the tab bar. `stack!` is the same overlay the modal uses.
+        let editor = match self.active_find().filter(|state| state.open) {
+            Some(state) => stack![
+                editor,
+                container(self.find_palette(state))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_x(Right)
+                    .align_y(Top)
+                    .padding(8)
+            ]
+            .into(),
+            None => editor,
         };
 
         let mut content = column![tab_bar, editor];
@@ -1045,6 +1277,7 @@ pub const APP_COMMAND_NAMES: &[&str] = &[
     "select_previous_tab",
     "select_next_tab",
     "select_previous_active_tab",
+    "find",
 ];
 
 /// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical
@@ -1063,6 +1296,7 @@ fn build_app_overrides(
         ("select_previous_tab", Message::SelectPreviousTab),
         ("select_next_tab", Message::SelectNextTab),
         ("select_previous_active_tab", Message::SelectPreviousActiveTab),
+        ("find", Message::OpenFind),
     ] {
         if let Some(resolved) = resolved.get(name) {
             map.insert((resolved.modifiers, resolved.code), message);
@@ -1138,6 +1372,7 @@ fn handle_hotkey(
         keyboard::Key::Character("s") if modifiers.shift() => Some(Message::SaveFileAs),
         keyboard::Key::Character("s") => Some(Message::SaveFile),
         keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
+        keyboard::Key::Character("f") => Some(Message::OpenFind),
         keyboard::Key::Character("[") if modifiers.shift() => Some(Message::SelectPreviousTab),
         keyboard::Key::Character("]") if modifiers.shift() => Some(Message::SelectNextTab),
         _ => None,
@@ -1290,6 +1525,57 @@ fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -
 
 /// The modal's own dialog box - opaque, so it reads as a real window sitting
 /// on top of the scrim rather than another translucent layer.
+/// Absolute like the tab bar's, so the palette's edges land on whole
+/// pixels instead of being antialiased into seams (see AGENTS.md).
+const FIND_TEXT_LINE_HEIGHT: Pixels = Pixels(16.0);
+
+/// How far toward black the find palette sits. Deeper than a tab's shading
+/// because it floats over document text and has to read as its own surface -
+/// but still a wash, so a transparent window stays transparent through it.
+const FIND_PALETTE_DARKEN: f32 = 0.14;
+
+fn find_palette_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style::default()
+        .background(darkening_wash(theme, FIND_PALETTE_DARKEN))
+        .border(iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 6.0.into(),
+        })
+}
+
+fn find_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+    let palette = theme.extended_palette();
+    let default = text_input::default(theme, status);
+    text_input::Style {
+        // The palette behind it is already a distinct surface; a second
+        // filled quad on top would just compound opacity (see AGENTS.md).
+        background: Color::TRANSPARENT.into(),
+        border: iced::Border {
+            color: palette.background.strong.color,
+            width: 1.0,
+            radius: 4.0.into(),
+        },
+        ..default
+    }
+}
+
+fn find_button_style(theme: &Theme, status: button::Status) -> button::Style {
+    let text_color = theme.extended_palette().background.base.text;
+    let background = match status {
+        button::Status::Hovered | button::Status::Pressed => {
+            Some(text_color.scale_alpha(0.15).into())
+        }
+        _ => None,
+    };
+    button::Style {
+        background,
+        text_color,
+        ..button::Style::default()
+    }
+}
+
 fn modal_dialog_style(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style::default()
@@ -1492,6 +1778,12 @@ mod tests {
             None
         }
         fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
+        fn set_find_matches(
+            &mut self,
+            _matches: Vec<editor_core::FindMatch>,
+            _current: Option<usize>,
+        ) {
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1526,6 +1818,12 @@ mod tests {
             None
         }
         fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
+        fn set_find_matches(
+            &mut self,
+            _matches: Vec<editor_core::FindMatch>,
+            _current: Option<usize>,
+        ) {
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1573,6 +1871,12 @@ mod tests {
         fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize)) {
             self.restored.borrow_mut().push(Restore::Selection { selection, cursor });
         }
+        fn set_find_matches(
+            &mut self,
+            _matches: Vec<editor_core::FindMatch>,
+            _current: Option<usize>,
+        ) {
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1604,6 +1908,7 @@ mod tests {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            find: HashMap::new(),
             modifiers: Modifiers::default(),
         }
     }
@@ -1701,6 +2006,188 @@ mod tests {
         let _ = app.update(Message::SelectTab(0));
         assert_eq!(app.tabs[0].editor.selection(), selection_0);
         assert_eq!(app.tabs[0].editor.cursor_position(), cursor_0);
+    }
+
+    /// An app whose tabs hold real `IcedTextEditor`s seeded with `texts`,
+    /// for find flows that need actual text and cursor behavior.
+    fn app_with_text(texts: &[&str]) -> JumpPadApp {
+        let factory: EditorFactory = Box::new(|text, _extension| {
+            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            Box::new(iced_text_editor::IcedTextEditor::new(
+                text,
+                &registry,
+                None,
+                Arc::new(HashMap::new()),
+                1.0,
+            ))
+        });
+        let mut app = test_app(0);
+        app.tabs = texts
+            .iter()
+            .enumerate()
+            .map(|(index, body)| Tab::restored(index as u64, None, body, false, &factory))
+            .collect();
+        app.next_id = texts.len() as u64;
+        app.editor_factory = factory;
+        app
+    }
+
+    #[test]
+    fn opening_find_searches_and_selects_the_first_match() {
+        let mut app = app_with_text(&["one two\nthree two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+
+        let state = app.active_find().expect("palette open");
+        assert!(state.open);
+        assert_eq!(state.matches.len(), 2);
+        assert_eq!(state.counter().as_deref(), Some("1 of 2"));
+        // The first match is selected in the document, not just counted.
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 7));
+    }
+
+    #[test]
+    fn find_next_and_previous_step_and_wrap() {
+        let mut app = app_with_text(&["one two\nthree two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("2 of 2"));
+        assert_eq!(app.tabs[0].editor.cursor_position(), (1, 9));
+
+        let _ = app.update(Message::FindNext);
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("1 of 2"),
+            "next past the last wraps"
+        );
+
+        let _ = app.update(Message::FindPrevious);
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("2 of 2"),
+            "previous before the first wraps"
+        );
+    }
+
+    #[test]
+    fn escape_closes_the_palette_but_keeps_the_query() {
+        let mut app = app_with_text(&["one two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        assert!(app.find_is_open());
+
+        let _ = app.update(Message::KeyPressed(
+            Key::Named(Named::Escape),
+            Modifiers::empty(),
+            key::Physical::Code(key::Code::Escape),
+        ));
+        assert!(!app.find_is_open(), "escape closes the palette");
+        assert_eq!(
+            app.active_find().map(|state| state.query.as_str()),
+            Some("two"),
+            "the query survives for next time"
+        );
+
+        // Reopening brings the same query straight back.
+        let _ = app.update(Message::OpenFind);
+        assert!(app.find_is_open());
+        assert_eq!(app.active_find().unwrap().matches.len(), 1);
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_find_query() {
+        let mut app = app_with_text(&["alpha beta", "gamma delta gamma"]);
+
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("beta".into()));
+
+        let _ = app.update(Message::SelectTab(1));
+        // Tab 1 has no palette of its own yet.
+        assert!(!app.find_is_open());
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("gamma".into()));
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 2"));
+
+        // Back to tab 0: its own query and its own match count.
+        let _ = app.update(Message::SelectTab(0));
+        let state = app.active_find().expect("tab 0 palette");
+        assert_eq!(state.query, "beta");
+        assert_eq!(state.counter().as_deref(), Some("1 of 1"));
+
+        let _ = app.update(Message::SelectTab(1));
+        assert_eq!(app.active_find().unwrap().query, "gamma");
+    }
+
+    #[test]
+    fn closing_a_tab_forgets_its_find_state() {
+        let mut app = app_with_text(&["one two", "other"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        let closed_id = app.tabs[0].id;
+        assert!(app.find.contains_key(&closed_id));
+
+        let _ = app.close_tab(0);
+        assert!(!app.find.contains_key(&closed_id));
+    }
+
+    #[test]
+    fn editing_the_document_refreshes_the_match_list() {
+        use iced::widget::text_editor;
+
+        let mut app = app_with_text(&["two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        assert_eq!(app.active_find().unwrap().matches.len(), 1);
+
+        // Typing a second occurrence into the document updates the count.
+        app.tabs[0].editor.move_cursor_to(0, 3);
+        for character in " two".chars() {
+            let _ = app.update(Message::Editor(
+                0,
+                EditorMessage::Action(text_editor::Action::Edit(text_editor::Edit::Insert(
+                    character,
+                ))),
+            ));
+        }
+        assert_eq!(app.active_find().unwrap().matches.len(), 2);
+    }
+
+    #[test]
+    fn find_on_a_missing_match_reports_no_results() {
+        let mut app = app_with_text(&["one two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("zebra".into()));
+        let state = app.active_find().unwrap();
+        assert!(state.matches.is_empty());
+        assert_eq!(state.counter().as_deref(), Some("No results"));
+
+        // Stepping with nothing to step through must not panic.
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.active_find().unwrap().current, None);
+    }
+
+    #[test]
+    fn find_matches_case_insensitively_through_the_app() {
+        let mut app = app_with_text(&["Two two TWO"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+    }
+
+    #[test]
+    fn command_f_resolves_to_open_find() {
+        // `Modifiers::CTRL` stands in for `command()`, which resolves per-OS
+        // at compile time - the same convention the undo/redo tests use.
+        let overrides = HashMap::new();
+        let resolved = handle_hotkey(
+            Key::Character("f".into()),
+            Modifiers::CTRL,
+            key::Physical::Code(key::Code::KeyF),
+            &overrides,
+        );
+        assert!(matches!(resolved, Some(Message::OpenFind)));
     }
 
     #[test]

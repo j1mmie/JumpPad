@@ -1,5 +1,7 @@
 use iced::widget::text_editor;
 
+use crate::find::FindMatch;
+
 /// The abstraction boundary between the app shell (tabs, menus, file I/O)
 /// and whatever actually renders and edits text on screen.
 ///
@@ -41,6 +43,15 @@ pub trait TextEditorWidget {
     /// Restores a previously saved selection, with the moving end at
     /// `cursor`, clamping like `move_cursor_to` does.
     fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize));
+
+    /// Ranges to mark as find matches, and which of them is current.
+    /// An empty slice clears the marking.
+    ///
+    /// Marking goes through the widget rather than the app shell reusing the
+    /// editor's selection because iced's `text_editor` only draws a
+    /// selection while it is focused - and the find field holds focus
+    /// exactly when matches need to be visible (see AGENTS.md).
+    fn set_find_matches(&mut self, matches: Vec<FindMatch>, current: Option<usize>);
 
     /// Whether this editor is still waiting on a grammar load - used by the
     /// app shell to decide whether the highlighting-poll subscription needs

@@ -10,7 +10,8 @@ toggle = "control+Backquote"
 # Valid names:
 #   App-level (crates/jumppad/src/app.rs, APP_COMMAND_NAMES):
 #     new_tab, open_file, save_file, save_file_as, close_active_tab,
-#     select_previous_tab, select_next_tab, select_previous_active_tab
+#     select_previous_tab, select_next_tab, select_previous_active_tab,
+#     find
 #   Editor-level (crates/iced_text_editor/src/lib.rs, EDITOR_COMMAND_NAMES):
 #     word_delete_backward, word_delete_forward, document_start,
 #     select_document_start, document_end, select_document_end, undo, redo

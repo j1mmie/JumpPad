@@ -340,6 +340,51 @@ setting an anchor-to-cursor range. Don't "simplify" the saved state back
 to a bare anchor pair - that's exactly the representation that can't
 describe a word selection.
 
+## The find palette
+
+Cmd+F / Ctrl+F opens a floating palette at the top-right of the editor
+area (`JumpPadApp::find_palette`, stacked over the editor so it never
+covers the tab bar). Search is case-insensitive, single-file, no toggles.
+
+State is **per tab**, in `JumpPadApp.find: HashMap<u64, FindState>` keyed
+by `Tab::id` - deliberately not a field on `Tab`, since `editor_core` is
+the widget-abstraction boundary and a query string is shell UI state.
+Closing the palette keeps the query (`FindState::open`); closing the tab
+drops the entry.
+
+**Gotcha - matches are colored by the highlighter, not selected.** iced's
+`text_editor` draws its selection only while it is *focused* (the whole
+selection-drawing block sits behind `if let Some(focus)`), and the find
+field holds focus exactly when matches need to be visible. So matches are
+pushed into the editor with `TextEditorWidget::set_find_matches` and
+emitted as extra highlighter spans, which render regardless of focus.
+Don't "simplify" this back to just selecting the match - it renders
+nothing while the user is typing. The current match *is* also selected,
+which is what makes it appear as a normal selection once Escape hands
+focus back to the editor.
+
+Two constraints fall out of that mechanism:
+
+- The spans must be appended **after** the syntax spans in
+  `highlight_line`. iced feeds them to `AttrsList::add_span`, whose range
+  map overwrites on overlap, so the last span covering a byte wins.
+- `HighlighterSettings`' hand-written `PartialEq` must compare the match
+  fields. That impl is the only thing telling iced the highlighter needs
+  re-running; omit them and the coloring freezes on screen.
+
+Because `Format` carries only a color and a font (no background), matches
+are a **text tint** rather than a highlight box.
+
+`FindState::origin` is the cursor position captured when the palette
+opened, and live search anchors there rather than at the live cursor -
+selecting a match moves the cursor, so re-anchoring per keystroke would
+walk the selection down the document as the user types.
+
+Escape closes the palette whenever it is open, including when focus is in
+the editor. iced exposes no way to ask which widget holds focus, and the
+global `keyboard::listen()` subscription fires either way; VSCode behaves
+the same.
+
 ## Transparent windows: why nothing repaints the background
 
 With `[alpha] background < 1.0`, `JumpPadApp::style` hands iced a
