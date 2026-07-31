@@ -12,6 +12,25 @@ mod visor;
 
 use app::JumpPadApp;
 
+/// Why `[alpha] background < 1.0` will be ignored on this build, or `None`
+/// when the window can really be translucent. See AGENTS.md for the evidence
+/// behind each case - both are hard platform limits, not app bugs, and the
+/// other binary is the fix in both directions.
+const OPAQUE_WINDOW_REASON: Option<&str> = if cfg!(all(
+    target_os = "macos",
+    feature = "tiny-skia"
+)) {
+    // softbuffer's CoreGraphics backend hardcodes `NoneSkipFirst`, discarding
+    // the alpha channel tiny-skia painted.
+    Some("[alpha] background is ignored by this binary on macOS - the software renderer's presentation path drops the alpha channel. Run jumppad-gpu for a translucent window.")
+} else if cfg!(all(target_os = "windows", feature = "wgpu")) {
+    // wgpu's DX12 swapchain built from a raw HWND reports
+    // `composite_alpha_modes: [Opaque]`, so alpha never reaches the DWM.
+    Some("[alpha] background is ignored by this binary on Windows - wgpu's DX12 swapchain presents an opaque window. Run jumppad for a translucent window.")
+} else {
+    None
+};
+
 /// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {
     let config = jumppad_config::load();
@@ -26,6 +45,15 @@ pub fn run() -> iced::Result {
     // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
     let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .try_init();
+
+    // Neither backend can do transparency on every platform, and the failure
+    // is silent - the window just comes up solid, which reads as a rendering
+    // bug rather than a wrong-binary problem. Say so up front instead.
+    if transparent {
+        if let Some(reason) = OPAQUE_WINDOW_REASON {
+            eprintln!("jumppad: {reason}");
+        }
+    }
 
     // `config` is cloned per call since the boot closure must be `Fn`, not just `FnOnce`.
     iced::application(move || JumpPadApp::new(config.clone()), JumpPadApp::update, JumpPadApp::view)

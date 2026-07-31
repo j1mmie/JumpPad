@@ -83,6 +83,20 @@ Requires `git` and `npm`.
 JumpPad has two binary targets, one for software rendering and one for
 GPU-powered rendering. Note: the GPU rendering binary occupies much more memory
 
+Which one supports a transparent window (`[alpha] background` below `1.0`)
+depends on the platform, because each renderer hits a different platform
+limit:
+
+| Platform | `jumppad` (software) | `jumppad-gpu` (GPU) |
+| --- | --- | --- |
+| Windows | transparency works | opaque - DX12 swapchains from a window handle don't support it |
+| macOS | opaque - the presentation path drops the alpha channel | transparency works |
+| Linux | transparency works | transparency works |
+
+Either binary prints a warning at startup if you've configured
+transparency it can't deliver. Everything else is identical between the
+two, so on Windows and macOS pick whichever one matches the row above.
+
 To build both release binaries at once, for your host platform:
 ```
 ./scripts/build-release.sh       # Linux/macOS/WSL

@@ -1641,20 +1641,23 @@ fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
 ///
 /// Two conditions have to hold. The backend must be `wgpu`, since only its
 /// clear-color path writes straight alpha (`tiny-skia` premultiplies
-/// internally, so feeding it a premultiplied color would double-darken). And
-/// the platform compositor must read the presented surface as premultiplied:
-/// true of the macOS window server and of Windows' DWM, which is what
-/// `transparent(true)` opts into there (winit enables per-pixel alpha via
-/// `DwmEnableBlurBehindWindow`, and the DWM composition model is
-/// premultiplied).
+/// internally, so feeding it a premultiplied color would double-darken).
+/// And the surface actually has to reach a compositor that reads it as
+/// premultiplied - which in practice means the surface honors alpha at all.
 ///
-/// Linux is deliberately left out. Wayland and compositing X11 are
-/// premultiplied too, but nobody has confirmed the symptom there, and a
-/// wrong guess costs real opacity on a window that currently looks right.
-const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool = cfg!(all(
-    any(target_os = "macos", target_os = "windows"),
-    feature = "wgpu"
-));
+/// **Windows is deliberately excluded, and it is not an oversight** - see
+/// AGENTS.md. `wgpu`'s DX12 surface built from a raw `HWND` reports
+/// `composite_alpha_modes: [Opaque]`, so `jumppad-gpu` presents an opaque
+/// window there no matter what `[alpha] background` says. Premultiplying a
+/// clear color whose alpha is then discarded doesn't add transparency, it
+/// just paints the theme `background * alpha` - a darkened, still-solid
+/// window. This was tried, shipped, and reverted; don't re-add it.
+///
+/// Linux is left out for the opposite reason: Wayland and compositing X11
+/// are premultiplied, so it likely belongs here, but nobody has reproduced
+/// the symptom and a wrong guess costs opacity on a window that looks right.
+const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool =
+    cfg!(all(target_os = "macos", feature = "wgpu"));
 
 /// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
 /// values - the space desktop compositors composite in.
@@ -1666,10 +1669,6 @@ const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool = cfg!(all(
 /// look right; only light themes ever looked broken on macOS. Quads and
 /// glyphs are unaffected - iced's shaders premultiply before writing (see
 /// AGENTS.md).
-///
-/// A mid-tone theme lands between those two extremes: it doesn't saturate,
-/// it just sits `(1 - a) * rgb` too bright, which is what a dark-but-not-black
-/// theme looks like on Windows' wgpu build next to the tiny-skia one.
 ///
 /// Not in linear space: the composite runs on encoded values, and
 /// `encode(linear * a) > encode(linear) * a`, so premultiplying before the
