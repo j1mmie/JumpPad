@@ -53,9 +53,10 @@ pub trait TextEditorWidget {
     /// exactly when matches need to be visible (see AGENTS.md).
     fn set_find_matches(&mut self, matches: Vec<FindMatch>, current: Option<usize>);
 
-    /// Whether this editor is still waiting on a grammar load - used by the
-    /// app shell to decide whether the highlighting-poll subscription needs
-    /// to stay active.
+    /// Whether this editor is still waiting on a grammar load - its own, or
+    /// an injection target its grammar needs to color embedded content.
+    /// Used by the app shell to decide whether the highlighting-poll
+    /// subscription needs to stay active.
     fn has_pending_highlighting(&self) -> bool;
 }
 
