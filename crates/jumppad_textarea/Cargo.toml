@@ -1,0 +1,13 @@
+[package]
+name = "jumppad_textarea"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+iced = { workspace = true, features = ["advanced"] }
+# The forked widget in `text_editor.rs` is written against `iced_core` types
+# directly, the way `iced_widget` is. Cargo unifies this with the copy inside
+# `iced`, so the types stay identical to the ones the rest of the app sees.
+iced_core.workspace = true
+editor_core.workspace = true
+syntax_registry.workspace = true

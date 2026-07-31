@@ -239,7 +239,7 @@ impl JumpPadApp {
             || {},
         );
         // Which `TextEditorWidget` implementation new tabs are created with.
-        let editor_factory: EditorFactory = Box::new(iced_text_editor::IcedTextEditor::factory(
+        let editor_factory: EditorFactory = Box::new(jumppad_textarea::TextArea::factory(
             registry,
             editor_overrides,
             config.alpha.background,
@@ -823,7 +823,7 @@ impl JumpPadApp {
                 // modifier guard - so Cmd+G types a "g" into the query on
                 // its way to being a shortcut. Drop a single character that
                 // appeared while `command()` was held. Mirrors the same
-                // workaround `iced_text_editor::key_binding` needs.
+                // workaround `jumppad_textarea::key_binding` needs.
                 //
                 // Scoped to one-character growth so a Cmd+V paste, which
                 // legitimately arrives with `command()` held, still lands.
@@ -1450,13 +1450,13 @@ fn build_app_overrides(
 }
 
 /// Mirror of `build_app_overrides` for editor-level commands - built here so
-/// `iced_text_editor` doesn't need to depend on `jumppad_config`/`global_hotkey`.
+/// `jumppad_textarea` doesn't need to depend on `jumppad_config`/`global_hotkey`.
 fn build_editor_overrides(
     keybinds: &jumppad_config::KeybindsConfig,
-) -> HashMap<(keyboard::Modifiers, key::Code), iced_text_editor::EditorCommand> {
+) -> HashMap<(keyboard::Modifiers, key::Code), jumppad_textarea::EditorCommand> {
     let resolved = keybinds.resolved_overrides();
     let mut map = HashMap::new();
-    for (name, command) in iced_text_editor::EDITOR_COMMAND_NAMES {
+    for (name, command) in jumppad_textarea::EDITOR_COMMAND_NAMES {
         if let Some(resolved) = resolved.get(*name) {
             map.insert((resolved.modifiers, resolved.code), *command);
         }
@@ -1470,7 +1470,7 @@ fn build_editor_overrides(
 fn warn_unrecognized_overrides(overrides: &HashMap<String, global_hotkey::hotkey::HotKey>) {
     for name in overrides.keys() {
         let known = APP_COMMAND_NAMES.contains(&name.as_str())
-            || iced_text_editor::EDITOR_COMMAND_NAMES
+            || jumppad_textarea::EDITOR_COMMAND_NAMES
                 .iter()
                 .any(|(known_name, _)| known_name == name);
         if !known {
@@ -2092,7 +2092,7 @@ mod tests {
         }
     }
 
-    /// End-to-end scenario against real `IcedTextEditor`s (not stubs): two
+    /// End-to-end scenario against real `TextArea`s (not stubs): two
     /// tabs make selections in turn, and each keeps its own through switches.
     #[test]
     fn each_tab_keeps_its_own_selection_through_switches() {
@@ -2100,7 +2100,7 @@ mod tests {
 
         let factory: EditorFactory = Box::new(|text, _extension| {
             let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-            Box::new(iced_text_editor::IcedTextEditor::new(
+            Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,
@@ -2156,7 +2156,7 @@ mod tests {
 
         let factory: EditorFactory = Box::new(|text, _extension| {
             let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-            Box::new(iced_text_editor::IcedTextEditor::new(
+            Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,
@@ -2187,12 +2187,12 @@ mod tests {
         assert_eq!(app.tabs[0].editor.cursor_position(), cursor_0);
     }
 
-    /// An app whose tabs hold real `IcedTextEditor`s seeded with `texts`,
+    /// An app whose tabs hold real `TextArea`s seeded with `texts`,
     /// for find flows that need actual text and cursor behavior.
     fn app_with_text(texts: &[&str]) -> JumpPadApp {
         let factory: EditorFactory = Box::new(|text, _extension| {
             let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-            Box::new(iced_text_editor::IcedTextEditor::new(
+            Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,

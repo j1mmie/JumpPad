@@ -49,7 +49,7 @@ pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorComma
 /// A [`TextEditorWidget`] backed by `iced::widget::text_editor`, with
 /// optional tree-sitter/WASM syntax highlighting layered on via a
 /// [`syntax_registry::SyntaxRegistry`].
-pub struct IcedTextEditor {
+pub struct TextArea {
     content: Content,
     highlighting: Highlighting,
     /// Read for its load revision on every `view` - an injection target
@@ -93,7 +93,7 @@ enum Highlighting {
     Unavailable(#[allow(dead_code)] Handle),
 }
 
-impl IcedTextEditor {
+impl TextArea {
     pub fn new(
         text: &str,
         registry: &Arc<SyntaxRegistry>,
@@ -158,7 +158,7 @@ impl IcedTextEditor {
     }
 }
 
-impl TextEditorWidget for IcedTextEditor {
+impl TextEditorWidget for TextArea {
     fn view(&self) -> Element<'_, EditorMessage> {
         let settings = HighlighterSettings {
             source: self.content.text(),
@@ -669,9 +669,9 @@ mod tests {
     }
 
     /// An editor with no highlighting and default alpha, for cursor/selection tests.
-    fn plain_editor(text: &str) -> IcedTextEditor {
+    fn plain_editor(text: &str) -> TextArea {
         let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-        IcedTextEditor::new(text, &registry, None, Arc::new(EditorOverrides::new()), 1.0)
+        TextArea::new(text, &registry, None, Arc::new(EditorOverrides::new()), 1.0)
     }
 
     #[test]

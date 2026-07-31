@@ -1,9 +1,0 @@
-[package]
-name = "iced_text_editor"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-iced = { workspace = true, features = ["advanced"] }
-editor_core.workspace = true
-syntax_registry.workspace = true

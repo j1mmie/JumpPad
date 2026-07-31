@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/editor_core",
-    "crates/iced_text_editor",
+    "crates/jumppad_textarea",
     "crates/syntax_registry",
     "crates/jumppad",
     "crates/jumppad_config",
@@ -36,7 +36,7 @@ toml = "0.8"
 global-hotkey = { version = "0.8", features = ["serde"] }
 display-info = "0.5"
 editor_core = { path = "crates/editor_core" }
-iced_text_editor = { path = "crates/iced_text_editor" }
+jumppad_textarea = { path = "crates/jumppad_textarea" }
 syntax_registry = { path = "crates/syntax_registry" }
 jumppad_config = { path = "crates/jumppad_config" }
 
