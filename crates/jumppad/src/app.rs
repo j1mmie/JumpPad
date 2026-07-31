@@ -488,7 +488,14 @@ impl JumpPadApp {
         let Some(state) = self.find.get(&tab.id) else {
             return;
         };
-        tab.editor.set_find_matches(state.matches.clone(), state.current);
+        // Tint only while the palette is showing. With it closed - a bare
+        // find-again - the editor holds focus, so the ordinary selection
+        // marks the match on its own.
+        if state.open {
+            tab.editor.set_find_matches(state.matches.clone(), state.current);
+        } else {
+            tab.editor.set_find_matches(Vec::new(), None);
+        }
         let Some(found) = state.current_match() else {
             return;
         };
@@ -768,13 +775,30 @@ impl JumpPadApp {
             }
             Message::FindNext | Message::FindPrevious => {
                 let delta = if matches!(message, Message::FindNext) { 1 } else { -1 };
-                if let Some(tab) = self.tabs.get(self.active) {
-                    if let Some(state) = self.find.get_mut(&tab.id) {
-                        state.step(delta);
-                    }
-                    self.select_current_match();
+                let Some(tab) = self.tabs.get(self.active) else {
+                    return Task::none();
+                };
+                let (tab_id, text, cursor) =
+                    (tab.id, tab.editor.text(), tab.editor.cursor_position());
+                let Some(state) = self.find.get_mut(&tab_id) else {
+                    return Task::none();
+                };
+                if state.query.is_empty() {
+                    return Task::none();
                 }
-                // Focus stays in the query field so Enter keeps stepping.
+                if !state.open {
+                    // Find-again with the palette closed (Cmd+G): the
+                    // document may have changed since it last searched, and
+                    // stepping should continue from the cursor rather than
+                    // from wherever the palette was left.
+                    state.matches = editor_core::find_matches(&text, &state.query);
+                    state.origin = cursor;
+                    state.current = state.index_at(cursor);
+                }
+                state.step(delta);
+                self.select_current_match();
+                // Focus is left alone: in the field so Enter keeps stepping,
+                // or in the editor for a palette-closed find-again.
                 Task::none()
             }
             Message::CloseFind => {
@@ -1278,6 +1302,7 @@ pub const APP_COMMAND_NAMES: &[&str] = &[
     "select_next_tab",
     "select_previous_active_tab",
     "find",
+    "find_next",
 ];
 
 /// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical
@@ -1297,6 +1322,7 @@ fn build_app_overrides(
         ("select_next_tab", Message::SelectNextTab),
         ("select_previous_active_tab", Message::SelectPreviousActiveTab),
         ("find", Message::OpenFind),
+        ("find_next", Message::FindNext),
     ] {
         if let Some(resolved) = resolved.get(name) {
             map.insert((resolved.modifiers, resolved.code), message);
@@ -1373,6 +1399,7 @@ fn handle_hotkey(
         keyboard::Key::Character("s") => Some(Message::SaveFile),
         keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
         keyboard::Key::Character("f") => Some(Message::OpenFind),
+        keyboard::Key::Character("g") => Some(Message::FindNext),
         keyboard::Key::Character("[") if modifiers.shift() => Some(Message::SelectPreviousTab),
         keyboard::Key::Character("]") if modifiers.shift() => Some(Message::SelectNextTab),
         _ => None,
@@ -2174,6 +2201,79 @@ mod tests {
         let _ = app.update(Message::OpenFind);
         let _ = app.update(Message::FindQueryChanged("two".into()));
         assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+    }
+
+    #[test]
+    fn command_g_finds_again_with_the_palette_closed() {
+        let mut app = app_with_text(&["two one two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        let _ = app.update(Message::CloseFind);
+        assert!(!app.find_is_open());
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 3), "on the first match");
+
+        // Cmd+G steps without reopening the palette.
+        let _ = app.update(Message::FindNext);
+        assert!(!app.find_is_open(), "find-again must not reopen the palette");
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 11), "second match");
+
+        // And wraps back around.
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 3));
+    }
+
+    #[test]
+    fn find_again_picks_up_document_edits_made_while_closed() {
+        use iced::widget::text_editor;
+
+        let mut app = app_with_text(&["two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        let _ = app.update(Message::CloseFind);
+        assert_eq!(app.active_find().unwrap().matches.len(), 1);
+
+        // Append a second occurrence with the palette shut - the stale match
+        // list must be re-searched before stepping.
+        app.tabs[0].editor.move_cursor_to(0, 3);
+        for character in " two".chars() {
+            let _ = app.update(Message::Editor(
+                0,
+                EditorMessage::Action(text_editor::Action::Edit(text_editor::Edit::Insert(
+                    character,
+                ))),
+            ));
+        }
+        // Step from the top so the target is unambiguous - starting at the
+        // cursor's post-edit spot (the end of the last match) would wrap.
+        app.tabs[0].editor.move_cursor_to(0, 0);
+        let _ = app.update(Message::FindNext);
+        assert_eq!(
+            app.active_find().unwrap().matches.len(),
+            2,
+            "the stale match list was re-searched"
+        );
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 7), "the new match");
+    }
+
+    #[test]
+    fn find_again_without_a_query_does_nothing() {
+        let mut app = app_with_text(&["one two"]);
+        // No palette ever opened for this tab.
+        let _ = app.update(Message::FindNext);
+        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 0));
+        assert!(app.active_find().is_none());
+    }
+
+    #[test]
+    fn command_g_resolves_to_find_next() {
+        let overrides = HashMap::new();
+        let resolved = handle_hotkey(
+            Key::Character("g".into()),
+            Modifiers::CTRL,
+            key::Physical::Code(key::Code::KeyG),
+            &overrides,
+        );
+        assert!(matches!(resolved, Some(Message::FindNext)));
     }
 
     #[test]

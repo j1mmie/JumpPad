@@ -346,6 +346,13 @@ Cmd+F / Ctrl+F opens a floating palette at the top-right of the editor
 area (`JumpPadApp::find_palette`, stacked over the editor so it never
 covers the tab bar). Search is case-insensitive, single-file, no toggles.
 
+Cmd+G / Ctrl+G is find-again. It works with the palette **closed**, using
+that tab's stored query, and deliberately does not reopen it - so it
+re-searches first (the document can have changed while the palette was
+shut) and re-anchors to the cursor rather than to wherever the palette was
+left. With the palette closed the editor holds focus, so the match shows
+as an ordinary selection and `select_current_match` skips the tinting.
+
 State is **per tab**, in `JumpPadApp.find: HashMap<u64, FindState>` keyed
 by `Tab::id` - deliberately not a field on `Tab`, since `editor_core` is
 the widget-abstraction boundary and a query string is shell UI state.
@@ -372,8 +379,36 @@ Two constraints fall out of that mechanism:
   fields. That impl is the only thing telling iced the highlighter needs
   re-running; omit them and the coloring freezes on screen.
 
-Because `Format` carries only a color and a font (no background), matches
-are a **text tint** rather than a highlight box.
+**Gotcha - a background highlight for matches is not reachable in iced
+0.14.** Matches are a **text tint** for a hard reason, not a stylistic
+one; this was investigated in full, so don't re-derive it:
+
+- `iced_core::text::highlighter::Format` has exactly two fields, `color`
+  and `font`. No background.
+- The attrs layer underneath can't carry one either - `background` does
+  not appear anywhere in `cosmic-text-0.15`'s source.
+- The widget fills exactly three quads (`iced_widget-0.14.2`
+  `text_editor.rs`): the editor background, the caret, and the *current
+  selection's* rectangles. Selection backgrounds come from
+  `editor.selection()` returning `Vec<Rectangle>`, i.e. entirely outside
+  the attrs system, and only for the one active selection.
+- Computing those rectangles for arbitrary ranges needs the cosmic-text
+  `Buffer`. `iced_graphics::text::Editor::buffer()` is public, but
+  `text_editor::Content` is a newtype over a private
+  `RefCell<Internal<R>>` whose `editor` field is private, so there is no
+  path to it from application code.
+- Faking it with an overlay computed from monospace metrics founders on
+  the scroll offset: the app sees `Action::Scroll` from the wheel, but
+  cursor-driven auto-scroll (`shape_until_cursor`) is internal, so any
+  tracked offset drifts.
+- 0.14.0 is the latest published iced, so there is no version to upgrade
+  into.
+
+Getting real background highlighting would mean patching iced *and*
+cosmic-text, or replacing `text_editor` with a custom widget - the
+`TextEditorWidget` boundary exists precisely so the latter is possible.
+The current match does get a genuine selection background whenever the
+editor holds focus (after Escape, or during a Cmd+G find-again).
 
 `FindState::origin` is the cursor position captured when the palette
 opened, and live search anchors there rather than at the live cursor -
