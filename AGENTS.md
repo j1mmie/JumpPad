@@ -514,12 +514,33 @@ Cmd+F / Ctrl+F opens a floating palette at the top-right of the editor
 area (`JumpPadApp::find_palette`, stacked over the editor so it never
 covers the tab bar). Search is case-insensitive, single-file, no toggles.
 
-Cmd+G / Ctrl+G is find-again. It works with the palette **closed**, using
-that tab's stored query, and deliberately does not reopen it - so it
-re-searches first (the document can have changed while the palette was
-shut) and re-anchors to the cursor rather than to wherever the palette was
-left. With the palette closed the editor holds focus, so the match shows
-as an ordinary selection and `select_current_match` skips the tinting.
+Cmd+G / Ctrl+G is find-again, Cmd+Shift+G steps backwards. Both work with
+the palette open or closed, and with focus in either the editor or the
+query field. With the palette **closed** they deliberately do not reopen
+it - so they re-search first (the document can have changed while the
+palette was shut) and re-anchor to the cursor rather than to wherever the
+palette was left. Closed also means the editor holds focus, so the match
+shows as an ordinary selection and `select_current_match` skips tinting.
+
+**Gotcha - find-again is dispatched from two places, split by capture
+status.** With the query field focused, macOS `text_input` swallows the
+chord (see below), so `handle_hotkey` never sees it; with the editor
+focused it comes through normally. The `event::listen_with` arm therefore
+handles the chord *only* when `status == Captured`, leaving the uncaptured
+case to `handle_hotkey`. Drop that condition and both fire, stepping two
+matches per press.
+
+**Gotcha - macOS leaks the shortcut's letter into the query.** Cmd doesn't
+suppress character production there, and `text_input`'s insert branch
+(`iced_widget-0.14.2` `text_input.rs:1015`) has no modifier guard at all -
+it inserts any non-control character and captures the event. So Cmd+G
+types a "g" into the query on its way to being a shortcut. `Message::
+FindQueryChanged` discards a *one-character* growth arriving while
+`command()` is held; the length test is what keeps a legitimate Cmd+V
+paste working. This is the same quirk `iced_text_editor::key_binding`
+already works around for the document. Linux is unaffected - Ctrl
+produces a control character, which the insert branch filters out - so
+this cannot be reproduced under the Xvfb harness.
 
 State is **per tab**, in `JumpPadApp.find: HashMap<u64, FindState>` keyed
 by `Tab::id` - deliberately not a field on `Tab`, since `editor_core` is

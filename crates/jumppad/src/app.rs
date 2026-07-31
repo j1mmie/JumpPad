@@ -818,6 +818,22 @@ impl JumpPadApp {
                 focus_find()
             }
             Message::FindQueryChanged(query) => {
+                // On macOS, holding Cmd doesn't suppress character
+                // production, and `text_input`'s insert branch has no
+                // modifier guard - so Cmd+G types a "g" into the query on
+                // its way to being a shortcut. Drop a single character that
+                // appeared while `command()` was held. Mirrors the same
+                // workaround `iced_text_editor::key_binding` needs.
+                //
+                // Scoped to one-character growth so a Cmd+V paste, which
+                // legitimately arrives with `command()` held, still lands.
+                let leaked_shortcut_character = self.modifiers.command()
+                    && self
+                        .active_find()
+                        .is_some_and(|state| query.len() == state.query.len() + 1);
+                if leaked_shortcut_character {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.get(self.active) {
                     let state = self.find.entry(tab.id).or_default();
                     state.query = query;
@@ -1321,12 +1337,30 @@ impl JumpPadApp {
             // `text_input` swallows Escape with `capture_event()` (it
             // unfocuses itself). Without this the find palette needed two
             // presses to close - one eaten by the field, one seen here.
-            iced::event::listen_with(|event, _status, _window| match event {
-                iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key: keyboard::Key::Named(key::Named::Escape),
-                    ..
-                }) => Some(Message::CloseFind),
-                _ => None,
+            iced::event::listen_with(|event, status, _window| {
+                let iced::Event::Keyboard(keyboard::Event::KeyPressed {
+                    key, modifiers, ..
+                }) = event
+                else {
+                    return None;
+                };
+                match key.as_ref() {
+                    keyboard::Key::Named(key::Named::Escape) => Some(Message::CloseFind),
+                    // Find-again, but only for a press some widget swallowed.
+                    // An uncaptured one already reached `handle_hotkey`, and
+                    // acting on it twice would skip a match.
+                    keyboard::Key::Character("g")
+                        if modifiers.command()
+                            && status == iced::event::Status::Captured =>
+                    {
+                        Some(if modifiers.shift() {
+                            Message::FindPrevious
+                        } else {
+                            Message::FindNext
+                        })
+                    }
+                    _ => None,
+                }
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
             hotkey::subscription(),
@@ -1385,6 +1419,7 @@ pub const APP_COMMAND_NAMES: &[&str] = &[
     "select_previous_active_tab",
     "find",
     "find_next",
+    "find_previous",
 ];
 
 /// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical
@@ -1405,6 +1440,7 @@ fn build_app_overrides(
         ("select_previous_active_tab", Message::SelectPreviousActiveTab),
         ("find", Message::OpenFind),
         ("find_next", Message::FindNext),
+        ("find_previous", Message::FindPrevious),
     ] {
         if let Some(resolved) = resolved.get(name) {
             map.insert((resolved.modifiers, resolved.code), message);
@@ -1481,6 +1517,7 @@ fn handle_hotkey(
         keyboard::Key::Character("s") => Some(Message::SaveFile),
         keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
         keyboard::Key::Character("f") => Some(Message::OpenFind),
+        keyboard::Key::Character("g") if modifiers.shift() => Some(Message::FindPrevious),
         keyboard::Key::Character("g") => Some(Message::FindNext),
         keyboard::Key::Character("[") if modifiers.shift() => Some(Message::SelectPreviousTab),
         keyboard::Key::Character("]") if modifiers.shift() => Some(Message::SelectNextTab),
@@ -2393,6 +2430,68 @@ mod tests {
         let _ = app.update(Message::FindNext);
         assert_eq!(app.tabs[0].editor.cursor_position(), (0, 0));
         assert!(app.active_find().is_none());
+    }
+
+    #[test]
+    fn find_again_steps_while_the_palette_is_open() {
+        let mut app = app_with_text(&["two one two three two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+
+        // Cmd+G with the palette still up steps without closing it.
+        let _ = app.update(Message::FindNext);
+        assert!(app.find_is_open());
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("2 of 3"));
+
+        // Cmd+Shift+G goes back.
+        let _ = app.update(Message::FindPrevious);
+        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+        let _ = app.update(Message::FindPrevious);
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("3 of 3"),
+            "previous past the first wraps"
+        );
+    }
+
+    #[test]
+    fn a_shortcut_character_leaked_while_command_is_held_is_not_typed_into_the_query() {
+        // macOS only in practice: Cmd doesn't suppress character production
+        // and `text_input` inserts it, so Cmd+G would append "g" to the
+        // query on its way to being a shortcut.
+        let mut app = app_with_text(&["one two"]);
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+
+        let _ = app.update(Message::ModifiersChanged(Modifiers::COMMAND));
+        let _ = app.update(Message::FindQueryChanged("twog".into()));
+        assert_eq!(
+            app.active_find().unwrap().query,
+            "two",
+            "the leaked shortcut character must not reach the query"
+        );
+
+        // A multi-character change with command held is a paste, not a leak.
+        let _ = app.update(Message::FindQueryChanged("twobeta".into()));
+        assert_eq!(app.active_find().unwrap().query, "twobeta", "paste still lands");
+
+        // And ordinary typing is untouched once command is released.
+        let _ = app.update(Message::ModifiersChanged(Modifiers::empty()));
+        let _ = app.update(Message::FindQueryChanged("twobetax".into()));
+        assert_eq!(app.active_find().unwrap().query, "twobetax");
+    }
+
+    #[test]
+    fn command_shift_g_resolves_to_find_previous() {
+        let overrides = HashMap::new();
+        let resolved = handle_hotkey(
+            Key::Character("g".into()),
+            Modifiers::CTRL | Modifiers::SHIFT,
+            key::Physical::Code(key::Code::KeyG),
+            &overrides,
+        );
+        assert!(matches!(resolved, Some(Message::FindPrevious)));
     }
 
     #[test]
