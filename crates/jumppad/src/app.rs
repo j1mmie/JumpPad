@@ -397,13 +397,17 @@ impl JumpPadApp {
         }
         if let Some(previous) = self.tabs.get_mut(self.active) {
             previous.last_cursor = previous.editor.cursor_position();
+            previous.last_selection = previous.editor.selection_anchor();
             self.previous_active_id = Some(previous.id);
         }
         self.active = index;
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
-            tab.editor.move_cursor_to(line, column);
+            match tab.last_selection {
+                Some(anchor) => tab.editor.select_range(anchor, tab.last_cursor),
+                None => tab.editor.move_cursor_to(line, column),
+            }
         }
         self.sync_session_metadata();
         self.arm_shadow_refresh();
@@ -1474,6 +1478,10 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
+        fn selection_anchor(&self) -> Option<(usize, usize)> {
+            None
+        }
+        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1504,6 +1512,57 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
+        fn selection_anchor(&self) -> Option<(usize, usize)> {
+            None
+        }
+        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
+        fn has_pending_highlighting(&self) -> bool {
+            false
+        }
+    }
+
+    /// What `switch_active` restored into an editor - see `SelectionSpyEditor`.
+    #[derive(Debug, PartialEq)]
+    enum Restore {
+        Cursor(usize, usize),
+        Selection {
+            anchor: (usize, usize),
+            cursor: (usize, usize),
+        },
+    }
+
+    /// Reports a canned cursor/selection and records what the app restores,
+    /// for asserting on `switch_active`'s save/restore orchestration.
+    struct SelectionSpyEditor {
+        anchor: Option<(usize, usize)>,
+        cursor: (usize, usize),
+        restored: std::rc::Rc<std::cell::RefCell<Vec<Restore>>>,
+    }
+
+    impl TextEditorWidget for SelectionSpyEditor {
+        fn view(&self) -> Element<'_, EditorMessage> {
+            iced::widget::text("").into()
+        }
+        fn update(&mut self, _message: EditorMessage) -> bool {
+            false
+        }
+        fn text(&self) -> String {
+            String::new()
+        }
+        fn set_text(&mut self, _text: &str) {}
+        fn poll_highlighting(&mut self) {}
+        fn cursor_position(&self) -> (usize, usize) {
+            self.cursor
+        }
+        fn move_cursor_to(&mut self, line: usize, column: usize) {
+            self.restored.borrow_mut().push(Restore::Cursor(line, column));
+        }
+        fn selection_anchor(&self) -> Option<(usize, usize)> {
+            self.anchor
+        }
+        fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize)) {
+            self.restored.borrow_mut().push(Restore::Selection { anchor, cursor });
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1561,6 +1620,44 @@ mod tests {
                 EditorMessage::Action(text_editor::Action::Click(_)),
             ]
         ));
+    }
+
+    #[test]
+    fn switching_tabs_saves_and_restores_the_selection() {
+        let mut app = test_app(2);
+        let restored = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        app.tabs[0].editor = Box::new(SelectionSpyEditor {
+            anchor: Some((0, 2)),
+            cursor: (1, 4),
+            restored: restored.clone(),
+        });
+
+        let _ = app.switch_active(1);
+        assert_eq!(app.tabs[0].last_selection, Some((0, 2)));
+        assert_eq!(app.tabs[0].last_cursor, (1, 4));
+
+        let _ = app.switch_active(0);
+        assert_eq!(
+            restored.borrow().as_slice(),
+            [Restore::Selection { anchor: (0, 2), cursor: (1, 4) }]
+        );
+    }
+
+    #[test]
+    fn switching_to_a_tab_without_a_selection_restores_only_the_cursor() {
+        let mut app = test_app(2);
+        let restored = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        app.tabs[0].editor = Box::new(SelectionSpyEditor {
+            anchor: None,
+            cursor: (3, 1),
+            restored: restored.clone(),
+        });
+
+        let _ = app.switch_active(1);
+        assert_eq!(app.tabs[0].last_selection, None);
+
+        let _ = app.switch_active(0);
+        assert_eq!(restored.borrow().as_slice(), [Restore::Cursor(3, 1)]);
     }
 
     #[test]

@@ -31,6 +31,10 @@ pub struct Tab {
     /// Where the cursor was the last time this tab was active - saved on
     /// deselect, restored on reselect.
     pub last_cursor: (usize, usize),
+    /// The selection anchor the last time this tab was active (the cursor is
+    /// the selection's other end) - in-memory only, never written to the
+    /// session manifest, and dropped with the tab.
+    pub last_selection: Option<(usize, usize)>,
     /// Bumped on every edit; compared against `flushed_generation` to tell
     /// whether this tab's draft file is stale.
     pub draft_generation: u64,
@@ -47,6 +51,7 @@ impl Tab {
             dirty: false,
             editor: factory("", None),
             last_cursor: (0, 0),
+            last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
         }
@@ -61,6 +66,7 @@ impl Tab {
             dirty: false,
             editor,
             last_cursor: (0, 0),
+            last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
         }
@@ -86,6 +92,7 @@ impl Tab {
             dirty,
             editor,
             last_cursor: (0, 0),
+            last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
         }

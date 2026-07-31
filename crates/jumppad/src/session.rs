@@ -187,6 +187,10 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
+        fn selection_anchor(&self) -> Option<(usize, usize)> {
+            None
+        }
+        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
         fn has_pending_highlighting(&self) -> bool {
             false
         }
