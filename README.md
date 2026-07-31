@@ -1,4 +1,3 @@
-
 <div align="center">
   
 <img src="assets/JumpPad.svg" width="128px" />
@@ -6,6 +5,8 @@
 # JumpPad
 
 A lightweight, cross-platform, Rust-based plaintext editor with modern features and minimal bloat
+
+<img width="1120" height="784" alt="image" src="https://github.com/user-attachments/assets/eacb8fa7-04d2-401e-ad77-eae455abf96d" />
 
 </div>
 
