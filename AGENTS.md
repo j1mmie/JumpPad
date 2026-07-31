@@ -137,10 +137,10 @@ throws it away. Anything transparency-related reported from macOS is by
 definition the wgpu path, so don't debug it against `iced_tiny_skia`'s
 compositor (this mistake has already been made once).
 
-**Windows is the mirror image of that** - there it's `jumppad-gpu` that
-can't be translucent, and `jumppad` that can. Full evidence later in this
-section; the practical upshot is that neither binary does transparency
-everywhere, so always establish which one a report came from first.
+Windows has no such restriction - both binaries are translucent there. It
+is still worth establishing which binary a transparency report came from
+before debugging it, since they reach the screen by completely different
+paths.
 
 **Gotcha - macOS burns in a snapshot of the window taken at resize.** With
 `jumppad-gpu` on a translucent window, content from an earlier moment stays
@@ -230,16 +230,20 @@ itself. Gated on `CLEAR_COLOR_NEEDS_PREMULTIPLY` (also in `app.rs`) rather
 than applied unconditionally, because `tiny-skia` premultiplies internally
 and feeding it a premultiplied color would double-darken.
 
-**Linux is deliberately not in the gate.** Wayland and compositing X11 are
-premultiplied as well, so it probably belongs there too, but nobody has
-reproduced the symptom on either. Turning it on blind would cost real
-opacity on a window that currently looks right; wait for a screenshot.
+**Windows' DWM has the same convention, so it is in the gate too.**
+Confirmed by the same symptom, reported from Windows with side-by-side
+`jumppad`/`jumppad-gpu` screenshots: a *light* theme rendered opaque on
+`jumppad-gpu` at any alpha - including 0.1 - while a dark theme at the same
+alpha looked nearly identical to the software build. `transparent(true)`
+gets per-pixel alpha there through winit's `DwmEnableBlurBehindWindow`, and
+DWM's composition model is premultiplied. So `CLEAR_COLOR_NEEDS_PREMULTIPLY`
+covers macOS *and* Windows on `wgpu`.
 
-**Windows is not in the gate either, for a much harder reason - see the
-next section. Do not "fix" a washed-out Windows window by adding
-`target_os = "windows"` to `CLEAR_COLOR_NEEDS_PREMULTIPLY`.** That was
-tried, shipped, and reverted. It is the intuitive read of the symptom and
-it is wrong.
+**Linux is the one holdout.** Wayland and compositing X11 are premultiplied
+as well, so it very likely belongs there too, but nobody has reproduced the
+symptom on either. Turning it on blind would cost real opacity on a window
+that currently looks right; wait for a screenshot - **of a light theme**,
+per the diagnostic below.
 
 **Gotcha - the premultiply is per sRGB-encoded channel, not linear.** The
 window server composites on *encoded* values, and
@@ -252,61 +256,54 @@ premultiply in *linear* space - land slightly bright under this compositor,
 but every translucent quad this app paints is black (`darkening_wash`, the
 modal scrim), and black is immune, so nothing visible is affected.
 
-**Gotcha - on Windows, transparency requires `jumppad`, not `jumppad-gpu`.**
-The exact mirror image of the macOS rule near the top of this section, and
-the two together mean **neither binary is translucent on every platform**.
+**Always test this bug with a light theme.** It is invisible on a dark one,
+and that asymmetry has now cost two wrong diagnoses. `src_rgb + (1 - a) *
+desktop` saturates the channel from `src_rgb` alone once `rgb` nears 1, so
+alpha stops mattering completely: a light theme reads as a fully opaque
+window at *every* configured alpha, 0.1 included. A near-black theme
+(`rgb ~ 0`) composites almost correctly regardless. Two consequences worth
+internalising:
 
-Reported as "on Windows, in wgpu, the theme is much lighter when
-transparent", with `jumppad` and `jumppad-gpu` side by side on the same
-config. The tempting diagnosis is the macOS alpha-convention bug (a
-straight clear color composited premultiplied lands `(1 - a) * rgb` too
-bright, which also looks "lighter"). It isn't that. **`jumppad-gpu` on
-Windows is not translucent at all** - it is a fully opaque window showing
-the theme's background at its true color, which simply reads as "lighter"
-next to a genuinely translucent one.
+- "Dark themes look close, light themes are opaque" is the signature of
+  **this** bug - a missing premultiply.
+- "Everything is uniformly too dark, including dark themes" is the
+  signature of the *opposite* mistake - premultiplying on a path that
+  didn't need it.
 
-The chain, all confirmed in the vendored sources rather than guessed:
+Do not conclude anything about transparency from a dark-theme screenshot.
+Ask for a light one, and preferably a low alpha, where the two hypotheses
+diverge most.
 
-- `wgpu_hal::dx12::Adapter::surface_capabilities` returns
-  `composite_alpha_modes: vec![Opaque]` for `SurfaceTarget::WndHandle` -
-  a swapchain built directly from the window's `HWND`.
-- That is the default. `Dx12SwapchainKind::DxgiFromHwnd` is
-  `#[default]`, and its own rustdoc says verbatim: *"This does not support
-  transparency."* The alternative, `DxgiFromVisual`, wraps the `HWND` in a
-  DirectComposition visual and does report the full alpha-mode set.
-- `iced_wgpu::window::Compositor::request` picks `PostMultiplied`, else
-  `PreMultiplied`, else falls through to `Auto`. Given `[Opaque]` it takes
-  `Auto`, and the swapchain discards alpha.
-- Nothing app-side can change that. `iced_wgpu` builds its
-  `wgpu::InstanceDescriptor` with `..Default::default()`, so
-  `backend_options.dx12.presentation_system` is `DxgiFromHwnd`. The
-  `WGPU_DX12_PRESENTATION_SYSTEM` env var looks like a lever but is
-  **dead**: it is only read by `Dx12SwapchainKind::from_env`, which nothing
-  in `wgpu`, `wgpu-core`, or `wgpu-hal` calls on the default path (grep for
-  `with_env` in those crates - no hits). Setting it in the environment does
-  nothing.
-- The other backends are no better: `wgpu_hal::gles` hardcodes
-  `vec![Opaque]`, and Win32 Vulkan surfaces report only
-  `VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR`. `iced_wgpu` asks for
-  `Backends::all()` anyway, so there is no backend to steer it toward.
+**Red herring - `wgpu`'s DX12 surface reports `composite_alpha_modes:
+[Opaque]` on Windows, and that does *not* mean the window is opaque.** This
+was misread once as "Windows can't do transparency on `wgpu` at all", and a
+working fix was reverted on the strength of it. The reading of the sources
+is accurate; the conclusion drawn from it was not:
 
-So reaching transparency through `wgpu` on Windows needs
-`[patch.crates-io]` on `iced_wgpu` to pass `Dx12SwapchainKind::DxgiFromVisual`.
-That is the only known route; weigh it against `jumppad` already doing the
-job (`tiny-skia` stores premultiplied bytes and softbuffer blits them to
-the DIB, which is exactly what the DWM wants), and against DirectComposition
-surfaces not being supported by RenderDoc.
+- `wgpu_hal::dx12::Adapter::surface_capabilities` really does return
+  `composite_alpha_modes: vec![Opaque]` for `SurfaceTarget::WndHandle`, and
+  the default `Dx12SwapchainKind::DxgiFromHwnd` really is documented as
+  *"This does not support transparency."*
+- `iced_wgpu::window::Compositor::request` therefore falls through its
+  `PostMultiplied`/`PreMultiplied` preferences to `Auto`.
+- But that field governs **DXGI's own composition alpha mode**, which
+  applies to composition swapchains. It is not the mechanism JumpPad's
+  transparency runs through. The window is translucent because winit's
+  `transparent(true)` calls `DwmEnableBlurBehindWindow`, which makes the
+  **DWM** honour the per-pixel alpha in the window's redirection surface -
+  and the alpha `iced_wgpu` clears to still lands in those pixels.
 
-**Why the premultiply made it worse, which is the useful diagnostic.** With
-alpha discarded, the window shows the clear color's RGB at full opacity.
-Straight, that is the theme background - correct color, just not
-see-through. Premultiplied, it is `background * alpha` - a *darkened*
-opaque window. If a Windows screenshot ever shows `jumppad-gpu` too dark
-rather than too light, that is this gate being re-added, not a new bug.
+So the DXGI capability list says nothing about whether the presented alpha
+survives, and the empirical answer is that it does. If this needs settling
+again, the discriminator is a light theme at low alpha: opaque *and* pure
+saturated white means the alpha arrived and wasn't premultiplied; opaque at
+the theme's own background colour would mean the alpha really was dropped.
 
-`OPAQUE_WINDOW_REASON` in `lib.rs` warns at startup on both of these
-platform/backend pairings, so the next report arrives as "it printed this"
-rather than as another screenshot to re-derive.
+(`Dx12SwapchainKind::DxgiFromVisual` and the DirectComposition path remain
+unreachable from app code - `iced_wgpu` builds its `InstanceDescriptor` with
+`..Default::default()`, and the `WGPU_DX12_PRESENTATION_SYSTEM` env var is
+dead, read only by `Dx12SwapchainKind::from_env`, which nothing in `wgpu`,
+`wgpu-core`, or `wgpu-hal` calls. That is all true and all irrelevant.)
 
 ## Known upstream rendering bug (tiny-skia + tab switching)
 

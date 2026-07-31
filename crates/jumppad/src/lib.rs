@@ -13,23 +13,17 @@ mod visor;
 use app::JumpPadApp;
 
 /// Why `[alpha] background < 1.0` will be ignored on this build, or `None`
-/// when the window can really be translucent. See AGENTS.md for the evidence
-/// behind each case - both are hard platform limits, not app bugs, and the
-/// other binary is the fix in both directions.
-const OPAQUE_WINDOW_REASON: Option<&str> = if cfg!(all(
-    target_os = "macos",
-    feature = "tiny-skia"
-)) {
-    // softbuffer's CoreGraphics backend hardcodes `NoneSkipFirst`, discarding
-    // the alpha channel tiny-skia painted.
-    Some("[alpha] background is ignored by this binary on macOS - the software renderer's presentation path drops the alpha channel. Run jumppad-gpu for a translucent window.")
-} else if cfg!(all(target_os = "windows", feature = "wgpu")) {
-    // wgpu's DX12 swapchain built from a raw HWND reports
-    // `composite_alpha_modes: [Opaque]`, so alpha never reaches the DWM.
-    Some("[alpha] background is ignored by this binary on Windows - wgpu's DX12 swapchain presents an opaque window. Run jumppad for a translucent window.")
-} else {
-    None
-};
+/// when the window can really be translucent. One known case, evidenced in
+/// AGENTS.md: a hard platform limit, not an app bug, with the other binary
+/// as the fix.
+const OPAQUE_WINDOW_REASON: Option<&str> =
+    if cfg!(all(target_os = "macos", feature = "tiny-skia")) {
+        // softbuffer's CoreGraphics backend hardcodes `NoneSkipFirst`,
+        // discarding the alpha channel tiny-skia painted.
+        Some("[alpha] background is ignored by this binary on macOS - the software renderer's presentation path drops the alpha channel. Run jumppad-gpu for a translucent window.")
+    } else {
+        None
+    };
 
 /// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {

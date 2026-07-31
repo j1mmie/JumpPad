@@ -26,14 +26,9 @@ default = ["tiny-skia"]
 # uniform translucent surface. `wgpu` drives a real `CAMetalLayer` on macOS
 # instead and doesn't have this limitation - the fix for a user wanting
 # transparency there is to build/run `jumppad-gpu`, not a code change here.
-#
-# On Windows it is exactly the other way around: `wgpu`'s DX12 swapchain is
-# built straight from the window's `HWND`, which reports only
-# `CompositeAlphaMode::Opaque` (wgpu's own `Dx12SwapchainKind::DxgiFromHwnd`
-# default is documented as "does not support transparency"), so `jumppad-gpu`
-# presents a solid window there while the default `jumppad` is translucent.
-# Not fixable app-side - see AGENTS.md before reaching for a workaround.
-# `lib.rs`'s `OPAQUE_WINDOW_REASON` warns at startup in both cases.
+# `lib.rs`'s `OPAQUE_WINDOW_REASON` warns about this at startup. It is the
+# only platform/backend pairing that cannot honor the config; Windows and
+# Linux do transparency on both binaries.
 tiny-skia = ["iced/tiny-skia"]
 wgpu = ["iced/wgpu"]
 

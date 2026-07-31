@@ -1642,22 +1642,19 @@ fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
 /// Two conditions have to hold. The backend must be `wgpu`, since only its
 /// clear-color path writes straight alpha (`tiny-skia` premultiplies
 /// internally, so feeding it a premultiplied color would double-darken).
-/// And the surface actually has to reach a compositor that reads it as
-/// premultiplied - which in practice means the surface honors alpha at all.
+/// And the platform compositor must read the presented surface as
+/// premultiplied - confirmed on the macOS window server and on Windows' DWM,
+/// each by the same symptom: light themes going opaque while dark themes
+/// looked fine.
 ///
-/// **Windows is deliberately excluded, and it is not an oversight** - see
-/// AGENTS.md. `wgpu`'s DX12 surface built from a raw `HWND` reports
-/// `composite_alpha_modes: [Opaque]`, so `jumppad-gpu` presents an opaque
-/// window there no matter what `[alpha] background` says. Premultiplying a
-/// clear color whose alpha is then discarded doesn't add transparency, it
-/// just paints the theme `background * alpha` - a darkened, still-solid
-/// window. This was tried, shipped, and reverted; don't re-add it.
-///
-/// Linux is left out for the opposite reason: Wayland and compositing X11
-/// are premultiplied, so it likely belongs here, but nobody has reproduced
-/// the symptom and a wrong guess costs opacity on a window that looks right.
-const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool =
-    cfg!(all(target_os = "macos", feature = "wgpu"));
+/// Linux is the one holdout. Wayland and compositing X11 are premultiplied
+/// too, so it very likely belongs here, but nobody has reproduced the
+/// symptom there and a wrong guess costs opacity on a window that currently
+/// looks right. The tell to watch for is a *light* theme, not a dark one.
+const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool = cfg!(all(
+    any(target_os = "macos", target_os = "windows"),
+    feature = "wgpu"
+));
 
 /// Premultiplies a color's RGB by its alpha, on the sRGB-encoded channel
 /// values - the space desktop compositors composite in.
@@ -1666,9 +1663,16 @@ const CLEAR_COLOR_NEEDS_PREMULTIPLY: bool =
 /// as *premultiplied* alpha - `src + (1 - a) * desktop` - but iced's clear
 /// color is written straight, so a straight white background saturates to
 /// solid white at any alpha, while a near-black one (rgb ~ 0) happens to
-/// look right; only light themes ever looked broken on macOS. Quads and
-/// glyphs are unaffected - iced's shaders premultiply before writing (see
-/// AGENTS.md).
+/// look right; only light themes ever look broken. Quads and glyphs are
+/// unaffected - iced's shaders premultiply before writing (see AGENTS.md).
+///
+/// That asymmetry is the whole diagnostic. `src_rgb` saturates the channel
+/// on its own once `rgb` is near 1, so alpha stops mattering entirely and a
+/// light theme reads as an opaque window at *any* configured alpha - even
+/// 0.1. A dark theme at the same alpha looks nearly right. "Light themes are
+/// opaque, dark themes are fine" means this bug; "everything is uniformly
+/// too dark" means the opposite mistake, premultiplying where it isn't
+/// wanted.
 ///
 /// Not in linear space: the composite runs on encoded values, and
 /// `encode(linear * a) > encode(linear) * a`, so premultiplying before the
@@ -2801,6 +2805,29 @@ mod tests {
         assert_eq!(color.g, 0.0);
         assert_eq!(color.b, 0.0);
         assert!((color.a - 0.25).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_light_theme_at_low_alpha_stays_see_through_once_premultiplied() {
+        // The reported symptom, as arithmetic. A compositor doing
+        // `src_rgb + (1 - a) * desktop` over a *straight* white background
+        // computes `1.0 + anything` on every channel - saturated, opaque, and
+        // completely insensitive to alpha, which is why a light theme looked
+        // solid even at 0.1 while a dark one looked fine. Premultiplied, the
+        // desktop keeps its full `1 - a` share of the result.
+        let alpha = 0.1;
+        let straight = Color { a: alpha, ..Color::WHITE };
+        let premultiplied = premultiply(straight);
+
+        let over_desktop = |src: Color, desktop: f32| src.r + (1.0 - src.a) * desktop;
+
+        // Straight: black desktop and white desktop composite identically.
+        assert_eq!(over_desktop(straight, 0.0), over_desktop(straight, 1.0) - 0.9);
+        assert!(over_desktop(straight, 0.0) >= 1.0, "already saturated before the desktop is added");
+
+        // Premultiplied: the window contributes its 0.1 and the desktop the rest.
+        assert!((over_desktop(premultiplied, 0.0) - 0.1).abs() < 1e-6);
+        assert!((over_desktop(premultiplied, 1.0) - 1.0).abs() < 1e-6);
     }
 
     #[test]
