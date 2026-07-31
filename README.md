@@ -95,7 +95,7 @@ deliver. Windows and Linux support transparency on both binaries.
 To build both release binaries at once, for your host platform:
 ```
 ./scripts/build-release.sh       # Linux/macOS/WSL
-./scripts/build-release.ps1      # Windows (produces JumpPad.exe, JumpPadGPU.exe)
+./scripts/build-release.ps1      # Windows (produces jumppad.exe, jumppad-gpu.exe)
 ```
 
 Or the equivalent commands by hand:
@@ -118,8 +118,8 @@ Then build both Windows binaries with:
 ```
 
 Produces:
-- `target/x86_64-pc-windows-gnu/release/JumpPad.exe` 
-- `target/x86_64-pc-windows-gnu/release/JumpPadGPU.exe`
+- `target/x86_64-pc-windows-gnu/release/jumppad.exe`
+- `target/x86_64-pc-windows-gnu/release/jumppad-gpu.exe`
 
 ## Status
 
