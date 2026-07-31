@@ -302,22 +302,43 @@ worth knowing so they aren't re-attempted as if untested:
   editor (changing its `Internal.bounds`, one of the three fields the
   per-widget check *does* compare) - worked, but visibly janky (a
   perceptible 1px shift each switch).
-- Re-focusing the editor on switch (`iced::advanced::widget::operation::focusable::focus_next`,
-  still done today - see below for why) on the theory that it reproduces
-  what a real click does - confirmed insufficient on its own; content
-  still went stale.
+- Re-focusing the editor on switch (still done today - see below for why)
+  on the theory that it reproduces what a real click does - confirmed
+  insufficient on its own; content still went stale.
 
 **Also in `switch_active`, for an unrelated reason:** it saves the
-outgoing tab's cursor position (`Tab::last_cursor`) and restores the
-incoming tab's, then runs `focus_next` to re-focus the editor. This is
+outgoing tab's cursor and selection (`Tab::last_cursor`/`last_selection`)
+and restores the incoming tab's, then re-focuses the editor. This is
 needed regardless of the redraw bug above, because of the `keyed_column`
 (keyed by `Tab::id`, not `Vec` index) around the active editor in
 `view()` - it makes a freshly switched-to tab's editor widget state start
 completely fresh (unfocused, no highlighter/click/drag state left over)
 rather than silently reusing the previous tab's, so without restoring
-focus/cursor by hand, the caret would simply be invisible and typing
-would resume from the document start instead of wherever the user left
-off.
+focus/cursor/selection by hand, the caret and selection would simply be
+invisible and typing would resume from the document start instead of
+wherever the user left off.
+
+**Gotcha - re-focusing must target the editor's stable widget id**
+(`focus_editor` in `app.rs` / `editor_core::EDITOR_WIDGET_ID`), not
+`focusable::focus_next`. `focus_next` moves focus to the widget *after*
+whichever is focused when the operation runs; on a keyboard-driven switch
+(Ctrl+Tab, Ctrl+N) the outgoing editor is still focused at that moment -
+unlike a mouse switch, where the chip click unfocused it first - so
+`focus_next` skipped the editor and the new tab came up unfocused: typing
+dropped, caret and any restored selection invisible (iced's `text_editor`
+only draws its selection while focused). Reproduced under Xvfb, fixed by
+focusing the id directly.
+
+**Selection save/restore fidelity:** double/triple-click selections are
+stored by cosmic-text as `Selection::Word`/`Line` with the *anchor at the
+click position* - `Content::cursor()` reports `selection == position` for
+them, with the bounds implied by the kind. `IcedTextEditor::selection`
+tells them apart from a collapsed leftover range by whether selected text
+exists (and picks Word vs Line by comparing it to the anchor's line), and
+restore replays `SelectWord`/`SelectLine` at the anchor rather than
+setting an anchor-to-cursor range. Don't "simplify" the saved state back
+to a bare anchor pair - that's exactly the representation that can't
+describe a word selection.
 
 ## Transparent windows: why nothing repaints the background
 

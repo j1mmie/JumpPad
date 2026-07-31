@@ -34,19 +34,45 @@ pub trait TextEditorWidget {
     /// nearest valid position if the document has since gotten shorter.
     fn move_cursor_to(&mut self, line: usize, column: usize);
 
-    /// The fixed end of the current selection, if text is selected - the
-    /// cursor is the other end. `None` when nothing is selected. Saved by
-    /// the app shell on deselect, like `cursor_position`.
-    fn selection_anchor(&self) -> Option<(usize, usize)>;
+    /// The current selection, if text is selected - saved by the app shell
+    /// on deselect, like `cursor_position`.
+    fn selection(&self) -> Option<SavedSelection>;
 
-    /// Restores a selection spanning `anchor` to `cursor`, clamping both
-    /// like `move_cursor_to` does.
-    fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize));
+    /// Restores a previously saved selection, with the moving end at
+    /// `cursor`, clamping like `move_cursor_to` does.
+    fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize));
 
     /// Whether this editor is still waiting on a grammar load - used by the
     /// app shell to decide whether the highlighting-poll subscription needs
     /// to stay active.
     fn has_pending_highlighting(&self) -> bool;
+}
+
+/// The `iced::advanced::widget::Id` every `TextEditorWidget` implementation
+/// tags its focusable widget with, so the app shell can restore focus to it
+/// deterministically (`focusable::focus_next` skips the editor when
+/// something is already focused at operation time).
+pub const EDITOR_WIDGET_ID: &str = "editor";
+
+/// A selection saved when a tab is deselected: the fixed anchor plus how
+/// the selection was made. Word/line selections (double/triple click) keep
+/// their anchor at the click position *inside* the selected region - the
+/// bounds live in the kind, so an anchor-to-cursor range can't rebuild them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SavedSelection {
+    pub anchor: (usize, usize),
+    pub kind: SelectionKind,
+}
+
+/// How a [`SavedSelection`] gets rebuilt on restore.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    /// A plain anchor-to-cursor span (mouse drag, shift+arrows, select-all).
+    Range,
+    /// The word around the anchor (double click).
+    Word,
+    /// The line containing the anchor (triple click).
+    Line,
 }
 
 /// The message type produced by a `TextEditorWidget`'s view. Concrete, not

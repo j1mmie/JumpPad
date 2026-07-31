@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::widget::{EditorFactory, TextEditorWidget};
+use crate::widget::{EditorFactory, SavedSelection, TextEditorWidget};
 
 /// Everything about a tab that is *not* the live text buffer: where it's
 /// saved (if anywhere) and whether it has unsaved changes.
@@ -31,10 +31,10 @@ pub struct Tab {
     /// Where the cursor was the last time this tab was active - saved on
     /// deselect, restored on reselect.
     pub last_cursor: (usize, usize),
-    /// The selection anchor the last time this tab was active (the cursor is
-    /// the selection's other end) - in-memory only, never written to the
+    /// The selection the last time this tab was active (the cursor is a
+    /// range selection's other end) - in-memory only, never written to the
     /// session manifest, and dropped with the tab.
-    pub last_selection: Option<(usize, usize)>,
+    pub last_selection: Option<SavedSelection>,
     /// Bumped on every edit; compared against `flushed_generation` to tell
     /// whether this tab's draft file is stale.
     pub draft_generation: u64,

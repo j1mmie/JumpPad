@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use editor_core::{EditorMessage, TextEditorWidget};
+use editor_core::{EditorMessage, SavedSelection, SelectionKind, TextEditorWidget};
 use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
@@ -156,6 +156,7 @@ impl TextEditorWidget for IcedTextEditor {
         let background_alpha = self.background_alpha;
         let foreground_alpha = foreground_alpha();
         text_editor(&self.content)
+            .id(iced::advanced::widget::Id::new(editor_core::EDITOR_WIDGET_ID))
             .placeholder("")
             .font(Font::MONOSPACE)
             .height(Fill)
@@ -215,23 +216,58 @@ impl TextEditorWidget for IcedTextEditor {
     }
 
     fn move_cursor_to(&mut self, line: usize, column: usize) {
+        // `move_to` with no selection leaves an existing one in place, so a
+        // stale selection has to be dropped explicitly first. Any non-edge
+        // `Move` collapses it (the cursor lands wherever `move_to` says next).
+        if self.content.cursor().selection.is_some() {
+            self.content.perform(text_editor::Action::Move(Motion::Right));
+        }
         let position = clamp_position(&self.content, (line, column));
         self.content.move_to(Cursor { position, selection: None });
     }
 
-    fn selection_anchor(&self) -> Option<(usize, usize)> {
+    fn selection(&self) -> Option<SavedSelection> {
         let cursor = self.content.cursor();
-        cursor
-            .selection
-            .filter(|anchor| *anchor != cursor.position)
-            .map(|anchor| (anchor.line, anchor.column))
+        let anchor = cursor.selection?;
+        let anchor_position = (anchor.line, anchor.column);
+        if anchor != cursor.position {
+            return Some(SavedSelection {
+                anchor: anchor_position,
+                kind: SelectionKind::Range,
+            });
+        }
+        // Anchor == cursor: either a leftover collapsed range (not a real
+        // selection) or a word/line selection from a double/triple click,
+        // whose bounds live in the selection kind rather than the cursor
+        // pair. The selected text tells the cases apart - and which kind.
+        let selected = self.content.selection().filter(|text| !text.is_empty())?;
+        let line = self.content.line(anchor.line)?;
+        let kind = if selected.trim_end_matches(['\r', '\n']) == line.text.as_ref() {
+            SelectionKind::Line
+        } else {
+            SelectionKind::Word
+        };
+        Some(SavedSelection { anchor: anchor_position, kind })
     }
 
-    fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize)) {
-        self.content.move_to(Cursor {
-            position: clamp_position(&self.content, cursor),
-            selection: Some(clamp_position(&self.content, anchor)),
-        });
+    fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize)) {
+        let anchor = clamp_position(&self.content, selection.anchor);
+        match selection.kind {
+            SelectionKind::Range => {
+                self.content.move_to(Cursor {
+                    position: clamp_position(&self.content, cursor),
+                    selection: Some(anchor),
+                });
+            }
+            SelectionKind::Word => {
+                self.content.move_to(Cursor { position: anchor, selection: None });
+                self.content.perform(text_editor::Action::SelectWord);
+            }
+            SelectionKind::Line => {
+                self.content.move_to(Cursor { position: anchor, selection: None });
+                self.content.perform(text_editor::Action::SelectLine);
+            }
+        }
     }
 }
 
@@ -545,19 +581,65 @@ mod tests {
     }
 
     #[test]
-    fn select_range_round_trips_through_selection_anchor_and_cursor() {
+    fn range_selection_round_trips_through_save_and_restore() {
         let mut editor = plain_editor("hello\nworld");
-        editor.select_range((0, 2), (1, 4));
-        assert_eq!(editor.selection_anchor(), Some((0, 2)));
+        let saved = SavedSelection { anchor: (0, 2), kind: SelectionKind::Range };
+        editor.restore_selection(saved, (1, 4));
+        assert_eq!(editor.selection(), Some(saved));
         assert_eq!(editor.cursor_position(), (1, 4));
     }
 
     #[test]
-    fn selection_anchor_is_none_without_a_selection() {
+    fn word_selection_round_trips_through_save_and_restore() {
+        let mut editor = plain_editor("hello world");
+        // A double click: Click places the cursor, SelectWord selects around it.
+        editor.move_cursor_to(0, 8); // inside "world"
+        editor.content.perform(text_editor::Action::SelectWord);
+        assert_eq!(editor.content.selection().as_deref(), Some("world"));
+
+        let saved = editor.selection().expect("word selection should save");
+        assert_eq!(saved, SavedSelection { anchor: (0, 8), kind: SelectionKind::Word });
+
+        // Simulate the tab going away and coming back: clear, then restore.
+        editor.move_cursor_to(0, 0);
+        assert_eq!(editor.selection(), None);
+        editor.restore_selection(saved, (0, 8));
+        assert_eq!(editor.content.selection().as_deref(), Some("world"));
+        assert_eq!(editor.selection(), Some(saved));
+    }
+
+    #[test]
+    fn line_selection_round_trips_through_save_and_restore() {
+        let mut editor = plain_editor("first line\nsecond line");
+        editor.move_cursor_to(1, 3);
+        editor.content.perform(text_editor::Action::SelectLine);
+        let saved = editor.selection().expect("line selection should save");
+        assert_eq!(saved.kind, SelectionKind::Line);
+
+        editor.move_cursor_to(0, 0);
+        editor.restore_selection(saved, (1, 3));
+        assert_eq!(editor.content.selection().as_deref(), Some("second line"));
+    }
+
+    #[test]
+    fn selection_is_none_without_a_selection() {
         let mut editor = plain_editor("hello");
         editor.move_cursor_to(0, 3);
-        assert_eq!(editor.selection_anchor(), None);
+        assert_eq!(editor.selection(), None);
         assert_eq!(editor.cursor_position(), (0, 3));
+    }
+
+    #[test]
+    fn move_cursor_to_clears_a_leftover_selection() {
+        let mut editor = plain_editor("hello world");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            (0, 5),
+        );
+        assert!(editor.selection().is_some());
+        editor.move_cursor_to(0, 2);
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.cursor_position(), (0, 2));
     }
 
     #[test]

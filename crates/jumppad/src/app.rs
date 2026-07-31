@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use editor_core::{EditorFactory, EditorMessage, Tab};
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
-use iced::advanced::widget::{operate, operation};
+use iced::advanced::widget::{Id, operate, operation};
 use iced::keyboard::key;
 use iced::widget::{
     button, center, column, container, keyed_column, mouse_area, row, scrollable, stack, text,
@@ -38,6 +38,16 @@ const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
 /// frame re-caches the outgoing content; a couple of frames later, the new
 /// content has actually presented.
 const SHADOW_REFRESH_FRAMES: u8 = 3;
+
+/// Hands keyboard focus to the editor widget, targeted by its stable id.
+/// Not `focusable::focus_next`: that op skips the editor whenever some
+/// widget is still focused when it runs, which is exactly the state after a
+/// keyboard-driven tab switch - the outgoing editor never saw the unfocusing
+/// click a mouse switch produces, leaving the incoming editor unfocused
+/// (typing dropped, caret and selection invisible).
+fn focus_editor() -> Task<Message> {
+    operate(operation::focusable::focus(Id::new(editor_core::EDITOR_WIDGET_ID)))
+}
 
 pub struct JumpPadApp {
     tabs: Vec<Tab>,
@@ -239,7 +249,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, operate(operation::focusable::focus_next())]),
+                Task::batch([task, window_task, focus_editor()]),
             );
         };
 
@@ -302,7 +312,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, operate(operation::focusable::focus_next())]),
+                Task::batch([task, window_task, focus_editor()]),
             );
         }
 
@@ -319,7 +329,7 @@ impl JumpPadApp {
         // `switch_active` only focuses when the index actually changes, so
         // a restored active index of 0 needs an explicit focus here too.
         let focus_task = if desired_active == 0 {
-            operate(operation::focusable::focus_next())
+            focus_editor()
         } else {
             Task::none()
         };
@@ -345,7 +355,7 @@ impl JumpPadApp {
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         self.arm_shadow_refresh();
         self.sync_session_metadata();
-        operate(operation::focusable::focus_next())
+        focus_editor()
     }
 
     /// Closes a clean tab immediately; a dirty tab gets an unsaved-changes
@@ -397,7 +407,7 @@ impl JumpPadApp {
         }
         if let Some(previous) = self.tabs.get_mut(self.active) {
             previous.last_cursor = previous.editor.cursor_position();
-            previous.last_selection = previous.editor.selection_anchor();
+            previous.last_selection = previous.editor.selection();
             self.previous_active_id = Some(previous.id);
         }
         self.active = index;
@@ -405,13 +415,13 @@ impl JumpPadApp {
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
             match tab.last_selection {
-                Some(anchor) => tab.editor.select_range(anchor, tab.last_cursor),
+                Some(selection) => tab.editor.restore_selection(selection, tab.last_cursor),
                 None => tab.editor.move_cursor_to(line, column),
             }
         }
         self.sync_session_metadata();
         self.arm_shadow_refresh();
-        operate(operation::focusable::focus_next())
+        focus_editor()
     }
 
     /// Moves the active tab by `delta` positions, wrapping around at either
@@ -704,7 +714,7 @@ impl JumpPadApp {
                 // prompt next; otherwise the modal's gone, so hand
                 // keyboard focus back to the editor.
                 let next_task = if self.close_queue.is_empty() {
-                    operate(operation::focusable::focus_next())
+                    focus_editor()
                 } else {
                     let next_id = self.close_queue.remove(0);
                     match self.tabs.iter().position(|tab| tab.id == next_id) {
@@ -1455,7 +1465,7 @@ async fn save_to(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use editor_core::TextEditorWidget;
+    use editor_core::{SavedSelection, SelectionKind, TextEditorWidget};
     use iced::keyboard::key::Named;
     use iced::keyboard::{Key, Modifiers};
 
@@ -1478,10 +1488,10 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
-        fn selection_anchor(&self) -> Option<(usize, usize)> {
+        fn selection(&self) -> Option<SavedSelection> {
             None
         }
-        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
+        fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1512,10 +1522,10 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
-        fn selection_anchor(&self) -> Option<(usize, usize)> {
+        fn selection(&self) -> Option<SavedSelection> {
             None
         }
-        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
+        fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
         fn has_pending_highlighting(&self) -> bool {
             false
         }
@@ -1526,7 +1536,7 @@ mod tests {
     enum Restore {
         Cursor(usize, usize),
         Selection {
-            anchor: (usize, usize),
+            selection: SavedSelection,
             cursor: (usize, usize),
         },
     }
@@ -1534,7 +1544,7 @@ mod tests {
     /// Reports a canned cursor/selection and records what the app restores,
     /// for asserting on `switch_active`'s save/restore orchestration.
     struct SelectionSpyEditor {
-        anchor: Option<(usize, usize)>,
+        selection: Option<SavedSelection>,
         cursor: (usize, usize),
         restored: std::rc::Rc<std::cell::RefCell<Vec<Restore>>>,
     }
@@ -1557,11 +1567,11 @@ mod tests {
         fn move_cursor_to(&mut self, line: usize, column: usize) {
             self.restored.borrow_mut().push(Restore::Cursor(line, column));
         }
-        fn selection_anchor(&self) -> Option<(usize, usize)> {
-            self.anchor
+        fn selection(&self) -> Option<SavedSelection> {
+            self.selection
         }
-        fn select_range(&mut self, anchor: (usize, usize), cursor: (usize, usize)) {
-            self.restored.borrow_mut().push(Restore::Selection { anchor, cursor });
+        fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize)) {
+            self.restored.borrow_mut().push(Restore::Selection { selection, cursor });
         }
         fn has_pending_highlighting(&self) -> bool {
             false
@@ -1598,6 +1608,101 @@ mod tests {
         }
     }
 
+    /// End-to-end scenario against real `IcedTextEditor`s (not stubs): two
+    /// tabs make selections in turn, and each keeps its own through switches.
+    #[test]
+    fn each_tab_keeps_its_own_selection_through_switches() {
+        use iced::widget::text_editor::{Action, Motion};
+
+        let factory: EditorFactory = Box::new(|text, _extension| {
+            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            Box::new(iced_text_editor::IcedTextEditor::new(
+                text,
+                &registry,
+                None,
+                Arc::new(HashMap::new()),
+                1.0,
+            ))
+        });
+        let mut app = test_app(0);
+        app.tabs = vec![
+            Tab::restored(0, None, "alpha beta", false, &factory),
+            Tab::restored(1, None, "gamma delta", false, &factory),
+        ];
+        app.next_id = 2;
+
+        // Tab 0: a double-click-style word selection (Click then SelectWord,
+        // the sequence the widget publishes). Regression case: a word
+        // selection's anchor sits at the cursor, not across the range.
+        let _ = app.update(Message::Editor(
+            0,
+            EditorMessage::Action(Action::Click(iced::Point::new(10.0, 4.0))),
+        ));
+        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::SelectWord)));
+        let word = app.tabs[0].editor.selection();
+        assert!(
+            matches!(word, Some(SavedSelection { kind: SelectionKind::Word, .. })),
+            "expected a word selection, got {word:?}"
+        );
+
+        // Tab 1: a keyboard range selection over "ga".
+        let _ = app.update(Message::SelectTab(1));
+        for _ in 0..2 {
+            let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Select(Motion::Right))));
+        }
+
+        // Both tabs hold their own selection, verified across two round trips.
+        let _ = app.update(Message::SelectTab(0));
+        assert_eq!(app.tabs[0].editor.selection(), word);
+
+        let _ = app.update(Message::SelectTab(1));
+        assert_eq!(
+            app.tabs[1].editor.selection(),
+            Some(SavedSelection { anchor: (0, 0), kind: SelectionKind::Range })
+        );
+        assert_eq!(app.tabs[1].editor.cursor_position(), (0, 2));
+    }
+
+    /// Same scenario as above, but with the message sequence a real mouse
+    /// selection produces (Click then Drags), exercising pixel hit-testing.
+    #[test]
+    fn mouse_made_selections_stay_independent_per_tab() {
+        use iced::Point;
+        use iced::widget::text_editor::Action;
+
+        let factory: EditorFactory = Box::new(|text, _extension| {
+            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            Box::new(iced_text_editor::IcedTextEditor::new(
+                text,
+                &registry,
+                None,
+                Arc::new(HashMap::new()),
+                1.0,
+            ))
+        });
+        let mut app = test_app(0);
+        app.tabs = vec![
+            Tab::restored(0, None, "alpha beta", false, &factory),
+            Tab::restored(1, None, "gamma delta", false, &factory),
+        ];
+        app.next_id = 2;
+
+        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::Click(Point::ORIGIN))));
+        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0)))));
+        let selection_0 = app.tabs[0].editor.selection();
+        assert!(selection_0.is_some());
+        let cursor_0 = app.tabs[0].editor.cursor_position();
+
+        let _ = app.update(Message::SelectTab(1));
+        let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Click(Point::ORIGIN))));
+        let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0)))));
+        assert!(app.tabs[1].editor.selection().is_some());
+
+        let _ = app.update(Message::SelectTab(0));
+        assert_eq!(app.tabs[0].editor.selection(), selection_0);
+        assert_eq!(app.tabs[0].editor.cursor_position(), cursor_0);
+    }
+
     #[test]
     fn shift_click_reaches_the_editor_as_a_selection_extending_drag() {
         use iced::widget::text_editor;
@@ -1626,20 +1731,21 @@ mod tests {
     fn switching_tabs_saves_and_restores_the_selection() {
         let mut app = test_app(2);
         let restored = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let saved = SavedSelection { anchor: (0, 2), kind: SelectionKind::Range };
         app.tabs[0].editor = Box::new(SelectionSpyEditor {
-            anchor: Some((0, 2)),
+            selection: Some(saved),
             cursor: (1, 4),
             restored: restored.clone(),
         });
 
         let _ = app.switch_active(1);
-        assert_eq!(app.tabs[0].last_selection, Some((0, 2)));
+        assert_eq!(app.tabs[0].last_selection, Some(saved));
         assert_eq!(app.tabs[0].last_cursor, (1, 4));
 
         let _ = app.switch_active(0);
         assert_eq!(
             restored.borrow().as_slice(),
-            [Restore::Selection { anchor: (0, 2), cursor: (1, 4) }]
+            [Restore::Selection { selection: saved, cursor: (1, 4) }]
         );
     }
 
@@ -1648,7 +1754,7 @@ mod tests {
         let mut app = test_app(2);
         let restored = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         app.tabs[0].editor = Box::new(SelectionSpyEditor {
-            anchor: None,
+            selection: None,
             cursor: (3, 1),
             restored: restored.clone(),
         });

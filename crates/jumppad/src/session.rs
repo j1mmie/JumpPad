@@ -187,10 +187,15 @@ mod tests {
             (0, 0)
         }
         fn move_cursor_to(&mut self, _line: usize, _column: usize) {}
-        fn selection_anchor(&self) -> Option<(usize, usize)> {
+        fn selection(&self) -> Option<editor_core::SavedSelection> {
             None
         }
-        fn select_range(&mut self, _anchor: (usize, usize), _cursor: (usize, usize)) {}
+        fn restore_selection(
+            &mut self,
+            _selection: editor_core::SavedSelection,
+            _cursor: (usize, usize),
+        ) {
+        }
         fn has_pending_highlighting(&self) -> bool {
             false
         }
