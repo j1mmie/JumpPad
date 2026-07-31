@@ -3,7 +3,7 @@
 //!
 //! Forked because `Content` kept its `iced_graphics::text::Editor` behind a
 //! private field, so nothing outside the widget could read the scroll offset
-//! - see AGENTS.md. The same field is what blocks background highlighting for
+//! (see AGENTS.md). The same field is what blocks background highlighting for
 //! find matches and multiple cursors, so those land here too.
 use iced_core::alignment;
 use iced_core::clipboard::{self, Clipboard};
@@ -26,6 +26,9 @@ use iced_core::{
     Pixels, Point, Rectangle, Shell, Size, SmolStr, Theme, Vector,
 };
 
+use crate::scrollbar;
+use iced::advanced::graphics;
+
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::fmt;
@@ -36,6 +39,16 @@ use std::sync::Arc;
 pub use text::editor::{
     Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
 };
+
+/// The scrollbar's geometry for wherever the document currently sits, or
+/// `None` if it has no line height to measure against yet.
+fn scrollbar_layout(
+    editor: &graphics::text::Editor,
+    text_bounds: Rectangle,
+) -> Option<scrollbar::Layout> {
+    let metrics = scrollbar::metrics(editor.buffer(), text_bounds.size())?;
+    Some(scrollbar::Layout::new(text_bounds, metrics))
+}
 
 /// Creates a new [`TextEditor`]. Upstream this lives in `iced_widget::helpers`.
 pub fn text_editor<'a, Message, Theme, Renderer>(
@@ -74,6 +87,7 @@ pub struct TextEditor<
     padding: Padding,
     wrapping: Wrapping,
     class: Theme::Class<'a>,
+    #[allow(clippy::type_complexity)]
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
     on_edit: Option<Box<dyn Fn(Action) -> Message + 'a>>,
     highlighter_settings: Highlighter::Settings,
@@ -461,6 +475,7 @@ pub struct State<Highlighter: text::Highlighter> {
     last_click: Option<mouse::Click>,
     drag_click: Option<mouse::click::Kind>,
     partial_scroll: f32,
+    scrollbar: scrollbar::State,
     last_theme: RefCell<Option<String>>,
     highlighter: RefCell<Highlighter>,
     highlighter_settings: Highlighter::Settings,
@@ -518,12 +533,38 @@ impl<Highlighter: text::Highlighter> operation::Focusable
     }
 }
 
+impl<Highlighter, Message, Theme, Renderer>
+    TextEditor<'_, Highlighter, Message, Theme, Renderer>
+where
+    Highlighter: text::Highlighter,
+    Theme: Catalog,
+    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
+{
+    /// The scrollbar's geometry against the widget's laid-out bounds.
+    fn scrollbar(&self, layout: Layout<'_>) -> Option<scrollbar::Layout> {
+        let text_bounds = layout.bounds().shrink(self.padding);
+        scrollbar_layout(&self.content.0.borrow().editor, text_bounds)
+    }
+
+    fn is_over_thumb(&self, layout: Layout<'_>, cursor: mouse::Cursor) -> bool {
+        let Some(position) = cursor.position() else {
+            return false;
+        };
+        self.scrollbar(layout)
+            .and_then(|scrollbar| scrollbar.thumb)
+            .is_some_and(|thumb| thumb.contains(position))
+    }
+}
+
+// Pinned to the concrete graphics editor, rather than generic over
+// `text::Renderer` the way upstream is: the scrollbar reads its position off
+// the cosmic-text buffer, which only that editor exposes.
 impl<Highlighter, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
     for TextEditor<'_, Highlighter, Message, Theme, Renderer>
 where
     Highlighter: text::Highlighter,
     Theme: Catalog,
-    Renderer: text::Renderer,
+    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<State<Highlighter>>()
@@ -536,6 +577,7 @@ where
             last_click: None,
             drag_click: None,
             partial_scroll: 0.0,
+            scrollbar: scrollbar::State::default(),
             last_theme: RefCell::default(),
             highlighter: RefCell::new(Highlighter::new(
                 &self.highlighter_settings,
@@ -659,6 +701,84 @@ where
                         focus.now
                             + Duration::from_millis(millis_until_redraw as u64),
                     );
+                }
+            }
+            _ => {}
+        }
+
+        // The scrollbar gets first look at the pointer, so a press on the
+        // thumb never also lands as a click in the document.
+        let now = Instant::now();
+        let text_bounds = layout.bounds().shrink(self.padding);
+        let scrollbar = self.scrollbar(layout);
+
+        if is_redraw {
+            if let Some(scrollbar) = scrollbar {
+                // Catches the wheel and cursor-driven auto-scroll alike -
+                // the latter happens inside cosmic-text and is invisible
+                // from anywhere else.
+                state.scrollbar.note_scroll(scrollbar.position(), now);
+            }
+            if let Some(at) = state.scrollbar.next_redraw(now) {
+                shell.request_redraw_at(at);
+            }
+        }
+
+        match event {
+            Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)) => {
+                let grabbed = scrollbar.zip(cursor.position()).is_some_and(
+                    |(scrollbar, position)| {
+                        state.scrollbar.press(position, scrollbar, now)
+                    },
+                );
+
+                if grabbed {
+                    shell.capture_event();
+                    shell.request_redraw();
+                    return;
+                }
+            }
+            Event::Mouse(mouse::Event::CursorMoved { .. }) => {
+                if state.scrollbar.is_dragging() {
+                    let lines =
+                        scrollbar.zip(cursor.position()).and_then(
+                            |(scrollbar, position)| {
+                                state
+                                    .scrollbar
+                                    .drag_to(position, scrollbar, now)
+                            },
+                        );
+
+                    if let Some(lines) = lines {
+                        shell.publish(on_edit(Action::Scroll { lines }));
+                    }
+                    shell.capture_event();
+                    shell.request_redraw();
+                    return;
+                }
+
+                let hovered = cursor.position().is_some_and(|position| {
+                    scrollbar::Layout::is_in_reveal_strip(
+                        text_bounds,
+                        position,
+                    )
+                });
+
+                if state.scrollbar.set_hovered(hovered, now) {
+                    shell.request_redraw();
+                }
+            }
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                if state.scrollbar.is_dragging() =>
+            {
+                state.scrollbar.release(now);
+                shell.capture_event();
+                shell.request_redraw();
+                return;
+            }
+            Event::Mouse(mouse::Event::CursorLeft) => {
+                if state.scrollbar.set_hovered(false, now) {
+                    shell.request_redraw();
                 }
             }
             _ => {}
@@ -996,17 +1116,52 @@ where
                 Selection::Caret(_) => {}
             }
         }
+
+        // Last, so the thumb floats over the text instead of under it.
+        let opacity = state.scrollbar.opacity(Instant::now());
+        if opacity > 0.0 {
+            if let Some(thumb) =
+                scrollbar_layout(&internal.editor, text_bounds).and_then(|layout| {
+                    layout.thumb.map(|thumb| (thumb, layout.radius()))
+                })
+            {
+                let (bounds, radius) = thumb;
+                renderer.fill_quad(
+                    renderer::Quad {
+                        bounds,
+                        border: Border {
+                            color: style
+                                .scrollbar_thumb_border
+                                .scale_alpha(opacity),
+                            width: 1.0,
+                            radius: radius.into(),
+                        },
+                        ..renderer::Quad::default()
+                    },
+                    Background::Color(
+                        style.scrollbar_thumb.scale_alpha(opacity),
+                    ),
+                );
+            }
+        }
     }
 
     fn mouse_interaction(
         &self,
-        _tree: &widget::Tree,
+        tree: &widget::Tree,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
         _renderer: &Renderer,
     ) -> mouse::Interaction {
         let is_disabled = self.on_edit.is_none();
+        let state = tree.state.downcast_ref::<State<Highlighter>>();
+
+        // An I-beam over the thumb would suggest the text underneath is what
+        // the click lands on, and it isn't.
+        if state.scrollbar.is_dragging() || self.is_over_thumb(layout, cursor) {
+            return mouse::Interaction::Idle;
+        }
 
         if cursor.is_over(layout.bounds()) {
             if is_disabled {
@@ -1039,7 +1194,7 @@ where
     Highlighter: text::Highlighter,
     Message: 'a,
     Theme: Catalog + 'a,
-    Renderer: text::Renderer,
+    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     fn from(
         text_editor: TextEditor<'a, Highlighter, Message, Theme, Renderer>,
@@ -1367,6 +1522,11 @@ pub struct Style {
     pub value: Color,
     /// The [`Color`] of the selection of the text input.
     pub selection: Color,
+    /// The fill of the auto-hiding scrollbar's thumb, at full opacity.
+    pub scrollbar_thumb: Color,
+    /// The thumb's outline. Carries the visible edge on dark themes, where a
+    /// darkening wash has almost nothing to darken.
+    pub scrollbar_thumb_border: Color,
 }
 
 /// The theme catalog of a [`TextEditor`].
@@ -1410,6 +1570,8 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         placeholder: palette.secondary.base.color,
         value: palette.background.base.text,
         selection: palette.primary.weak.color,
+        scrollbar_thumb: palette.background.strong.color,
+        scrollbar_thumb_border: palette.background.strong.color,
     };
 
     match status {

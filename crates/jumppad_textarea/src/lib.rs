@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use editor_core::{EditorMessage, FindMatch, SavedSelection, SelectionKind, TextEditorWidget};
+use editor_core::{
+    EditorMessage, FindMatch, SavedSelection, SelectionKind, TextEditorWidget, darkening_wash,
+};
 use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
@@ -615,6 +617,12 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
 
 /// iced's default `text_editor` style draws a border that changes color on
 /// hover/focus - dropped here so there's no color-change effect to notice.
+/// How far toward black the scrollbar thumb sits - the find palette's wash,
+/// so the two floating surfaces read as the same material. Paired with the
+/// palette's border color, which is what keeps the thumb visible on themes
+/// too dark for a wash to darken.
+const SCROLLBAR_THUMB_DARKEN: f32 = 0.14;
+
 /// Also drops its background on a transparent window and scales the base text
 /// color by `foreground_alpha` (both plain parameters, for testability -
 /// syntax-highlighted text instead goes through `color_for`).
@@ -641,6 +649,8 @@ fn editor_style(
         },
         background,
         value,
+        scrollbar_thumb: darkening_wash(theme, SCROLLBAR_THUMB_DARKEN),
+        scrollbar_thumb_border: theme.extended_palette().background.strong.color,
         ..default
     }
 }
