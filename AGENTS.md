@@ -34,7 +34,7 @@ Comments stay short and sit right next to what they describe:
 crates/
   jumppad/           the application shell: iced::Program, tabs, menus, file I/O, theming
   editor_core/       the abstraction boundary between the shell and the actual text widget
-  iced_text_editor/  the one TextEditorWidget impl today, wrapping iced::widget::text_editor
+  jumppad_textarea/  the one TextEditorWidget impl today; owns a fork of iced's text_editor
   syntax_registry/   loads/caches/refcounts tree-sitter WASM grammars; no iced dependency
   jumppad_config/    config.toml loading + defaults; no iced dependency
 syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
@@ -42,11 +42,16 @@ syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
 
 Dependency direction is one-way: `jumppad` depends on everything;
 `editor_core`, `syntax_registry`, and `jumppad_config` depend on nothing
-inside this workspace. `iced_text_editor` depends on `editor_core` (to
+inside this workspace. `jumppad_textarea` depends on `editor_core` (to
 implement its trait) and `syntax_registry` (to drive highlighting), but
 not on `jumppad`. This is deliberate - see `editor_core::widget::TextEditorWidget`'s
-doc comment: a future non-iced or non-text_editor-based editor widget
-should be a new crate implementing that trait, not a rewrite of `jumppad`.
+doc comment: a future non-iced editor widget should be a new crate
+implementing that trait, not a rewrite of `jumppad`.
+
+`editor_core` also holds the two pieces of theming both sides need:
+`darkening_wash` and `FLOATING_SURFACE_DARKEN` (see the transparent-windows
+section). It's the only crate `jumppad` and `jumppad_textarea` share, so a
+color both of them paint with lives there rather than being copied.
 
 ## The `TextEditorWidget` boundary
 
@@ -69,6 +74,86 @@ application code every frame - it only reacts to messages. `JumpPadApp`'s
 while some tab has a grammar load in flight, and stops it once nothing is
 pending, so there's no permanent background timer once everything's
 settled.
+
+## The text-area fork (`jumppad_textarea`)
+
+`crates/jumppad_textarea/src/text_editor.rs` is a fork of `iced_widget`
+0.14.2's `text_editor`, and it is **JumpPad's widget now** - not a vendored
+copy tracking upstream. Edit it freely; there is no re-sync to protect.
+
+It was forked to reach one private field. `text_editor::Content` is a
+newtype over `RefCell<Internal<R>>` whose `editor` field is private, so
+application code cannot get at the `iced_graphics::text::Editor` - and with
+it the cosmic-text `Buffer` - underneath. Everything below that field is
+already public (`Editor::buffer()`, `Buffer::scroll()`, `Buffer::lines`),
+which is why owning `Content` was the whole unlock. It's the same field
+that blocks background highlighting for find matches and multiple cursors
+(see the find-palette section), so those belong here too.
+
+Porting notes, in case any of it looks accidental:
+
+- Imports are `iced_core::`, where upstream says `crate::core::` - the
+  crate takes `iced_core` as a direct dependency, and Cargo unifies it with
+  the copy inside `iced`, so the types are the same ones the app sees.
+- The `Widget` impl is pinned to
+  `Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>`
+  rather than generic over `text::Renderer`, since the scrollbar needs the
+  concrete editor. That bound has to be repeated on the `Element`
+  conversion.
+- Upstream's `highlight()` (the `iced_highlighter` convenience) is gone;
+  JumpPad drives `highlight_with` with its own tree-sitter highlighter.
+  `text_editor()`, upstream's constructor from `iced_widget::helpers`, moved
+  in.
+- One let-chain was unwound - the workspace is edition 2021, `iced_widget`
+  is 2024.
+
+### The scrollbar
+
+An overlay scrollbar: a rounded thumb on an invisible track, at the right
+edge of the text area. Hidden until the pointer enters the right 100px or
+the document scrolls, then held for 900ms and faded out. Drag the thumb to
+scroll. Geometry and fade math are pure functions in `scrollbar.rs`, taking
+`now: Instant` so they test without a window (same convention as
+`history.rs`).
+
+**Position is measured in logical lines, not wrapped visual rows.** That is
+deliberate, and the obvious "fix" is a regression: counting rows means
+summing `BufferLine::layout_opt()` over the document every frame, and
+cosmic-text shapes lazily, so an off-screen line that wraps to three rows
+reports one until it scrolls into view. The total - and the thumb's height
+with it - would twitch as you scroll. Logical lines cost O(1), are exact for
+anything that doesn't wrap, and are stable everywhere.
+
+**Gotcha - `State::touch` reads the current opacity, so it has to run before
+whatever flag is changing.** `hovered` and a live `drag` both freeze the
+fade, which means `active_at` is deliberately stale while either holds;
+touching *after* flipping the flag reads through the new one and sees a
+fade that never actually ran. Two bugs came out of getting this wrong: the
+thumb invisible for the whole of a drag, and re-entering a fade-out
+snapping to full instead of resuming.
+
+**Gotcha - the fade-in origin is its own field.** `revealed_at` is separate
+from `active_at` because activity *repeats* - a drag or a spun wheel touches
+the state every few milliseconds. Folding them together restarts the ramp on
+every event, so the thumb stays pinned at invisible for exactly as long as
+the user keeps going. Re-touching back-dates `revealed_at` by the opacity
+already showing, so catching it mid-fade resumes rather than restarting.
+
+**Redraws are scheduled, not subscribed.** `State::next_redraw` returns the
+next instant a frame is actually needed - the following frame while a ramp
+is running, the end of the hold while merely waiting it out, and `None` once
+things settle - and `update` feeds it to `shell.request_redraw_at`, exactly
+as the caret blink already does. No `subscription()` entry, and idle CPU
+stays at zero with the thumb hidden *or* held open (measured, not assumed).
+
+Colors come from `text_editor::Style`'s two added fields, filled by
+`scrollbar_thumb_style` in `lib.rs`: the find palette's `darkening_wash`
+plus its `background.strong` border, so the two surfaces that float over
+document text read as one material. The wash is what keeps a transparent
+window honest; the border is what keeps the thumb visible on near-black
+themes, where a wash has almost nothing left to darken. A test in `app.rs`
+asserts the two stay equal across every theme, since they're defined in
+different crates.
 
 ## Syntax highlighting (`syntax_registry`)
 
@@ -537,7 +622,7 @@ it inserts any non-control character and captures the event. So Cmd+G
 types a "g" into the query on its way to being a shortcut. `Message::
 FindQueryChanged` discards a *one-character* growth arriving while
 `command()` is held; the length test is what keeps a legitimate Cmd+V
-paste working. This is the same quirk `iced_text_editor::key_binding`
+paste working. This is the same quirk `jumppad_textarea::key_binding`
 already works around for the document. Linux is unaffected - Ctrl
 produces a control character, which the insert branch filters out - so
 this cannot be reproduced under the Xvfb harness.
@@ -582,22 +667,24 @@ one; this was investigated in full, so don't re-derive it:
   `editor.selection()` returning `Vec<Rectangle>`, i.e. entirely outside
   the attrs system, and only for the one active selection.
 - Computing those rectangles for arbitrary ranges needs the cosmic-text
-  `Buffer`. `iced_graphics::text::Editor::buffer()` is public, but
-  `text_editor::Content` is a newtype over a private
-  `RefCell<Internal<R>>` whose `editor` field is private, so there is no
-  path to it from application code.
-- Faking it with an overlay computed from monospace metrics founders on
-  the scroll offset: the app sees `Action::Scroll` from the wheel, but
-  cursor-driven auto-scroll (`shape_until_cursor`) is internal, so any
-  tracked offset drifts.
+  `Buffer`. `iced_graphics::text::Editor::buffer()` is public; reaching it
+  from `Content` is what the fork now makes possible (see the text-area
+  fork section) - before that, `Content`'s private `editor` field left no
+  path to it at all.
+- Faking it with an overlay in the *app* still founders on the scroll
+  offset: the app sees `Action::Scroll` from the wheel, but cursor-driven
+  auto-scroll (`shape_until_cursor`) is internal, so any offset tracked
+  outside the widget drifts.
 - 0.14.0 is the latest published iced, so there is no version to upgrade
   into.
 
-Getting real background highlighting would mean patching iced *and*
-cosmic-text, or replacing `text_editor` with a custom widget - the
-`TextEditorWidget` boundary exists precisely so the latter is possible.
-The current match does get a genuine selection background whenever the
-editor holds focus (after Escape, or during a Cmd+G find-again).
+So the remaining work is inside `jumppad_textarea`'s `text_editor.rs`,
+drawing the quads in `draw` the way the scrollbar thumb already does -
+not in the app shell, and no longer a matter of patching iced. It is still
+real work: the match rectangles have to be derived from the buffer's layout
+runs, which is more than reading a scroll offset. The current match does
+get a genuine selection background whenever the editor holds focus (after
+Escape, or during a Cmd+G find-again).
 
 `FindState::origin` is the cursor position captured when the palette
 opened, and live search anchors there rather than at the live cursor -
@@ -642,7 +729,7 @@ of it. Two consequences that are easy to trip over:
   shows up with transparency on.
 
 So the rule: **never paint a quad that merely reproduces the window
-background.** The editor (`editor_style`, `iced_text_editor`) and the
+background.** The editor (`editor_style`, `jumppad_textarea`) and the
 active tab (`tab_frame_style`) both deliberately paint *nothing* when
 translucent - iced's `text_editor` and window backgrounds are both
 `palette.background.base.color`, so matching them seamlessly means adding

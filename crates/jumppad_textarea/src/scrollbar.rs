@@ -66,8 +66,14 @@ pub struct State {
     /// Whether the pointer is inside the reveal strip. Holds the thumb open
     /// for as long as it's true, with no timer running.
     hovered: bool,
-    /// When the thumb last had a reason to be visible. The fade is measured
-    /// from here once `hovered` goes false.
+    /// When the fade-in started. Separate from `active_at` because activity
+    /// repeats - a drag or a spun wheel touches the state every few
+    /// milliseconds - and folding the two together would restart the ramp on
+    /// every event, leaving the thumb pinned at invisible for as long as the
+    /// user kept going.
+    revealed_at: Option<Instant>,
+    /// When the thumb last had a reason to be visible. The hold, and then the
+    /// fade-out, are measured from here.
     active_at: Option<Instant>,
     drag: Option<Drag>,
     /// Scroll position at the last frame, to notice the cursor scrolling the
@@ -92,7 +98,19 @@ impl State {
     }
 
     /// Marks the thumb as worth showing - starting the hold-then-fade clock.
+    ///
+    /// Reads the current opacity, so it has to run *before* whatever flag is
+    /// changing: `hovered` and `drag` both freeze the fade, which leaves
+    /// `active_at` deliberately stale while they hold, and reading through the
+    /// new flag would see a fade that never actually ran.
     pub fn touch(&mut self, now: Instant) {
+        let shown = self.opacity(now);
+        if shown < 1.0 {
+            // Back-date the ramp so it picks up from however visible the thumb
+            // already is: catching it mid-fade-out continues upward from there
+            // rather than restarting at nothing or snapping to full.
+            self.revealed_at = now.checked_sub(FADE_IN.mul_f32(shown)).or(Some(now));
+        }
         self.active_at = Some(now);
     }
 
@@ -102,10 +120,10 @@ impl State {
         if self.hovered == hovered {
             return false;
         }
-        self.hovered = hovered;
         // Both directions refresh the clock: entering so a fade already under
-        // way restarts, leaving so the hold is measured from the exit.
+        // way resumes, leaving so the hold is measured from the exit.
         self.touch(now);
+        self.hovered = hovered;
         true
     }
 
@@ -123,32 +141,35 @@ impl State {
 
     /// How visible the thumb should be right now, 0.0 (hidden) to 1.0.
     pub fn opacity(&self, now: Instant) -> f32 {
-        let Some(active_at) = self.active_at else {
+        let (Some(revealed_at), Some(active_at)) = (self.revealed_at, self.active_at) else {
             return 0.0;
         };
-        let elapsed = now.saturating_duration_since(active_at);
+        let faded_in =
+            ratio(now.saturating_duration_since(revealed_at), FADE_IN).min(1.0);
 
         if self.hovered || self.drag.is_some() {
-            return ratio(elapsed, FADE_IN).min(1.0);
+            return faded_in;
         }
-        let Some(fading) = elapsed.checked_sub(HOLD) else {
-            return 1.0;
+        let Some(fading) = now.saturating_duration_since(active_at).checked_sub(HOLD) else {
+            return faded_in;
         };
-        1.0 - ratio(fading, FADE_OUT).min(1.0)
+        (faded_in - ratio(fading, FADE_OUT)).max(0.0)
     }
 
     /// When the next frame is needed, or `None` if the thumb has settled and
     /// nothing needs to be drawn until the user does something. Keeping this
     /// exact is what lets the editor go back to zero CPU once it fades out.
     pub fn next_redraw(&self, now: Instant) -> Option<Instant> {
-        let active_at = self.active_at?;
-        let elapsed = now.saturating_duration_since(active_at);
-
-        if self.hovered || self.drag.is_some() {
-            // Ramping up: next frame. Settled at full: nothing to do.
-            return (elapsed < FADE_IN).then_some(now);
+        let (Some(revealed_at), Some(active_at)) = (self.revealed_at, self.active_at) else {
+            return None;
+        };
+        if now.saturating_duration_since(revealed_at) < FADE_IN {
+            return Some(now);
         }
-        match elapsed.checked_sub(HOLD) {
+        if self.hovered || self.drag.is_some() {
+            return None;
+        }
+        match now.saturating_duration_since(active_at).checked_sub(HOLD) {
             // Still holding - sleep until the fade is due rather than spinning.
             None => Some(active_at + HOLD),
             Some(fading) if fading < FADE_OUT => Some(now),
@@ -164,17 +185,18 @@ impl State {
         if !thumb.contains(position) {
             return false;
         }
+        self.touch(now);
         self.drag = Some(Drag {
             grab_offset: position.y - thumb.y,
             partial_lines: 0.0,
         });
-        self.touch(now);
         true
     }
 
     pub fn release(&mut self, now: Instant) {
-        if self.drag.take().is_some() {
+        if self.drag.is_some() {
             self.touch(now);
+            self.drag = None;
         }
     }
 
@@ -182,9 +204,10 @@ impl State {
     /// the fraction that didn't fit. `None` when nothing is being dragged, or
     /// when the movement so far hasn't added up to a line yet.
     pub fn drag_to(&mut self, position: Point, layout: Layout, now: Instant) -> Option<i32> {
+        // Only the hold clock: the ramp is already running from the press.
+        self.active_at = Some(now);
         let drag = self.drag.as_mut()?;
         let thumb = layout.thumb?;
-        self.active_at = Some(now);
 
         // The thumb's travel is shorter than the track by its own height.
         let travel = layout.track.height - thumb.height;
@@ -528,6 +551,55 @@ mod tests {
             moved += state.drag_to(to, layout, now).unwrap_or(0);
         }
         assert!(moved > 0);
+    }
+
+    #[test]
+    fn repeated_activity_does_not_restart_the_fade_in() {
+        let start = Instant::now();
+        let layout = scrollable();
+        let thumb = layout.thumb.unwrap();
+        let mut state = State::default();
+
+        // A drag touches the state every few milliseconds. Once faded in, it
+        // has to stay in - the thumb was invisible for the whole drag when
+        // each event reset the ramp.
+        state.press(Point::new(thumb.center_x(), thumb.y), layout, start);
+        let mut now = start + FADE_IN;
+        assert_eq!(state.opacity(now), 1.0);
+
+        for _ in 0..20 {
+            now += Duration::from_millis(8);
+            state.drag_to(Point::new(thumb.center_x(), thumb.y + 1.0), layout, now);
+            assert_eq!(state.opacity(now), 1.0);
+        }
+
+        // Same for a spun wheel, which reveals it without any hover at all.
+        let mut state = State::default();
+        state.note_scroll(0.0, start);
+        let mut now = start;
+        for line in 1..=20u8 {
+            now += Duration::from_millis(8);
+            state.note_scroll(f32::from(line), now);
+        }
+        assert_eq!(state.opacity(now), 1.0);
+    }
+
+    #[test]
+    fn re_entering_mid_fade_resumes_rather_than_snapping() {
+        let start = Instant::now();
+        let mut state = State::default();
+        state.set_hovered(true, start);
+        state.set_hovered(false, start + FADE_IN);
+
+        // Catch it half faded out, and it must keep climbing from ~0.5 rather
+        // than jumping straight to full.
+        let half_gone = start + FADE_IN + HOLD + FADE_OUT / 2;
+        assert!((state.opacity(half_gone) - 0.5).abs() < 0.01);
+
+        state.set_hovered(true, half_gone);
+        assert!((state.opacity(half_gone) - 0.5).abs() < 0.01);
+        assert!((state.opacity(half_gone + FADE_IN / 4) - 0.75).abs() < 0.02);
+        assert_eq!(state.opacity(half_gone + FADE_IN / 2), 1.0);
     }
 
     #[test]

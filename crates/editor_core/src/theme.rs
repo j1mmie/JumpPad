@@ -6,6 +6,13 @@ use iced::{Color, Theme};
 /// worse trade than a shallower one.
 pub const WASH_ALPHA_CEILING: f32 = 0.8;
 
+/// How far toward black a surface that floats over document text sits - the
+/// find palette and the scrollbar thumb. Deeper than a tab's shading because
+/// it has to read as its own surface against the text, but still a wash, so a
+/// transparent window stays transparent through it. Shared so the two keep
+/// reading as the same material rather than drifting apart.
+pub const FLOATING_SURFACE_DARKEN: f32 = 0.14;
+
 /// A translucent black overlay that darkens whatever it covers by roughly
 /// `amount`, rather than a pre-darkened copy of the background - on a
 /// transparent window a full-alpha copy stacks with the window background and

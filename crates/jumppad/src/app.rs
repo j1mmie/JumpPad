@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use editor_core::{
-    EditorFactory, EditorMessage, SavedSelection, SelectionKind, Tab, darkening_wash,
+    EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN, SavedSelection, SelectionKind, Tab,
+    darkening_wash,
 };
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
@@ -1651,15 +1652,10 @@ fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -
 /// pixels instead of being antialiased into seams (see AGENTS.md).
 const FIND_TEXT_LINE_HEIGHT: Pixels = Pixels(16.0);
 
-/// How far toward black the find palette sits. Deeper than a tab's shading
-/// because it floats over document text and has to read as its own surface -
-/// but still a wash, so a transparent window stays transparent through it.
-const FIND_PALETTE_DARKEN: f32 = 0.14;
-
 fn find_palette_style(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style::default()
-        .background(darkening_wash(theme, FIND_PALETTE_DARKEN))
+        .background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
         .border(iced::Border {
             color: palette.background.strong.color,
             width: 1.0,
@@ -2911,6 +2907,26 @@ mod tests {
             checked += 1;
         }
         assert!(checked > 0, "no theme was actually checked");
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_is_the_same_material_as_the_find_palette() {
+        // Both float over document text, so they're meant to read as one
+        // surface. The thumb's style is built in `jumppad_textarea`, far from
+        // `find_palette_style` - this is what catches one being retuned alone.
+        for theme in Theme::ALL {
+            let palette = find_palette_style(theme);
+            let thumb = jumppad_textarea::scrollbar_thumb_style(theme);
+            assert_eq!(
+                palette.background,
+                Some(iced::Background::Color(thumb.0)),
+                "{theme}: thumb fill drifted from the find palette's"
+            );
+            assert_eq!(
+                palette.border.color, thumb.1,
+                "{theme}: thumb border drifted from the find palette's"
+            );
+        }
     }
 
     #[test]

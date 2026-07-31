@@ -7,15 +7,16 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use editor_core::{
-    EditorMessage, FindMatch, SavedSelection, SelectionKind, TextEditorWidget, darkening_wash,
+    EditorMessage, FLOATING_SURFACE_DARKEN, FindMatch, SavedSelection, SelectionKind,
+    TextEditorWidget, darkening_wash,
 };
 use history::History;
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
-use text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status, text_editor};
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
+use text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status, text_editor};
 
 /// A named editor-level action a `keybinds.toml` override can target - a
 /// small, closed set: the commands this crate has custom logic for beyond
@@ -49,7 +50,7 @@ pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
 /// below, which stay logical-key based.
 pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorCommand>;
 
-/// A [`TextEditorWidget`] backed by `iced::widget::text_editor`, with
+/// A [`TextEditorWidget`] backed by this crate's forked [`text_editor`], with
 /// optional tree-sitter/WASM syntax highlighting layered on via a
 /// [`syntax_registry::SyntaxRegistry`].
 pub struct TextArea {
@@ -617,12 +618,6 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
 
 /// iced's default `text_editor` style draws a border that changes color on
 /// hover/focus - dropped here so there's no color-change effect to notice.
-/// How far toward black the scrollbar thumb sits - the find palette's wash,
-/// so the two floating surfaces read as the same material. Paired with the
-/// palette's border color, which is what keeps the thumb visible on themes
-/// too dark for a wash to darken.
-const SCROLLBAR_THUMB_DARKEN: f32 = 0.14;
-
 /// Also drops its background on a transparent window and scales the base text
 /// color by `foreground_alpha` (both plain parameters, for testability -
 /// syntax-highlighted text instead goes through `color_for`).
@@ -649,10 +644,20 @@ fn editor_style(
         },
         background,
         value,
-        scrollbar_thumb: darkening_wash(theme, SCROLLBAR_THUMB_DARKEN),
-        scrollbar_thumb_border: theme.extended_palette().background.strong.color,
+        scrollbar_thumb: scrollbar_thumb_style(theme).0,
+        scrollbar_thumb_border: scrollbar_thumb_style(theme).1,
         ..default
     }
+}
+
+/// The scrollbar thumb's `(fill, border)`, deliberately the find palette's
+/// wash and outline - the two float over document text and should read as the
+/// same surface. Public so the app shell can assert they haven't drifted.
+pub fn scrollbar_thumb_style(theme: &Theme) -> (Color, Color) {
+    (
+        darkening_wash(theme, FLOATING_SURFACE_DARKEN),
+        theme.extended_palette().background.strong.color,
+    )
 }
 
 #[cfg(test)]
