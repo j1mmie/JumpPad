@@ -43,6 +43,13 @@ const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
 /// content has actually presented.
 const SHADOW_REFRESH_FRAMES: u8 = 3;
 
+/// How many presented frames to wait before resetting the Windows redirection
+/// surface (see `windows.rs`). Same reasoning as `SHADOW_REFRESH_FRAMES`:
+/// winit already does this at window-creation time and it doesn't take, so
+/// the whole point is to run it once a real swapchain frame has reached the
+/// screen. Costs nothing on other platforms - it's only ever armed on Windows.
+const SURFACE_RESET_FRAMES: u8 = 3;
+
 /// Hands keyboard focus to the editor widget, targeted by its stable id.
 /// Not `focusable::focus_next`: that op skips the editor whenever some
 /// widget is still focused when it runs, which is exactly the state after a
@@ -81,6 +88,9 @@ pub struct JumpPadApp {
     /// Frames left until the macOS window shadow is refreshed - see
     /// `SHADOW_REFRESH_FRAMES`.
     shadow_refresh_frames: u8,
+    /// Counts presented frames down to the one-shot Windows redirection-surface
+    /// reset (see `windows.rs`), armed once when the window first appears.
+    surface_reset_frames: u8,
     session_dir: PathBuf,
     /// List of tab ids waiting on a save
     pending_close_after_save: Vec<u64>,
@@ -150,6 +160,9 @@ pub enum Message {
     /// One presented frame elapsed - counts down `shadow_refresh_frames`,
     /// refreshing the macOS window shadow when it hits zero.
     ShadowRefreshFrame,
+    /// One presented frame elapsed - counts down `surface_reset_frames`,
+    /// resetting the Windows redirection surface when it hits zero.
+    SurfaceResetFrame,
     /// The window was resized - the macOS shadow cache needs retaking.
     WindowResized,
     /// Cmd+Shift+] (mac) / Ctrl+Shift+] (elsewhere) - switch to the next tab,
@@ -259,6 +272,7 @@ impl JumpPadApp {
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
+            surface_reset_frames: 0,
             session_dir,
             pending_close_after_save: Vec::new(),
             window: None,
@@ -592,6 +606,31 @@ impl JumpPadApp {
 
     #[cfg(not(target_os = "windows"))]
     fn disable_system_backdrop(&self) -> Task<Message> {
+        Task::none()
+    }
+
+    /// Arms the one-shot redirection-surface reset (see `windows.rs`). Only
+    /// on a translucent Windows window: elsewhere there is nothing to fix, and
+    /// on a solid window the surface's alpha is never read.
+    fn arm_surface_reset(&mut self) {
+        if cfg!(target_os = "windows") && self.background_alpha < 1.0 {
+            self.surface_reset_frames = SURFACE_RESET_FRAMES;
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    fn reset_redirection_surface(&self) -> Task<Message> {
+        match self.window {
+            Some(id) => iced::window::run(id, |window| {
+                crate::windows::reset_redirection_surface(window);
+            })
+            .discard(),
+            None => Task::none(),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    fn reset_redirection_surface(&self) -> Task<Message> {
         Task::none()
     }
 
@@ -941,6 +980,10 @@ impl JumpPadApp {
             }
             Message::WindowReady(id) => {
                 self.window = id;
+                // The redirection-surface reset can't run yet - it has to
+                // outlast the first presented frames (see `windows.rs`), so
+                // it's armed here and fires from the frame countdown.
+                self.arm_surface_reset();
                 Task::batch([self.disable_system_backdrop(), self.snap_to_monitor()])
             }
             Message::HotkeyEvent(event) => {
@@ -966,6 +1009,14 @@ impl JumpPadApp {
                 self.shadow_refresh_frames = self.shadow_refresh_frames.saturating_sub(1);
                 if self.shadow_refresh_frames == 0 {
                     self.refresh_window_shadow()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::SurfaceResetFrame => {
+                self.surface_reset_frames = self.surface_reset_frames.saturating_sub(1);
+                if self.surface_reset_frames == 0 {
+                    self.reset_redirection_surface()
                 } else {
                     Task::none()
                 }
@@ -1297,6 +1348,10 @@ impl JumpPadApp {
 
         if self.shadow_refresh_frames > 0 {
             subscriptions.push(iced::window::frames().map(|_| Message::ShadowRefreshFrame));
+        }
+
+        if self.surface_reset_frames > 0 {
+            subscriptions.push(iced::window::frames().map(|_| Message::SurfaceResetFrame));
         }
 
         if self.tabs.iter().any(|tab| tab.editor.has_pending_highlighting()) {
@@ -1982,6 +2037,7 @@ mod tests {
             background_alpha: 1.0,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
+            surface_reset_frames: 0,
             session_dir: PathBuf::from("/tmp"),
             pending_close_after_save: Vec::new(),
             window: None,

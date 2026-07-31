@@ -68,4 +68,9 @@ objc2 = "0.6"
 # enabled (it makes the same call for the attributes it *does* expose), so
 # both features here are already on and this adds nothing to the build.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_Graphics_Dwm"] }
+windows-sys = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }

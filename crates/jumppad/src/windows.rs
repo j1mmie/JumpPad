@@ -3,10 +3,28 @@
 // `window_handle()` resolves through `iced::window::Window`'s own supertrait
 // bound, so `HasWindowHandle` doesn't need to be in scope here.
 use iced::window::raw_window_handle::RawWindowHandle;
-use windows_sys::Win32::Foundation::HWND;
+use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
+    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND,
 };
+use windows_sys::Win32::Graphics::Gdi::{
+    CreateRectRgn, DeleteObject, FillRect, GetDC, GetStockObject, ReleaseDC, BLACK_BRUSH,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+/// Pulls the `HWND` out of an iced window, or `None` if this isn't a Win32
+/// window (or the handle has already gone away).
+fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
+    let Ok(handle) = window.window_handle() else {
+        log::warn!("jumppad: no window handle; leaving {what} alone");
+        return None;
+    };
+    match handle.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as HWND),
+        _ => None,
+    }
+}
 
 /// Turns off the Windows 11 system backdrop so a translucent window shows the
 /// *desktop* through it rather than a DWM-drawn material.
@@ -33,11 +51,7 @@ use windows_sys::Win32::Graphics::Dwm::{
 /// than a flip-model swapchain composited by DWM, and comes out correct with
 /// decorations either way.
 pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
-    let Ok(handle) = window.window_handle() else {
-        log::warn!("jumppad: no window handle; leaving the system backdrop alone");
-        return;
-    };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+    let Some(hwnd) = hwnd_of(window, "the system backdrop") else {
         return;
     };
 
@@ -48,7 +62,7 @@ pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
     // and changes nothing - which is already the behaviour we want there.
     let result = unsafe {
         DwmSetWindowAttribute(
-            handle.hwnd.get() as HWND,
+            hwnd,
             DWMWA_SYSTEMBACKDROP_TYPE as u32,
             std::ptr::from_ref(&backdrop).cast(),
             size_of_val(&backdrop) as u32,
@@ -59,5 +73,78 @@ pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
         log::debug!("jumppad: no system-backdrop control on this Windows build (0x{result:X})");
     } else {
         log::debug!("jumppad: disabled the window's system backdrop");
+    }
+}
+
+/// Zeroes the window's redirection surface and re-arms DWM per-pixel alpha,
+/// so a translucent window is translucent from the first frame rather than
+/// from the first resize.
+///
+/// **The opaque-until-you-resize fix.** Every Win32 window DWM composites has
+/// a *redirection surface* behind it, and per-pixel alpha compositing reads
+/// **that surface's** alpha channel - not the swapchain's. Two things
+/// conspire to leave it opaque:
+///
+/// - winit registers its window class with `hbrBackground: 0`, a null brush,
+///   so nothing ever paints the surface. Win32 references on this topic
+///   specifically prescribe `BLACK_BRUSH` here, precisely so the surface
+///   starts at an all-zero (fully transparent) state.
+/// - winit does call `DwmEnableBlurBehindWindow`, which is what asks DWM to
+///   honour per-pixel alpha - but from `on_create`, long before any swapchain
+///   exists. The same "right lever, wrong moment" trap as the macOS shadow
+///   cache in `macos.rs`, and it wants the same treatment: re-apply it once
+///   real frames have presented.
+///
+/// So the surface keeps whatever the system left in it, which reads as an
+/// opaque (typically white) window. Resizing reallocates it, which is why
+/// dragging the window bigger reveals correctly translucent bands exactly
+/// where the new area landed - and why the old "resize kick" hack worked.
+/// This does the same job without touching the window's size: fill the client
+/// area with the black brush that should have been the class background, then
+/// re-issue the blur-behind that marks the alpha as meaningful.
+///
+/// Only `jumppad-gpu` needs it. `tiny-skia` presents by blitting through this
+/// very surface every frame, so it initialises it as a side effect of drawing.
+pub fn reset_redirection_surface(window: &dyn iced::window::Window) {
+    let Some(hwnd) = hwnd_of(window, "the redirection surface") else {
+        return;
+    };
+
+    // SAFETY: the handle guarantees a live `HWND`. Each GDI object below is
+    // released on every path, and `GetClientRect` fully initialises `rect`
+    // before it is read (checked via its `BOOL` return).
+    unsafe {
+        let mut rect: RECT = std::mem::zeroed();
+        if GetClientRect(hwnd, &mut rect) != 0 {
+            // `HDC` is a bare handle in `windows-sys` 0.52, so a failed
+            // `GetDC` comes back as 0 rather than a null pointer.
+            let hdc = GetDC(hwnd);
+            if hdc != 0 {
+                // Black is what makes this work, not an arbitrary colour:
+                // GDI writes 0x00000000, so the surface's alpha lands at 0
+                // and the desktop shows through at full strength.
+                FillRect(hdc, &rect, GetStockObject(BLACK_BRUSH) as _);
+                ReleaseDC(hwnd, hdc);
+            }
+        }
+
+        // An empty region means "no blur, just honour the alpha" - the same
+        // parameters winit passes at creation, re-applied now that the
+        // swapchain is live.
+        let region = CreateRectRgn(0, 0, -1, -1);
+        let blur_behind = DWM_BLURBEHIND {
+            dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+            fEnable: 1,
+            hRgnBlur: region,
+            fTransitionOnMaximized: 0,
+        };
+        let result = DwmEnableBlurBehindWindow(hwnd, &blur_behind);
+        DeleteObject(region as _);
+
+        if result < 0 {
+            log::warn!("jumppad: could not re-arm per-pixel alpha (0x{result:X})");
+        } else {
+            log::debug!("jumppad: reset the window's redirection surface");
+        }
     }
 }

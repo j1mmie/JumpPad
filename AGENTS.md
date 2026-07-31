@@ -256,6 +256,44 @@ premultiply in *linear* space - land slightly bright under this compositor,
 but every translucent quad this app paints is black (`darkening_wash`, the
 modal scrim), and black is immune, so nothing visible is affected.
 
+**Gotcha - the Windows redirection surface starts opaque, and stays that way
+until something reallocates it.** The third and last of the Windows
+transparency bugs, and the one that actually made `jumppad-gpu` look opaque
+at startup even at `background = 0.1`.
+
+Every Win32 window DWM composites has a **redirection surface** behind it,
+and per-pixel alpha compositing reads *that surface's* alpha channel - not
+the swapchain's. Nothing initialises it in this stack:
+
+- winit registers its window class with `hbrBackground: 0`, a null brush, so
+  the surface is never painted. Win32 references on per-pixel alpha
+  specifically prescribe `BLACK_BRUSH` here, exactly so the surface starts
+  all-zero (and therefore fully transparent).
+- winit does call `DwmEnableBlurBehindWindow` - the call that asks DWM to
+  honour per-pixel alpha at all - but from `on_create`, before any swapchain
+  exists. Same "right lever, wrong moment" shape as the macOS shadow cache.
+
+The diagnostic that identifies this one specifically: **resize the window
+smaller and back, and the region the resize touched becomes correctly
+translucent while the rest stays opaque.** A reallocated surface is a zeroed
+surface. That is also why the old "resize kick" hack worked, and it is a
+known issue outside this project - the same white-until-resized artifact is
+reported against wgpu with decorated windows, with "use a borderless window"
+as the going workaround (which is exactly why `decorations = false` appears
+to fix transparency here).
+
+**The fix** (`reset_redirection_surface` in `crates/jumppad/src/windows.rs`):
+fill the client area with the black brush that should have been the class
+background, then re-issue `DwmEnableBlurBehindWindow`. No size change, so no
+visible kick. Armed on `WindowReady` and fired `SURFACE_RESET_FRAMES`
+presented frames later, for the same reason the macOS shadow refresh waits -
+doing it before a real frame has presented is what fails today.
+
+`tiny-skia` never needed this: it presents by blitting through the
+redirection surface every frame, so it initialises it as a side effect of
+drawing. Another reason comparing the two binaries has been misleading
+throughout - they do not reach the screen by the same route.
+
 **Gotcha - Windows 11 paints its own backdrop behind a decorated window.**
 Separate bug from the premultiply above, found while chasing it, and the two
 stack: on `jumppad-gpu` with `[window] decorations = true` a translucent
