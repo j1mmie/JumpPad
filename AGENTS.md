@@ -192,6 +192,35 @@ after the point it diverged. Deliberately *not* a `debug_assert`: that
 would re-introduce the linear rebuild in dev builds, where it was worst
 (~64ms per redraw at 150K lines).
 
+### Undo history
+
+`History` (`history.rs`) is a snapshot stack: each entry is the whole document
+text plus a `CursorState` (caret position *and* selection) as of just before an
+edit. `TextArea::update` records one on any `Action` where `is_edit()`, and
+`apply_history` restores both halves - replaying the selection through
+`restore_selection` rather than `move_cursor_to`, which clears one.
+
+**Undo restores the selection, for every edit - typing included.** This is one
+uniform rule, deliberately, matching VS Code: Monaco's `EditStack` restores
+`beforeCursorState` on undo for all edit operations, not just cut and paste. So
+selecting a word, typing over it, and undoing brings the word back *selected*.
+Not a bug. Two things follow that look odd but are the same rule: undoing
+Option/Ctrl+Backspace re-selects the deleted word (`word_delete_backward` is a
+`Binding::Sequence`, so the `Select` half is already applied when the
+`Backspace` records its caret), and a cut is indistinguishable from pressing
+Delete with a selection - both publish `Edit::Delete`, so a cut-only variant of
+this rule was never expressible.
+
+**Coalescing keeps the *first* snapshot of a burst, not the last.** That is what
+makes the restored selection the one the first keystroke replaced; overwriting
+on each coalesced edit would destroy it, since keystrokes after the first have
+no selection to record.
+
+**Redo's caret is the state at undo time, not at edit time.** VS Code records an
+`afterCursorState` when the edit happens; JumpPad reuses whatever is live when
+you press undo. Only observable if the caret moved in between. Left as-is - the
+fix wants an `after` field on `Snapshot` and its own coalescing tests.
+
 ## Syntax highlighting (`syntax_registry`)
 
 - Grammars are tree-sitter parsers compiled to WASM, run through
@@ -622,13 +651,14 @@ focusing the id directly.
 **Selection save/restore fidelity:** double/triple-click selections are
 stored by cosmic-text as `Selection::Word`/`Line` with the *anchor at the
 click position* - `Content::cursor()` reports `selection == position` for
-them, with the bounds implied by the kind. `IcedTextEditor::selection`
+them, with the bounds implied by the kind. `TextArea::selection`
 tells them apart from a collapsed leftover range by whether selected text
 exists (and picks Word vs Line by comparing it to the anchor's line), and
 restore replays `SelectWord`/`SelectLine` at the anchor rather than
 setting an anchor-to-cursor range. Don't "simplify" the saved state back
 to a bare anchor pair - that's exactly the representation that can't
-describe a word selection.
+describe a word selection. The undo history stores the same
+`SavedSelection` for the same reason (see "Undo history").
 
 ## The find palette
 
