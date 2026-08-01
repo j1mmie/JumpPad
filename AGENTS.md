@@ -155,6 +155,36 @@ themes, where a wash has almost nothing left to darken. A test in `app.rs`
 asserts the two stay equal across every theme, since they're defined in
 different crates.
 
+### Revealing the cursor after an edit
+
+An edit made while the cursor is off screen (scrolled away with the wheel or
+the thumb, then typed into) brings the cursor back into view with
+`REVEAL_MARGIN_LINES` of context past the edge it came in from - it lands on
+the sixth visible line, from the top or the bottom depending on which way the
+view had to move. An edit that leaves the cursor visible doesn't scroll at
+all.
+
+Only the margin is ours. cosmic-text already reveals the cursor, but by the
+bare minimum, leaving it hard against the edge; `shape_and_reveal` in
+`text_editor.rs` adds the rest. The awkward part is *when*: the reveal
+happens lazily, inside the shape that `layout` runs, long after
+`Content::perform` returned. So `perform` records where the view sat before
+an edit (`Internal::scrolled_before_edit`) and `layout` reads it back after
+shaping, since by then the view has already moved and the original position
+is gone. The extra scroll goes through `Action::Scroll` - the only lever
+`iced_graphics::text::Editor` exposes - and needs a second shape to settle
+before the frame draws.
+
+**A view that moved is not proof the cursor was chased.** Deleting lines
+under a view anchored at the end of the document clamps the scroll upwards on
+its own, with the cursor still comfortably on screen; backing *that* off by
+the margin would push the cursor out of view. `reveal_offset` only fires when
+the view moved *and* the cursor came to rest on the first or last visible
+row, which is where a real reveal - and nothing else - leaves it.
+
+Undo/redo is not on this path. `apply_history` rebuilds `Content` from
+scratch (see below), so there is no before-scroll to measure against.
+
 ### The source cache
 
 `TextArea` keeps the document's full text in an `Arc<String>` (`source`) and

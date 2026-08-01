@@ -51,6 +51,118 @@ fn scrollbar_layout(
     Some(scrollbar::Layout::new(text_bounds, metrics, width))
 }
 
+/// Visible lines left between the cursor and the edge it came in from when an
+/// edit pulls an off-screen cursor back into view - so the cursor lands on the
+/// sixth visible line rather than hard against the edge, which is where
+/// cosmic-text leaves it.
+const REVEAL_MARGIN_LINES: i32 = 5;
+
+/// Where the view sits, in lines from the top of the document, or `None` if it
+/// has no line height to measure against yet. Fractional: `scroll.vertical` is
+/// a pixel offset into the wrapped rows of the line at `scroll.line`.
+fn scrolled_to(editor: &graphics::text::Editor) -> Option<f32> {
+    let buffer = editor.buffer();
+    let line_height = buffer.metrics().line_height;
+    if line_height <= 0.0 {
+        return None;
+    }
+
+    let scroll = buffer.scroll();
+    Some(scroll.line as f32 + scroll.vertical / line_height)
+}
+
+/// Shapes the editor and then hands an edit's cursor the view it wants.
+///
+/// Shaping is where cosmic-text reveals a cursor an edit left off screen, and
+/// it stops the moment the cursor is barely visible; `scrolled_before` (where
+/// the view sat going into the edit, `None` if no edit is pending) is what
+/// turns that into `REVEAL_MARGIN_LINES` of context past it. The second shape
+/// settles the extra scroll before the frame draws.
+fn shape_and_reveal(
+    editor: &mut graphics::text::Editor,
+    scrolled_before: Option<f32>,
+    text_bounds: Size,
+    shape: impl Fn(&mut graphics::text::Editor),
+) {
+    shape(editor);
+
+    let Some(scrolled_before) = scrolled_before else {
+        return;
+    };
+    let Some(lines) = reveal_scroll(editor, scrolled_before, text_bounds)
+    else {
+        return;
+    };
+
+    editor.perform(Action::Scroll { lines });
+    shape(editor);
+}
+
+/// The scroll an edit still owes the view, in lines, measured against where
+/// the view sat before it.
+fn reveal_scroll(
+    editor: &graphics::text::Editor,
+    scrolled_before: f32,
+    text_bounds: Size,
+) -> Option<i32> {
+    let line_height = editor.buffer().metrics().line_height;
+    let scrolled_after = scrolled_to(editor)?;
+
+    // An `Indent` keeps its selection, so the caret is not always what the
+    // reveal chased; the region at the edge the view moved toward stands in
+    // for it.
+    let cursor_y = match editor.selection() {
+        Selection::Caret(position) => position.y,
+        Selection::Range(regions) => {
+            if scrolled_after < scrolled_before {
+                regions.first()?.y
+            } else {
+                regions.last()?.y
+            }
+        }
+    };
+
+    reveal_offset(
+        scrolled_before,
+        scrolled_after,
+        cursor_y / line_height,
+        text_bounds.height / line_height,
+    )
+}
+
+/// How far to scroll after an edit, in lines, given where the view sat before
+/// it, where cosmic-text left it after, and which row the cursor ended up on.
+///
+/// cosmic-text reveals an off-screen cursor by scrolling the bare minimum,
+/// leaving it on the first or last visible row; this backs the view off by
+/// `REVEAL_MARGIN_LINES` so it lands inside the view instead. `None` leaves
+/// the view alone - either it never moved (the cursor was still on screen
+/// after the edit) or it moved without chasing the cursor, which is what a
+/// document shrinking under a view anchored at its end does.
+fn reveal_offset(
+    scrolled_before: f32,
+    scrolled_after: f32,
+    cursor_row: f32,
+    viewport_rows: f32,
+) -> Option<i32> {
+    // Never further than the opposite edge: a view shorter than the margin
+    // would scroll the cursor straight back out of sight.
+    let margin = REVEAL_MARGIN_LINES.min(viewport_rows as i32 - 1);
+    if margin <= 0 {
+        return None;
+    }
+
+    if scrolled_after < scrolled_before && cursor_row < 1.0 {
+        Some(-margin)
+    } else if scrolled_after > scrolled_before
+        && cursor_row > viewport_rows - 2.0
+    {
+        Some(margin)
+    } else {
+        None
+    }
+}
+
 /// Creates a new [`TextEditor`]. Upstream this lives in `iced_widget::helpers`.
 pub fn text_editor<'a, Message, Theme, Renderer>(
     content: &'a Content<Renderer>,
@@ -339,6 +451,11 @@ where
     R: text::Renderer,
 {
     editor: R::Editor,
+    /// Where the view sat just before the edit awaiting layout, if there is
+    /// one. cosmic-text reveals the cursor lazily, on the next shape, so this
+    /// is the only chance to record what the edit is about to scroll away
+    /// from - `layout` compares against it and takes it back to `None`.
+    scrolled_before_edit: Option<f32>,
 }
 
 impl<R> Content<R>
@@ -354,14 +471,8 @@ where
     pub fn with_text(text: &str) -> Self {
         Self(RefCell::new(Internal {
             editor: R::Editor::with_text(text),
+            scrolled_before_edit: None,
         }))
-    }
-
-    /// Performs an [`Action`] on the [`Content`].
-    pub fn perform(&mut self, action: Action) {
-        let internal = self.0.get_mut();
-
-        internal.editor.perform(action);
     }
 
     /// Moves the current cursor to reflect the given one.
@@ -433,6 +544,25 @@ where
     /// Returns whether or not the the [`Content`] is empty.
     pub fn is_empty(&self) -> bool {
         self.0.borrow().editor.is_empty()
+    }
+}
+
+// Pinned to the concrete graphics editor, like the `Widget` impl below: the
+// scroll an edit is about to move lives on the cosmic-text buffer, which only
+// that editor exposes.
+impl<R> Content<R>
+where
+    R: text::Renderer<Editor = graphics::text::Editor>,
+{
+    /// Performs an [`Action`] on the [`Content`].
+    pub fn perform(&mut self, action: Action) {
+        let internal = self.0.get_mut();
+
+        if action.is_edit() {
+            internal.scrolled_before_edit = scrolled_to(&internal.editor);
+        }
+
+        internal.editor.perform(action);
     }
 }
 
@@ -626,13 +756,29 @@ where
             .min_height(self.min_height)
             .max_height(self.max_height);
 
-        internal.editor.update(
-            limits.shrink(self.padding).max(),
-            self.font.unwrap_or_else(|| renderer.default_font()),
-            self.text_size.unwrap_or_else(|| renderer.default_size()),
-            self.line_height,
-            self.wrapping,
-            state.highlighter.borrow_mut().deref_mut(),
+        let text_bounds = limits.shrink(self.padding).max();
+        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let text_size =
+            self.text_size.unwrap_or_else(|| renderer.default_size());
+        let line_height = self.line_height;
+        let wrapping = self.wrapping;
+        let shape = |editor: &mut Renderer::Editor| {
+            editor.update(
+                text_bounds,
+                font,
+                text_size,
+                line_height,
+                wrapping,
+                state.highlighter.borrow_mut().deref_mut(),
+            );
+        };
+
+        let scrolled_before = internal.scrolled_before_edit.take();
+        shape_and_reveal(
+            &mut internal.editor,
+            scrolled_before,
+            text_bounds,
+            shape,
         );
 
         match self.height {
@@ -1617,4 +1763,217 @@ pub(crate) fn convert_macos_shortcut(
     };
 
     Some(keyboard::Key::Named(key))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Absolute, so a row is exactly this many pixels whatever font the
+    /// machine running the tests happens to resolve.
+    const LINE_HEIGHT: f32 = 20.0;
+    const VIEW_ROWS: usize = 20;
+    /// Long enough to leave room to scroll on either side of the view.
+    const DOCUMENT_LINES: usize = 400;
+
+    /// A numbered document, shaped into a `VIEW_ROWS`-tall view the way
+    /// `layout` leaves it on the first frame.
+    fn document() -> (graphics::text::Editor, Size) {
+        let text = (0..DOCUMENT_LINES)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut editor = graphics::text::Editor::with_text(&text);
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        shape(&mut editor, bounds);
+
+        (editor, bounds)
+    }
+
+    fn shape(editor: &mut graphics::text::Editor, bounds: Size) {
+        editor.update(
+            bounds,
+            iced_core::Font::MONOSPACE,
+            Pixels(14.0),
+            LineHeight::Absolute(Pixels(LINE_HEIGHT)),
+            Wrapping::None,
+            &mut highlighter::PlainText::new(&()),
+        );
+    }
+
+    /// Edits the way the widget does: the scroll goes on record before the
+    /// edit, and the reveal rides along with the next shape.
+    fn perform(
+        editor: &mut graphics::text::Editor,
+        bounds: Size,
+        edit: Edit,
+    ) {
+        let scrolled_before = scrolled_to(editor);
+
+        editor.perform(Action::Edit(edit));
+        shape_and_reveal(editor, scrolled_before, bounds, |editor| {
+            shape(editor, bounds);
+        });
+    }
+
+    /// Puts the cursor on `line`, then scrolls the view `lines` away from it.
+    fn scroll_away(
+        editor: &mut graphics::text::Editor,
+        bounds: Size,
+        line: usize,
+        lines: i32,
+    ) {
+        editor.move_to(Cursor {
+            position: Position { line, column: 0 },
+            selection: None,
+        });
+        shape(editor, bounds);
+
+        editor.perform(Action::Scroll { lines });
+        shape(editor, bounds);
+    }
+
+    /// Which visible row the cursor is on, counting from the top of the view.
+    /// Below zero or past `VIEW_ROWS` means it is off screen.
+    fn cursor_row(editor: &graphics::text::Editor) -> f32 {
+        match editor.selection() {
+            Selection::Caret(position) => position.y / LINE_HEIGHT,
+            Selection::Range(_) => panic!("no selection is under test"),
+        }
+    }
+
+    /// The row the reveal aims for, counting from whichever edge the cursor
+    /// came in from.
+    const REVEALED_ROW: f32 = REVEAL_MARGIN_LINES as f32;
+
+    #[test]
+    fn an_edit_with_the_cursor_on_screen_does_not_scroll() {
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 40);
+        // Back over the cursor, leaving it a few lines shy of either edge.
+        editor.perform(Action::Scroll { lines: -25 });
+        shape(&mut editor, bounds);
+
+        let scrolled_before = scrolled_to(&editor);
+        let row = cursor_row(&editor);
+        assert!((0.0..VIEW_ROWS as f32).contains(&row), "cursor off screen");
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        assert_eq!(scrolled_to(&editor), scrolled_before);
+        assert_eq!(cursor_row(&editor), row);
+    }
+
+    #[test]
+    fn an_edit_above_the_view_reveals_the_cursor_six_lines_from_the_top() {
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 60);
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        assert_eq!(cursor_row(&editor), REVEALED_ROW);
+    }
+
+    #[test]
+    fn an_edit_below_the_view_reveals_the_cursor_six_lines_from_the_bottom() {
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, -60);
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        assert_eq!(cursor_row(&editor), VIEW_ROWS as f32 - 1.0 - REVEALED_ROW);
+    }
+
+    #[test]
+    fn an_edit_one_line_off_the_edge_still_gets_the_whole_margin() {
+        let (mut editor, bounds) = document();
+        // The case cosmic-text on its own would settle with a single line of
+        // scroll, leaving the cursor hard against the bottom edge.
+        scroll_away(&mut editor, bounds, 100, -1);
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        assert_eq!(cursor_row(&editor), VIEW_ROWS as f32 - 1.0 - REVEALED_ROW);
+    }
+
+    #[test]
+    fn a_paste_that_carries_the_cursor_off_the_bottom_reveals_it() {
+        let (mut editor, bounds) = document();
+        // The cursor is on screen going in - it is the pasted lines pushing
+        // it past the bottom edge that has to be chased.
+        scroll_away(&mut editor, bounds, 10, 0);
+        assert_eq!(cursor_row(&editor), 10.0);
+
+        perform(&mut editor, bounds, Edit::Paste(Arc::new("\n".repeat(30))));
+
+        assert_eq!(cursor_row(&editor), VIEW_ROWS as f32 - 1.0 - REVEALED_ROW);
+    }
+
+    #[test]
+    fn the_reveal_stops_at_the_top_of_the_document() {
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 2, 40);
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        assert_eq!(scrolled_to(&editor), Some(0.0));
+        assert_eq!(cursor_row(&editor), 2.0);
+    }
+
+    #[test]
+    fn the_reveal_stops_at_the_end_of_the_document() {
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, DOCUMENT_LINES - 2, -60);
+
+        perform(&mut editor, bounds, Edit::Insert('x'));
+
+        // The last line of the document is already on the last visible row,
+        // so the cursor lands one row above it rather than six.
+        assert_eq!(
+            scrolled_to(&editor),
+            Some((DOCUMENT_LINES - VIEW_ROWS) as f32)
+        );
+        assert_eq!(cursor_row(&editor), VIEW_ROWS as f32 - 2.0);
+    }
+
+    /// A view 20 rows tall, the cursor on `cursor_row`, after an edit that
+    /// moved the view by `scrolled` lines.
+    fn offset(scrolled: f32, cursor_row: f32) -> Option<i32> {
+        reveal_offset(100.0, 100.0 + scrolled, cursor_row, 20.0)
+    }
+
+    #[test]
+    fn a_view_that_did_not_move_stays_put() {
+        assert_eq!(offset(0.0, 0.0), None);
+        assert_eq!(offset(0.0, 10.0), None);
+        assert_eq!(offset(0.0, 19.0), None);
+    }
+
+    #[test]
+    fn a_cursor_revealed_at_an_edge_backs_off_by_the_margin() {
+        assert_eq!(offset(-40.0, 0.0), Some(-REVEAL_MARGIN_LINES));
+        assert_eq!(offset(40.0, 19.0), Some(REVEAL_MARGIN_LINES));
+    }
+
+    #[test]
+    fn a_view_that_moved_without_chasing_the_cursor_stays_put() {
+        // What a document shrinking under a view anchored at its end does:
+        // the scroll clamps, but the cursor is nowhere near an edge.
+        assert_eq!(offset(-3.0, 8.0), None);
+        assert_eq!(offset(3.0, 8.0), None);
+    }
+
+    #[test]
+    fn the_margin_never_scrolls_the_cursor_back_out_of_sight() {
+        // Four rows of view, so the far edge is only three lines away.
+        assert_eq!(reveal_offset(100.0, 140.0, 3.0, 4.0), Some(3));
+        assert_eq!(reveal_offset(100.0, 60.0, 0.0, 4.0), Some(-3));
+    }
+
+    #[test]
+    fn a_view_too_short_to_reveal_into_stays_put() {
+        assert_eq!(reveal_offset(100.0, 140.0, 0.0, 1.0), None);
+        assert_eq!(reveal_offset(100.0, 140.0, 0.0, 0.0), None);
+    }
 }
