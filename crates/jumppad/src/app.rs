@@ -1653,14 +1653,7 @@ fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -
 const FIND_TEXT_LINE_HEIGHT: Pixels = Pixels(16.0);
 
 fn find_palette_style(theme: &Theme) -> container::Style {
-    let palette = theme.extended_palette();
-    container::Style::default()
-        .background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
-        .border(iced::Border {
-            color: palette.background.strong.color,
-            width: 1.0,
-            radius: 6.0.into(),
-        })
+    container::Style::default().background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
 }
 
 fn find_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
@@ -2909,24 +2902,38 @@ mod tests {
         assert!(checked > 0, "no theme was actually checked");
     }
 
+    // The scrollbar thumb and the find palette used to be required to share
+    // one material (an invariant test lived here). The thumb now washes
+    // toward white on dark themes and toward black on light ones, while the
+    // find palette keeps washing toward black always - an intentional
+    // divergence, so that invariant no longer holds.
+
     #[test]
-    fn the_scrollbar_thumb_is_the_same_material_as_the_find_palette() {
-        // Both float over document text, so they're meant to read as one
-        // surface. The thumb's style is built in `jumppad_textarea`, far from
-        // `find_palette_style` - this is what catches one being retuned alone.
+    fn scrollbar_thumb_wash_lightens_dark_themes_and_darkens_light_ones() {
+        let mut checked_dark = 0;
+        let mut checked_light = 0;
         for theme in Theme::ALL {
-            let palette = find_palette_style(theme);
-            let thumb = jumppad_textarea::scrollbar_thumb_style(theme);
-            assert_eq!(
-                palette.background,
-                Some(iced::Background::Color(thumb.0)),
-                "{theme}: thumb fill drifted from the find palette's"
-            );
-            assert_eq!(
-                palette.border.color, thumb.1,
-                "{theme}: thumb border drifted from the find palette's"
-            );
+            let base = theme.extended_palette().background.base.color;
+            let washed = jumppad_textarea::scrollbar_thumb_style(theme);
+            let composited_luminance = luminance(composite(base, washed));
+            if theme.extended_palette().is_dark {
+                assert!(
+                    composited_luminance >= luminance(base),
+                    "{theme}: dark theme's thumb wash didn't lighten it"
+                );
+                checked_dark += 1;
+            } else {
+                assert!(
+                    composited_luminance <= luminance(base),
+                    "{theme}: light theme's thumb wash didn't darken it"
+                );
+                checked_light += 1;
+            }
         }
+        assert!(
+            checked_dark > 0 && checked_light > 0,
+            "need themes of both kinds to prove the branch runs"
+        );
     }
 
     #[test]

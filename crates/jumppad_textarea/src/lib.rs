@@ -7,8 +7,8 @@ use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
 use editor_core::{
-    EditorMessage, FLOATING_SURFACE_DARKEN, FindMatch, SavedSelection, SelectionKind,
-    TextEditorWidget, darkening_wash,
+    EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection, SelectionKind,
+    TextEditorWidget, scrollbar_wash,
 };
 use history::History;
 use iced::advanced::text::Highlighter;
@@ -644,20 +644,17 @@ fn editor_style(
         },
         background,
         value,
-        scrollbar_thumb: scrollbar_thumb_style(theme).0,
-        scrollbar_thumb_border: scrollbar_thumb_style(theme).1,
+        scrollbar_thumb: scrollbar_thumb_style(theme),
         ..default
     }
 }
 
-/// The scrollbar thumb's `(fill, border)`, deliberately the find palette's
-/// wash and outline - the two float over document text and should read as the
-/// same surface. Public so the app shell can assert they haven't drifted.
-pub fn scrollbar_thumb_style(theme: &Theme) -> (Color, Color) {
-    (
-        darkening_wash(theme, FLOATING_SURFACE_DARKEN),
-        theme.extended_palette().background.strong.color,
-    )
+/// The scrollbar thumb's fill: a wash toward white on a dark theme, toward
+/// black on a light one (see `editor_core::scrollbar_wash`), so the thumb
+/// always reads as a step away from the document without needing a border to
+/// stay visible on dark themes.
+pub fn scrollbar_thumb_style(theme: &Theme) -> Color {
+    scrollbar_wash(theme, SCROLLBAR_THUMB_WASH)
 }
 
 #[cfg(test)]

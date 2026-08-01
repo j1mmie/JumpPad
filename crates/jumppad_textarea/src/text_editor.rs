@@ -45,9 +45,10 @@ pub use text::editor::{
 fn scrollbar_layout(
     editor: &graphics::text::Editor,
     text_bounds: Rectangle,
+    width: f32,
 ) -> Option<scrollbar::Layout> {
     let metrics = scrollbar::metrics(editor.buffer(), text_bounds.size())?;
-    Some(scrollbar::Layout::new(text_bounds, metrics))
+    Some(scrollbar::Layout::new(text_bounds, metrics, width))
 }
 
 /// Creates a new [`TextEditor`]. Upstream this lives in `iced_widget::helpers`.
@@ -541,16 +542,16 @@ where
     Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     /// The scrollbar's geometry against the widget's laid-out bounds.
-    fn scrollbar(&self, layout: Layout<'_>) -> Option<scrollbar::Layout> {
+    fn scrollbar(&self, layout: Layout<'_>, width: f32) -> Option<scrollbar::Layout> {
         let text_bounds = layout.bounds().shrink(self.padding);
-        scrollbar_layout(&self.content.0.borrow().editor, text_bounds)
+        scrollbar_layout(&self.content.0.borrow().editor, text_bounds, width)
     }
 
-    fn is_over_thumb(&self, layout: Layout<'_>, cursor: mouse::Cursor) -> bool {
+    fn is_over_thumb(&self, layout: Layout<'_>, cursor: mouse::Cursor, width: f32) -> bool {
         let Some(position) = cursor.position() else {
             return false;
         };
-        self.scrollbar(layout)
+        self.scrollbar(layout, width)
             .and_then(|scrollbar| scrollbar.thumb)
             .is_some_and(|thumb| thumb.contains(position))
     }
@@ -710,7 +711,8 @@ where
         // thumb never also lands as a click in the document.
         let now = Instant::now();
         let text_bounds = layout.bounds().shrink(self.padding);
-        let scrollbar = self.scrollbar(layout);
+        let width = state.scrollbar.width(now);
+        let scrollbar = self.scrollbar(layout, width);
 
         if is_redraw {
             if let Some(scrollbar) = scrollbar {
@@ -1118,23 +1120,22 @@ where
         }
 
         // Last, so the thumb floats over the text instead of under it.
-        let opacity = state.scrollbar.opacity(Instant::now());
+        let now = Instant::now();
+        let opacity = state.scrollbar.opacity(now);
         if opacity > 0.0 {
+            let width = state.scrollbar.width(now);
             if let Some(thumb) =
-                scrollbar_layout(&internal.editor, text_bounds).and_then(|layout| {
-                    layout.thumb.map(|thumb| (thumb, layout.radius()))
-                })
+                scrollbar_layout(&internal.editor, text_bounds, width).and_then(
+                    |layout| layout.thumb.map(|thumb| (thumb, layout.radius())),
+                )
             {
                 let (bounds, radius) = thumb;
                 renderer.fill_quad(
                     renderer::Quad {
                         bounds,
                         border: Border {
-                            color: style
-                                .scrollbar_thumb_border
-                                .scale_alpha(opacity),
-                            width: 1.0,
                             radius: radius.into(),
+                            ..Border::default()
                         },
                         ..renderer::Quad::default()
                     },
@@ -1156,10 +1157,11 @@ where
     ) -> mouse::Interaction {
         let is_disabled = self.on_edit.is_none();
         let state = tree.state.downcast_ref::<State<Highlighter>>();
+        let width = state.scrollbar.width(Instant::now());
 
         // An I-beam over the thumb would suggest the text underneath is what
         // the click lands on, and it isn't.
-        if state.scrollbar.is_dragging() || self.is_over_thumb(layout, cursor) {
+        if state.scrollbar.is_dragging() || self.is_over_thumb(layout, cursor, width) {
             return mouse::Interaction::Idle;
         }
 
@@ -1524,9 +1526,6 @@ pub struct Style {
     pub selection: Color,
     /// The fill of the auto-hiding scrollbar's thumb, at full opacity.
     pub scrollbar_thumb: Color,
-    /// The thumb's outline. Carries the visible edge on dark themes, where a
-    /// darkening wash has almost nothing to darken.
-    pub scrollbar_thumb_border: Color,
 }
 
 /// The theme catalog of a [`TextEditor`].
@@ -1571,7 +1570,6 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         value: palette.background.base.text,
         selection: palette.primary.weak.color,
         scrollbar_thumb: palette.background.strong.color,
-        scrollbar_thumb_border: palette.background.strong.color,
     };
 
     match status {

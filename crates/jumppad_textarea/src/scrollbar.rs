@@ -11,7 +11,15 @@ use iced_core::{Point, Rectangle, Size};
 /// How far in from the right edge the pointer counts as "near the scrollbar".
 pub const REVEAL_STRIP_WIDTH: f32 = 100.0;
 
-const THUMB_WIDTH: f32 = 8.0;
+/// Thumb/track width while the pointer is outside the reveal strip and
+/// nothing is being dragged.
+const THUMB_WIDTH_IDLE: f32 = 4.0;
+/// Thumb/track width while hovered or actively dragged.
+const THUMB_WIDTH_HOVERED: f32 = 12.0;
+/// How long the width takes to ramp between idle and hovered, in either
+/// direction. Its own clock, independent of FADE_IN/HOLD/FADE_OUT, so a hover
+/// still fading in doesn't reset how far the width has grown, and vice versa.
+const WIDTH_RAMP: Duration = Duration::from_millis(120);
 /// Gap between the thumb and the right/top/bottom edges of the text area.
 const INSET: f32 = 4.0;
 /// Keeps a very long document's thumb big enough to see and to grab.
@@ -79,6 +87,19 @@ pub struct State {
     /// Scroll position at the last frame, to notice the cursor scrolling the
     /// document on its own (arrow keys, typing past the bottom edge).
     last_position: Option<f32>,
+    /// The thumb/track width's in-flight grow-or-shrink transition, if any.
+    /// `None` means settled at `THUMB_WIDTH_IDLE` - no timer needed until
+    /// something happens, same spirit as the fields above.
+    width_ramp: Option<WidthRamp>,
+}
+
+/// A width transition in progress: interpolates linearly from `from` to `to`
+/// over `WIDTH_RAMP`, starting at `started_at`.
+#[derive(Debug, Clone, Copy)]
+struct WidthRamp {
+    started_at: Instant,
+    from: f32,
+    to: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -86,10 +107,17 @@ struct Drag {
     /// Where in the thumb it was grabbed, so it doesn't jump to centre itself
     /// under the pointer on the first press.
     grab_offset: f32,
-    /// Scroll lines the caller hasn't been able to apply yet - `Action::Scroll`
-    /// only carries whole lines, so the remainder rides along to the next move
-    /// instead of being dropped (the same trick the wheel uses).
-    partial_lines: f32,
+    /// The scroll position (in lines, full precision) this drag has already
+    /// asked the document to be at. The baseline for the next delta, rather
+    /// than the document's actual live position - several `CursorMoved`
+    /// events can land in the same input batch and each call `drag_to`
+    /// before the previous call's `Action::Scroll` has actually reached the
+    /// document, so reading the document's position fresh each time would
+    /// have every call in the batch compute a full correction against the
+    /// same stale value and stack them into an overshoot (visible as the
+    /// thumb briefly jumping backwards once a later event corrects it).
+    /// Tracking our own running total keeps repeated calls idempotent.
+    requested: f32,
 }
 
 impl State {
@@ -124,7 +152,32 @@ impl State {
         // way resumes, leaving so the hold is measured from the exit.
         self.touch(now);
         self.hovered = hovered;
+        self.sync_width(now);
         true
+    }
+
+    /// Starts (or re-aims) the width ramp toward wherever `hovered`/`drag`
+    /// currently say the width should be heading. Captures the *current*
+    /// interpolated width as the new `from`, so catching a shrink mid-flight
+    /// and reversing resumes from there instead of snapping back to
+    /// `THUMB_WIDTH_IDLE` first.
+    fn sync_width(&mut self, now: Instant) {
+        let wide = self.hovered || self.drag.is_some();
+        let target = if wide { THUMB_WIDTH_HOVERED } else { THUMB_WIDTH_IDLE };
+        if self.width_ramp.is_some_and(|ramp| ramp.to == target) {
+            return;
+        }
+        let current = self.width(now);
+        self.width_ramp = Some(WidthRamp { started_at: now, from: current, to: target });
+    }
+
+    /// The animated thumb/track width right now, in pixels.
+    pub fn width(&self, now: Instant) -> f32 {
+        let Some(ramp) = self.width_ramp else {
+            return THUMB_WIDTH_IDLE;
+        };
+        let t = ratio(now.saturating_duration_since(ramp.started_at), WIDTH_RAMP).clamp(0.0, 1.0);
+        ramp.from + (ramp.to - ramp.from) * t
     }
 
     /// Notices the document scrolling for any reason - the wheel, but also
@@ -159,7 +212,13 @@ impl State {
     /// When the next frame is needed, or `None` if the thumb has settled and
     /// nothing needs to be drawn until the user does something. Keeping this
     /// exact is what lets the editor go back to zero CPU once it fades out.
+    /// The opacity fade and the width ramp run on independent clocks, so a
+    /// frame is needed until *both* have settled.
     pub fn next_redraw(&self, now: Instant) -> Option<Instant> {
+        earliest(self.opacity_next_redraw(now), self.width_next_redraw(now))
+    }
+
+    fn opacity_next_redraw(&self, now: Instant) -> Option<Instant> {
         let (Some(revealed_at), Some(active_at)) = (self.revealed_at, self.active_at) else {
             return None;
         };
@@ -177,6 +236,11 @@ impl State {
         }
     }
 
+    fn width_next_redraw(&self, now: Instant) -> Option<Instant> {
+        let ramp = self.width_ramp?;
+        (now.saturating_duration_since(ramp.started_at) < WIDTH_RAMP).then_some(now)
+    }
+
     /// Grabs the thumb, if `position` is on it. Returns whether it took hold.
     pub fn press(&mut self, position: Point, layout: Layout, now: Instant) -> bool {
         let Some(thumb) = layout.thumb else {
@@ -188,8 +252,9 @@ impl State {
         self.touch(now);
         self.drag = Some(Drag {
             grab_offset: position.y - thumb.y,
-            partial_lines: 0.0,
+            requested: layout.metrics.position,
         });
+        self.sync_width(now);
         true
     }
 
@@ -197,12 +262,17 @@ impl State {
         if self.drag.is_some() {
             self.touch(now);
             self.drag = None;
+            self.sync_width(now);
         }
     }
 
     /// Turns a drag to `position` into whole lines to scroll by, holding onto
     /// the fraction that didn't fit. `None` when nothing is being dragged, or
     /// when the movement so far hasn't added up to a line yet.
+    ///
+    /// Idempotent against repeated calls for the same `position` - calling
+    /// this again before the document has caught up to a previous call must
+    /// not ask for more (see `Drag::requested`).
     pub fn drag_to(&mut self, position: Point, layout: Layout, now: Instant) -> Option<i32> {
         // Only the hold clock: the ramp is already running from the press.
         self.active_at = Some(now);
@@ -217,10 +287,9 @@ impl State {
             0.0
         };
 
-        let wanted = target * layout.metrics.max_position() - layout.metrics.position;
-        let total = wanted + drag.partial_lines;
-        let whole = total.trunc();
-        drag.partial_lines = total - whole;
+        let wanted = target * layout.metrics.max_position() - drag.requested;
+        let whole = wanted.trunc();
+        drag.requested += whole;
 
         (whole != 0.0).then_some(whole as i32)
     }
@@ -236,11 +305,11 @@ pub struct Layout {
 }
 
 impl Layout {
-    pub fn new(bounds: Rectangle, metrics: Metrics) -> Self {
+    pub fn new(bounds: Rectangle, metrics: Metrics, width: f32) -> Self {
         let track = Rectangle {
-            x: bounds.x + bounds.width - INSET - THUMB_WIDTH,
+            x: bounds.x + bounds.width - INSET - width,
             y: bounds.y + INSET,
-            width: THUMB_WIDTH,
+            width,
             height: (bounds.height - INSET * 2.0).max(0.0),
         };
 
@@ -278,7 +347,7 @@ impl Layout {
     }
 
     pub fn radius(&self) -> f32 {
-        THUMB_WIDTH / 2.0
+        self.track.width / 2.0
     }
 
     /// How far down the document the viewport starts, in lines.
@@ -312,6 +381,14 @@ fn ratio(elapsed: Duration, total: Duration) -> f32 {
     elapsed.as_secs_f32() / total.as_secs_f32()
 }
 
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (None, None) => None,
+        (Some(x), None) | (None, Some(x)) => Some(x),
+        (Some(x), Some(y)) => Some(x.min(y)),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -327,19 +404,31 @@ mod tests {
         Metrics { position, content, viewport }
     }
 
+    /// An arbitrary fixed width for tests that don't care about the width
+    /// ramp - geometry assertions below hold for any width value.
+    const TEST_WIDTH: f32 = 8.0;
+
     fn scrollable() -> Layout {
-        Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0))
+        Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH)
     }
 
     #[test]
     fn a_document_that_fits_has_no_thumb() {
-        assert!(Layout::new(BOUNDS, metrics(0.0, 12.0, 20.0)).thumb.is_none());
+        assert!(
+            Layout::new(BOUNDS, metrics(0.0, 12.0, 20.0), TEST_WIDTH)
+                .thumb
+                .is_none()
+        );
     }
 
     #[test]
     fn thumb_shrinks_as_the_document_grows() {
-        let short = Layout::new(BOUNDS, metrics(0.0, 40.0, 20.0)).thumb.unwrap();
-        let long = Layout::new(BOUNDS, metrics(0.0, 4000.0, 20.0)).thumb.unwrap();
+        let short = Layout::new(BOUNDS, metrics(0.0, 40.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
+        let long = Layout::new(BOUNDS, metrics(0.0, 4000.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert!(long.height < short.height);
     }
 
@@ -347,11 +436,15 @@ mod tests {
     fn thumb_respects_the_minimum_and_maximum() {
         let track = scrollable().track;
 
-        let huge = Layout::new(BOUNDS, metrics(0.0, 100_000.0, 20.0)).thumb.unwrap();
+        let huge = Layout::new(BOUNDS, metrics(0.0, 100_000.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert_eq!(huge.height, MIN_THUMB_HEIGHT);
 
         // 20 of 21 lines visible would otherwise fill almost the whole track.
-        let barely = Layout::new(BOUNDS, metrics(0.0, 21.0, 20.0)).thumb.unwrap();
+        let barely = Layout::new(BOUNDS, metrics(0.0, 21.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert_eq!(barely.height, track.height * MAX_THUMB_FRACTION);
     }
 
@@ -359,17 +452,23 @@ mod tests {
     fn thumb_travels_from_the_top_of_the_track_to_the_bottom() {
         let track = scrollable().track;
 
-        let top = Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0)).thumb.unwrap();
+        let top = Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert_eq!(top.y, track.y);
 
-        let bottom = Layout::new(BOUNDS, metrics(980.0, 1000.0, 20.0)).thumb.unwrap();
+        let bottom = Layout::new(BOUNDS, metrics(980.0, 1000.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert_eq!(bottom.y + bottom.height, track.y + track.height);
     }
 
     #[test]
     fn thumb_stays_inside_the_track_when_scrolled_past_the_end() {
         let track = scrollable().track;
-        let thumb = Layout::new(BOUNDS, metrics(5000.0, 1000.0, 20.0)).thumb.unwrap();
+        let thumb = Layout::new(BOUNDS, metrics(5000.0, 1000.0, 20.0), TEST_WIDTH)
+            .thumb
+            .unwrap();
         assert!(thumb.y + thumb.height <= track.y + track.height);
     }
 
@@ -473,19 +572,84 @@ mod tests {
         state.set_hovered(true, start);
 
         assert_eq!(state.next_redraw(start), Some(start));
-        // Fully faded in and still hovered: nothing more to draw.
-        assert_eq!(state.next_redraw(start + FADE_IN), None);
+        // Opacity is fully faded in by FADE_IN, but the width ramp
+        // (WIDTH_RAMP, deliberately longer) still needs frames of its own.
+        assert_eq!(state.next_redraw(start + FADE_IN), Some(start + FADE_IN));
+        // Once both clocks have settled, nothing more to draw.
+        assert_eq!(state.next_redraw(start + WIDTH_RAMP), None);
 
-        state.set_hovered(false, start + FADE_IN);
-        let left = start + FADE_IN;
-        // Waiting out the hold sleeps to its end rather than spinning.
-        assert_eq!(state.next_redraw(left), Some(left + HOLD));
+        state.set_hovered(false, start + WIDTH_RAMP);
+        let left = start + WIDTH_RAMP;
+        // Leaving restarts the (much shorter) width ramp too, so the very
+        // next frame is needed immediately rather than waiting out the hold.
+        assert_eq!(state.next_redraw(left), Some(left));
+        // Waiting out the hold sleeps to its end rather than spinning, once
+        // the width ramp has long since settled back to idle.
         assert_eq!(state.next_redraw(left + HOLD), Some(left + HOLD));
         assert_eq!(
             state.next_redraw(left + HOLD + FADE_OUT / 2),
             Some(left + HOLD + FADE_OUT / 2)
         );
         assert_eq!(state.next_redraw(left + HOLD + FADE_OUT), None);
+    }
+
+    #[test]
+    fn starts_at_idle_width_until_something_happens() {
+        let state = State::default();
+        assert_eq!(state.width(Instant::now()), THUMB_WIDTH_IDLE);
+    }
+
+    #[test]
+    fn hovering_grows_the_width_then_holds() {
+        let start = Instant::now();
+        let mut state = State::default();
+        state.set_hovered(true, start);
+
+        assert_eq!(state.width(start), THUMB_WIDTH_IDLE);
+        let midpoint = THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
+        assert!((state.width(start + WIDTH_RAMP / 2) - midpoint).abs() < 0.01);
+        assert_eq!(state.width(start + WIDTH_RAMP), THUMB_WIDTH_HOVERED);
+        // Holds wide indefinitely while still hovered - no shrink while the
+        // pointer stays.
+        assert_eq!(
+            state.width(start + Duration::from_secs(60)),
+            THUMB_WIDTH_HOVERED
+        );
+    }
+
+    #[test]
+    fn leaving_shrinks_the_width_immediately_with_no_hold() {
+        let start = Instant::now();
+        let mut state = State::default();
+        state.set_hovered(true, start);
+        let left = start + WIDTH_RAMP;
+        state.set_hovered(false, left);
+
+        // Unlike opacity, there's no hold phase for width - it starts
+        // shrinking the instant the pointer leaves the reveal strip.
+        assert_eq!(state.width(left), THUMB_WIDTH_HOVERED);
+        let midpoint = THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
+        assert!((state.width(left + WIDTH_RAMP / 2) - midpoint).abs() < 0.01);
+        assert_eq!(state.width(left + WIDTH_RAMP), THUMB_WIDTH_IDLE);
+    }
+
+    #[test]
+    fn re_entering_mid_shrink_resumes_growing_rather_than_snapping() {
+        let start = Instant::now();
+        let mut state = State::default();
+        state.set_hovered(true, start);
+        state.set_hovered(false, start + WIDTH_RAMP);
+
+        let mid_shrink = start + WIDTH_RAMP + WIDTH_RAMP / 2;
+        let width_at_mid_shrink = state.width(mid_shrink);
+        assert!(width_at_mid_shrink > THUMB_WIDTH_IDLE);
+        assert!(width_at_mid_shrink < THUMB_WIDTH_HOVERED);
+
+        state.set_hovered(true, mid_shrink);
+        // Resumes from wherever it was, rather than snapping back to idle
+        // first.
+        assert_eq!(state.width(mid_shrink), width_at_mid_shrink);
+        assert_eq!(state.width(mid_shrink + WIDTH_RAMP), THUMB_WIDTH_HOVERED);
     }
 
     #[test]
@@ -532,10 +696,37 @@ mod tests {
     }
 
     #[test]
+    fn drag_to_is_idempotent_when_called_again_before_the_document_catches_up() {
+        // Several `CursorMoved` events can land in the same input batch and
+        // each call `drag_to` before the first one's `Action::Scroll` has
+        // actually reached the document - so `layout` (built from the
+        // document's live position) is identical across both calls here,
+        // simulating the document not having caught up yet. A second call
+        // for the same pointer position must report nothing new, or the
+        // repeated correction stacks into an overshoot that the following
+        // frame then has to visibly correct back (the thumb briefly jumping
+        // backwards mid-drag).
+        let now = Instant::now();
+        let layout = scrollable();
+        let thumb = layout.thumb.unwrap();
+        let mut state = State::default();
+
+        let grab = Point::new(thumb.center_x(), thumb.y);
+        state.press(grab, layout, now);
+
+        let to = Point::new(grab.x, grab.y + 40.0);
+        let first = state.drag_to(to, layout, now);
+        assert!(first.is_some_and(|lines| lines > 0));
+
+        let second = state.drag_to(to, layout, now);
+        assert_eq!(second, None);
+    }
+
+    #[test]
     fn a_drag_too_small_to_move_a_line_is_saved_up_rather_than_lost() {
         let now = Instant::now();
         // 100 lines over a ~192px track: each line is well under a pixel.
-        let layout = Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0));
+        let layout = Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0), TEST_WIDTH);
         let thumb = layout.thumb.unwrap();
         let mut state = State::default();
 
@@ -611,5 +802,19 @@ mod tests {
 
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
         assert_eq!(state.opacity(now + FADE_IN + HOLD + FADE_OUT), 1.0);
+    }
+
+    #[test]
+    fn dragging_holds_the_width_wide_like_a_hover() {
+        let now = Instant::now();
+        let layout = scrollable();
+        let thumb = layout.thumb.unwrap();
+        let mut state = State::default();
+
+        state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
+        assert_eq!(
+            state.width(now + WIDTH_RAMP + Duration::from_secs(60)),
+            THUMB_WIDTH_HOVERED
+        );
     }
 }
