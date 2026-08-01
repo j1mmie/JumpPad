@@ -10,7 +10,7 @@ use editor_core::{
     EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection, SelectionKind,
     TextEditorWidget, scrollbar_wash,
 };
-use history::History;
+use history::{CursorState, History};
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
@@ -161,6 +161,12 @@ impl TextArea {
         self.source = Arc::new(self.content.text());
     }
 
+    /// The caret state to hand `History`: position plus whatever is selected,
+    /// since undoing an edit that replaced a selection has to put it back.
+    fn cursor_state(&self) -> CursorState {
+        CursorState { position: self.cursor_position(), selection: self.selection() }
+    }
+
     fn grammar(&self) -> Option<Arc<Grammar>> {
         match &self.highlighting {
             Highlighting::Ready(_, grammar) => Some(grammar.clone()),
@@ -169,22 +175,22 @@ impl TextArea {
     }
 
     /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
-    /// cursor to `op` and, if it returns a state to restore, replaces the
-    /// content wholesale and moves the cursor back. Returns whether an edit
+    /// caret to `op` and, if it returns a state to restore, replaces the
+    /// content wholesale and puts the caret back. Returns whether an edit
     /// actually happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
-        op: impl FnOnce(&mut History, &str, (usize, usize)) -> Option<(String, (usize, usize))>,
+        op: impl FnOnce(&mut History, &str, CursorState) -> Option<(String, CursorState)>,
     ) -> bool {
-        let cursor = self.cursor_position();
-        let Some((restored_text, restored_cursor)) =
-            op(&mut self.history, self.source.as_str(), cursor)
+        let current = self.cursor_state();
+        let Some((restored_text, restored)) =
+            op(&mut self.history, self.source.as_str(), current)
         else {
             return false;
         };
         self.content = Content::with_text(&restored_text);
         self.resync_source();
-        self.move_cursor_to(restored_cursor.0, restored_cursor.1);
+        self.move_cursor_to(restored.position.0, restored.position.1);
         true
     }
 
@@ -231,8 +237,10 @@ impl TextEditorWidget for TextArea {
                 // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
                 if is_edit {
-                    // The pre-edit text is already sitting in the cache.
-                    self.history.record_before_edit(&self.source, self.cursor_position());
+                    // The pre-edit text is already sitting in the cache. The
+                    // caret goes with it so undo can re-select whatever this
+                    // edit is about to replace.
+                    self.history.record_before_edit(&self.source, self.cursor_state());
                 }
                 self.content.perform(action);
                 if is_edit {
