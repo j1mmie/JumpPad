@@ -46,3 +46,16 @@ panic = "abort"
 lto = true
 codegen-units = 1 # Slower, but better planned builds
 opt-level = "z" # "z" for binary size, "s" to favor runtime speed
+
+# "z" makes the build smaller, but it makes the software renderer slow. So we
+# don't apply it to the crates that draw every frame. See AGENTS.md.
+[profile.release.package]
+tiny-skia = { opt-level = 3 }
+tiny-skia-path = { opt-level = 3 }
+bytemuck = { opt-level = 3 }
+iced_tiny_skia = { opt-level = 3 }
+iced_graphics = { opt-level = 3 }
+cosmic-text = { opt-level = 3 }
+swash = { opt-level = 3 }
+zeno = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
