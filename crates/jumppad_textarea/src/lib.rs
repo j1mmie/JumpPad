@@ -55,6 +55,15 @@ pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorComma
 /// [`syntax_registry::SyntaxRegistry`].
 pub struct TextArea {
     content: Content,
+    /// The document's full text, rebuilt only when an edit changes it -
+    /// never on a redraw. `Content::text()` reassembles the whole document
+    /// line by line, and `view` runs on every redraw, including ones caused
+    /// by nothing but a mouse move mid-drag: ~18ms for a 150K-line file in
+    /// release, past a whole 60fps frame budget on its own.
+    ///
+    /// `Arc` so handing it to [`HighlighterSettings`] is a refcount bump,
+    /// and so that struct's `PartialEq` can compare pointers, not bytes.
+    source: Arc<String>,
     highlighting: Highlighting,
     /// Read for its load revision on every `view` - an injection target
     /// resolving is otherwise invisible to iced, which re-runs the
@@ -109,8 +118,15 @@ impl TextArea {
             None => Highlighting::None,
             Some(ext) => Highlighting::Pending(registry.acquire(ext)),
         };
+        let content = Content::with_text(text);
         Self {
-            content: Content::with_text(text),
+            // Seeded from `content`, not from `text`, so the cache is
+            // byte-identical to what `Content::text()` would have produced -
+            // the highlighter's byte offsets are resolved against the lines
+            // `Content` actually holds, and any normalization difference
+            // between the two would misalign every span after it.
+            source: Arc::new(content.text()),
+            content,
             highlighting,
             registry: registry.clone(),
             history: History::new(),
@@ -136,6 +152,15 @@ impl TextArea {
         }
     }
 
+    /// Rebuilds the [`source`](Self::source) cache from `content`. Call after
+    /// anything that changes the document's text, and only then: the fresh
+    /// `Arc` is what tells the highlighter its input moved, so a needless
+    /// call costs a full reparse and a missing one leaves it parsing stale
+    /// text.
+    fn resync_source(&mut self) {
+        self.source = Arc::new(self.content.text());
+    }
+
     fn grammar(&self) -> Option<Arc<Grammar>> {
         match &self.highlighting {
             Highlighting::Ready(_, grammar) => Some(grammar.clone()),
@@ -151,26 +176,36 @@ impl TextArea {
         &mut self,
         op: impl FnOnce(&mut History, &str, (usize, usize)) -> Option<(String, (usize, usize))>,
     ) -> bool {
-        let text = self.content.text();
         let cursor = self.cursor_position();
-        let Some((restored_text, restored_cursor)) = op(&mut self.history, &text, cursor) else {
+        let Some((restored_text, restored_cursor)) =
+            op(&mut self.history, self.source.as_str(), cursor)
+        else {
             return false;
         };
         self.content = Content::with_text(&restored_text);
+        self.resync_source();
         self.move_cursor_to(restored_cursor.0, restored_cursor.1);
         true
+    }
+
+    /// The [`HighlighterSettings`] describing this editor's current state.
+    /// Built fresh on every `view` and compared against the previous frame's
+    /// copy in the widget's `layout`, so this and its `PartialEq` both sit on
+    /// the per-redraw path.
+    fn highlighter_settings(&self) -> HighlighterSettings {
+        HighlighterSettings {
+            source: self.source.clone(),
+            grammar: self.grammar(),
+            revision: self.registry.revision(),
+            matches: self.find_matches.clone(),
+            current_match: self.find_current,
+        }
     }
 }
 
 impl TextEditorWidget for TextArea {
     fn view(&self) -> Element<'_, EditorMessage> {
-        let settings = HighlighterSettings {
-            source: self.content.text(),
-            grammar: self.grammar(),
-            revision: self.registry.revision(),
-            matches: self.find_matches.clone(),
-            current_match: self.find_current,
-        };
+        let settings = self.highlighter_settings();
         let overrides = self.overrides.clone();
         let background_alpha = self.background_alpha;
         let foreground_alpha = foreground_alpha();
@@ -189,12 +224,20 @@ impl TextEditorWidget for TextArea {
     fn update(&mut self, message: EditorMessage) -> bool {
         match message {
             EditorMessage::Action(action) => {
+                // Only an `Edit` changes the document's text. `Move`,
+                // `Select`, `Click`, `Drag` and `Scroll` just move the cursor
+                // or the viewport, so the `source` cache stays valid across
+                // all of them - which is what keeps a selection drag, the
+                // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
                 if is_edit {
-                    self.history
-                        .record_before_edit(&self.content.text(), self.cursor_position());
+                    // The pre-edit text is already sitting in the cache.
+                    self.history.record_before_edit(&self.source, self.cursor_position());
                 }
                 self.content.perform(action);
+                if is_edit {
+                    self.resync_source();
+                }
                 is_edit
             }
             EditorMessage::Undo => self.apply_history(History::undo),
@@ -203,11 +246,12 @@ impl TextEditorWidget for TextArea {
     }
 
     fn text(&self) -> String {
-        self.content.text()
+        self.source.as_str().to_owned()
     }
 
     fn set_text(&mut self, text: &str) {
         self.content = Content::with_text(text);
+        self.resync_source();
     }
 
     fn poll_highlighting(&mut self) {
@@ -324,7 +368,10 @@ fn clamp_position(content: &Content, (line, column): (usize, usize)) -> Position
 /// whole buffer to parse.
 #[derive(Clone)]
 struct HighlighterSettings {
-    source: String,
+    /// Shared with the [`TextArea`] this was built from - see its `source`
+    /// field. Cloning these settings (which the widget does on every layout
+    /// that changes them) copies a refcount, not the document.
+    source: Arc<String>,
     grammar: Option<Arc<Grammar>>,
     /// The registry's load revision. The grammar `Arc` stays the same object
     /// as its injection targets resolve, so without this the settings would
@@ -337,7 +384,14 @@ struct HighlighterSettings {
 
 impl PartialEq for HighlighterSettings {
     fn eq(&self, other: &Self) -> bool {
-        self.source == other.source
+        // Pointer equality, not a byte compare: `TextArea` mints a new `Arc`
+        // exactly when the text changes, so a shared pointer already means
+        // "same text" - and this runs per redraw, where comparing a
+        // multi-megabyte string is the cost the cache exists to remove. The
+        // failure directions are asymmetric, which is what makes that safe:
+        // two equal-but-separate allocations cost one redundant reparse,
+        // where a missed change would leave stale colors on screen.
+        Arc::ptr_eq(&self.source, &other.source)
             && self.revision == other.revision
             && match (&self.grammar, &other.grammar) {
                 (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -687,6 +741,139 @@ mod tests {
         TextArea::new(text, &registry, None, Arc::new(EditorOverrides::new()), 1.0)
     }
 
+    /// The invariant the `source` cache exists to maintain: it holds exactly
+    /// what rebuilding from `Content` would have produced. Everything below
+    /// that mutates an editor ends by checking this - a cache that drifts
+    /// feeds the highlighter stale text, which misaligns every span after
+    /// the point where it diverged.
+    fn assert_source_is_synced(editor: &TextArea) {
+        assert_eq!(
+            editor.source.as_str(),
+            editor.content.text(),
+            "the cached source drifted from the document"
+        );
+    }
+
+    #[test]
+    fn a_new_editor_starts_with_a_synced_source() {
+        // Covers the line-ending shapes where seeding the cache from the
+        // input `&str` rather than from `Content` could have diverged.
+        for doc in ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"] {
+            let editor = plain_editor(doc);
+            assert_source_is_synced(&editor);
+            assert_eq!(editor.text(), editor.content.text(), "doc: {doc:?}");
+        }
+    }
+
+    #[test]
+    fn redraws_reuse_the_cached_source_instead_of_rebuilding_it() {
+        // `view` runs per redraw; rebuilding the document string there is
+        // the cost this cache removes, so consecutive builds must hand out
+        // the same allocation and compare equal (no highlighter re-run).
+        let editor = plain_editor("fn main() {}\n");
+        let first = editor.highlighter_settings();
+        let second = editor.highlighter_settings();
+        assert!(
+            Arc::ptr_eq(&first.source, &second.source),
+            "a redraw must not rebuild the document string"
+        );
+        assert!(first == second, "unchanged settings must not re-run the highlighter");
+    }
+
+    #[test]
+    fn a_selection_drag_does_not_invalidate_the_cached_source() {
+        // The regression this cache exists for: dragging a selection emits a
+        // stream of non-edit actions, each one causing a redraw. None of
+        // them change the text, so none may rebuild the source.
+        let mut editor = plain_editor("hello world\nsecond line");
+        let before = editor.source.clone();
+
+        for action in [
+            text_editor::Action::Click(iced::Point::new(4.0, 2.0)),
+            text_editor::Action::Drag(iced::Point::new(30.0, 2.0)),
+            text_editor::Action::Drag(iced::Point::new(60.0, 14.0)),
+            text_editor::Action::Move(Motion::Right),
+            text_editor::Action::Select(Motion::Down),
+            text_editor::Action::SelectWord,
+            text_editor::Action::SelectLine,
+            text_editor::Action::SelectAll,
+            text_editor::Action::Scroll { lines: 3 },
+        ] {
+            let edited = editor.update(EditorMessage::Action(action.clone()));
+            assert!(!edited, "{action:?} is not an edit");
+            assert!(
+                Arc::ptr_eq(&before, &editor.source),
+                "{action:?} must not rebuild the cached source"
+            );
+        }
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn an_edit_rebuilds_the_cached_source() {
+        let mut editor = plain_editor("hello");
+        editor.move_cursor_to(0, 5);
+        let before = editor.source.clone();
+
+        let edited = editor.update(EditorMessage::Action(text_editor::Action::Edit(
+            text_editor::Edit::Insert('!'),
+        )));
+
+        assert!(edited);
+        assert!(
+            !Arc::ptr_eq(&before, &editor.source),
+            "an edit must mint a new source so the highlighter re-runs"
+        );
+        assert_eq!(editor.source.as_str(), "hello!");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn set_text_rebuilds_the_cached_source() {
+        let mut editor = plain_editor("original");
+        editor.set_text("replaced\nwith more");
+        assert_eq!(editor.text(), "replaced\nwith more");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn undo_and_redo_keep_the_cached_source_in_sync() {
+        let mut editor = plain_editor("hello");
+        editor.move_cursor_to(0, 5);
+        editor.update(EditorMessage::Action(text_editor::Action::Edit(
+            text_editor::Edit::Insert('!'),
+        )));
+        assert_eq!(editor.text(), "hello!");
+
+        // Undo restores the pre-edit text, which `update` read out of the
+        // cache - so a stale cache would record the wrong snapshot here.
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello");
+        assert_source_is_synced(&editor);
+
+        assert!(editor.update(EditorMessage::Redo));
+        assert_eq!(editor.text(), "hello!");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn settings_over_separately_allocated_equal_sources_compare_unequal() {
+        // Documents the deliberate trade-off in `HighlighterSettings::eq`:
+        // it compares source pointers, not bytes. Two identical but
+        // separately allocated strings therefore compare unequal, costing
+        // one redundant reparse. That direction is harmless; the reverse -
+        // missing a real change - would leave stale colors on screen, and
+        // only `resync_source` ever mints a new pointer.
+        let settings = |source: &str| HighlighterSettings {
+            source: Arc::new(source.to_string()),
+            grammar: None,
+            revision: 0,
+            matches: Arc::new(Vec::new()),
+            current_match: None,
+        };
+        assert!(settings("ab") != settings("ab"));
+    }
+
     #[test]
     fn range_selection_round_trips_through_save_and_restore() {
         let mut editor = plain_editor("hello\nworld");
@@ -917,7 +1104,7 @@ mod tests {
         current: Option<usize>,
     ) -> TreeSitterHighlighter {
         TreeSitterHighlighter::new(&HighlighterSettings {
-            source: source.to_string(),
+            source: Arc::new(source.to_string()),
             grammar: None,
             revision: 0,
             matches: Arc::new(matches),
@@ -976,7 +1163,7 @@ mod tests {
         // there would leave match coloring frozen on screen.
         let matches = Arc::new(vec![FindMatch { line: 0, start: 0, end: 2 }]);
         let base = HighlighterSettings {
-            source: "ab".to_string(),
+            source: Arc::new("ab".to_string()),
             grammar: None,
             revision: 0,
             matches: matches.clone(),
@@ -1004,7 +1191,7 @@ mod tests {
         // The whole mechanism for picking up a late-loading injection
         // target: nothing else about the settings moves when one resolves.
         let base = HighlighterSettings {
-            source: "ab".to_string(),
+            source: Arc::new("ab".to_string()),
             grammar: None,
             revision: 0,
             matches: Arc::new(Vec::new()),

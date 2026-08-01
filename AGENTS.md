@@ -155,6 +155,43 @@ themes, where a wash has almost nothing left to darken. A test in `app.rs`
 asserts the two stay equal across every theme, since they're defined in
 different crates.
 
+### The source cache
+
+`TextArea` keeps the document's full text in an `Arc<String>` (`source`) and
+rebuilds it *only* when an edit changes the text. Two things read it on the
+per-redraw path, and neither may do work proportional to document size:
+`view` hands it to `HighlighterSettings`, and the widget's `layout` compares
+those settings against the previous frame's to decide whether to re-run the
+highlighter.
+
+**`view` must never call `Content::text()`.** That reassembles the whole
+document line by line, and `view` runs on every redraw - including redraws
+caused by nothing but a mouse move mid-selection-drag, where the text
+provably has not changed. It measured at ~18ms per redraw on a 150K-line
+file in a release build (`opt-level = "z"`, as shipped), past a whole 16.7ms
+60fps frame budget before anything is painted. With the cache it is ~350ns
+and flat - constant in document size rather than linear.
+
+**`HighlighterSettings::eq` compares source *pointers*, not bytes.** A byte
+compare is the same linear cost, on the same per-redraw path. This is sound
+only because `resync_source` is the single place that mints a new `Arc`, and
+it runs on exactly the operations that change text: an `Action` where
+`is_edit()`, undo/redo, and `set_text`. Every other action (`Move`,
+`Select`, `Click`, `Drag`, `Scroll`) leaves the cache valid, which is what
+keeps a selection drag off the rebuild path. The failure directions are
+asymmetric: two equal-but-separately-allocated strings compare unequal and
+cost one redundant reparse, where a missed change would leave stale
+highlighting on screen.
+
+**Add a `resync_source` call to any new code path that mutates the text.**
+The tests in `lib.rs` assert `source` matches `content.text()` after every
+mutating operation, so drift shows up as a failure rather than as
+mysteriously misaligned syntax colors - the highlighter resolves byte
+offsets against the cached string, so a stale cache misaligns every span
+after the point it diverged. Deliberately *not* a `debug_assert`: that
+would re-introduce the linear rebuild in dev builds, where it was worst
+(~64ms per redraw at 150K lines).
+
 ## Syntax highlighting (`syntax_registry`)
 
 - Grammars are tree-sitter parsers compiled to WASM, run through
