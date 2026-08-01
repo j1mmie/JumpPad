@@ -155,35 +155,51 @@ themes, where a wash has almost nothing left to darken. A test in `app.rs`
 asserts the two stay equal across every theme, since they're defined in
 different crates.
 
-### Revealing the cursor after an edit
+### Revealing the cursor after a change
 
-An edit made while the cursor is off screen (scrolled away with the wheel or
+A change made while the cursor is off screen (scrolled away with the wheel or
 the thumb, then typed into) brings the cursor back into view with
 `REVEAL_MARGIN_LINES` of context past the edge it came in from - it lands on
 the sixth visible line, from the top or the bottom depending on which way the
-view had to move. An edit that leaves the cursor visible doesn't scroll at
-all.
+view had to move. A change that leaves the cursor visible doesn't scroll at
+all. This covers undo and redo as well as edits.
 
-Only the margin is ours. cosmic-text already reveals the cursor, but by the
-bare minimum, leaving it hard against the edge; `shape_and_reveal` in
-`text_editor.rs` adds the rest. The awkward part is *when*: the reveal
-happens lazily, inside the shape that `layout` runs, long after
-`Content::perform` returned. So `perform` records where the view sat before
-an edit (`Internal::scrolled_before_edit`) and `layout` reads it back after
-shaping, since by then the view has already moved and the original position
-is gone. The extra scroll goes through `Action::Scroll` - the only lever
-`iced_graphics::text::Editor` exposes - and needs a second shape to settle
-before the frame draws.
+Everything happens in `shape_and_reveal`, on the next `layout`, because that
+is where the shape happens: cosmic-text reveals a moved cursor lazily, inside
+the shape, long after `Content::perform` returned, and a rebuilt `Content` has
+no line metrics to scroll by until it has been shaped once either. So the
+change records where the view sat (`Internal::pending_view`) and `layout` acts
+on it after shaping. Every correction goes through `Action::Scroll` - the only
+lever `iced_graphics::text::Editor` exposes - and each needs a shape of its own
+to settle before the frame draws.
 
-**A view that moved is not proof the cursor was chased.** Deleting lines
-under a view anchored at the end of the document clamps the scroll upwards on
-its own, with the cursor still comfortably on screen; backing *that* off by
-the margin would push the cursor out of view. `reveal_offset` only fires when
-the view moved *and* the cursor came to rest on the first or last visible
-row, which is where a real reveal - and nothing else - leaves it.
+The two variants of `PendingView` come at the same result from opposite ends:
 
-Undo/redo is not on this path. `apply_history` rebuilds `Content` from
-scratch (see below), so there is no before-scroll to measure against.
+- `Edited` - an `Action` that edited in place. cosmic-text has already chased
+  the cursor, but by the bare minimum, leaving it hard against the edge, so
+  `reveal_offset` only adds the margin.
+- `Rebuilt` - undo/redo, which replace `Content` wholesale (see the undo
+  history section). The fresh buffer starts at the top of the document, so the
+  first shape reveals the cursor from *there* - a view the user was never at.
+  `layout` scrolls back to where the old `Content` had it and then places the
+  cursor itself with `restore_offset`, since nothing is going to chase it a
+  second time.
+
+**A view that moved is not proof the cursor was chased.** Deleting lines under
+a view anchored at the end of the document clamps the scroll upwards on its
+own, with the cursor still comfortably on screen; backing *that* off by the
+margin would push the cursor out of view. `reveal_offset` only fires when the
+view moved *and* the cursor came to rest on the first or last visible row,
+which is where a real reveal - and nothing else - leaves it. The `Rebuilt`
+path has no such ambiguity: it measures the cursor's row against the restored
+view directly.
+
+**Don't route undo through `Action::Edit`.** Replacing the document with
+`SelectAll` + `Paste` would reuse the `Edited` path for free and keep the
+buffer's scroll, so it looks like the obvious simplification. It is quadratic:
+measured against `Content::with_text` on the same document, 2x slower at 10K
+lines, 17x at 50K, and 35x at 150K (237 seconds). `Content::with_text` plus a
+restored view is the cheap way.
 
 ### The source cache
 
@@ -245,6 +261,11 @@ this rule was never expressible.
 makes the restored selection the one the first keystroke replaced; overwriting
 on each coalesced edit would destroy it, since keystrokes after the first have
 no selection to record.
+
+**`apply_history` carries the view across, not just the caret.** The rebuilt
+`Content` starts at the top of the document, so without `restore_view` an undo
+of an edit already on screen would still jump the document around. See the
+reveal section above for what `layout` then does with it.
 
 **Redo's caret is the state at undo time, not at edit time.** VS Code records an
 `afterCursorState` when the edit happens; JumpPad reuses whatever is live when
