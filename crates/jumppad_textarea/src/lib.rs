@@ -10,7 +10,7 @@ use editor_core::{
     EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection, SelectionKind,
     TextEditorWidget, scrollbar_wash,
 };
-use history::History;
+use history::{CursorState, History};
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::keyboard::{self, key};
@@ -161,6 +161,12 @@ impl TextArea {
         self.source = Arc::new(self.content.text());
     }
 
+    /// The caret state to hand `History`: position plus whatever is selected,
+    /// since undoing an edit that replaced a selection has to put it back.
+    fn cursor_state(&self) -> CursorState {
+        CursorState { position: self.cursor_position(), selection: self.selection() }
+    }
+
     fn grammar(&self) -> Option<Arc<Grammar>> {
         match &self.highlighting {
             Highlighting::Ready(_, grammar) => Some(grammar.clone()),
@@ -169,22 +175,29 @@ impl TextArea {
     }
 
     /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
-    /// cursor to `op` and, if it returns a state to restore, replaces the
-    /// content wholesale and moves the cursor back. Returns whether an edit
+    /// caret to `op` and, if it returns a state to restore, replaces the
+    /// content wholesale and puts the caret back. Returns whether an edit
     /// actually happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
-        op: impl FnOnce(&mut History, &str, (usize, usize)) -> Option<(String, (usize, usize))>,
+        op: impl FnOnce(&mut History, &str, CursorState) -> Option<(String, CursorState)>,
     ) -> bool {
-        let cursor = self.cursor_position();
-        let Some((restored_text, restored_cursor)) =
-            op(&mut self.history, self.source.as_str(), cursor)
+        let current = self.cursor_state();
+        let Some((restored_text, restored)) =
+            op(&mut self.history, self.source.as_str(), current)
         else {
             return false;
         };
         self.content = Content::with_text(&restored_text);
         self.resync_source();
-        self.move_cursor_to(restored_cursor.0, restored_cursor.1);
+        // Replaying the selection is the point: `move_cursor_to` clears one,
+        // so an undo that only moved the cursor would drop the selection the
+        // undone edit had replaced. Neither branch changes text, so neither
+        // needs a second `resync_source`.
+        match restored.selection {
+            Some(selection) => self.restore_selection(selection, restored.position),
+            None => self.move_cursor_to(restored.position.0, restored.position.1),
+        }
         true
     }
 
@@ -231,8 +244,10 @@ impl TextEditorWidget for TextArea {
                 // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
                 if is_edit {
-                    // The pre-edit text is already sitting in the cache.
-                    self.history.record_before_edit(&self.source, self.cursor_position());
+                    // The pre-edit text is already sitting in the cache. The
+                    // caret goes with it so undo can re-select whatever this
+                    // edit is about to replace.
+                    self.history.record_before_edit(&self.source, self.cursor_state());
                 }
                 self.content.perform(action);
                 if is_edit {
@@ -854,6 +869,156 @@ mod tests {
         assert!(editor.update(EditorMessage::Redo));
         assert_eq!(editor.text(), "hello!");
         assert_source_is_synced(&editor);
+    }
+
+    /// Selects `hello` in "hello world" as a plain drag-style range, cursor
+    /// at the far end - the starting point for the undo tests below.
+    fn editor_with_hello_selected() -> TextArea {
+        let mut editor = plain_editor("hello world");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            (0, 5),
+        );
+        assert_eq!(editor.content.selection().as_deref(), Some("hello"));
+        editor
+    }
+
+    fn edit(edit: text_editor::Edit) -> EditorMessage {
+        EditorMessage::Action(text_editor::Action::Edit(edit))
+    }
+
+    #[test]
+    fn undo_of_a_cut_reselects_the_cut_text() {
+        // The reported bug. A cut publishes exactly one `Edit::Delete`, so
+        // this is the whole cut path as the widget produces it.
+        let mut editor = editor_with_hello_selected();
+        assert!(editor.update(edit(text_editor::Edit::Delete)));
+        assert_eq!(editor.text(), " world");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello world");
+        assert_eq!(editor.content.selection().as_deref(), Some("hello"));
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (0, 0), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (0, 5));
+    }
+
+    #[test]
+    fn undo_of_a_paste_over_a_selection_reselects_the_replaced_text() {
+        let mut editor = editor_with_hello_selected();
+        assert!(editor.update(edit(text_editor::Edit::Paste(Arc::new("bye".to_string())))));
+        assert_eq!(editor.text(), "bye world");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello world");
+        assert_eq!(editor.content.selection().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn undo_of_typing_over_a_selection_reselects_the_replaced_text() {
+        // Matches VS Code, which restores `beforeCursorState` uniformly for
+        // every edit - typing included, not just cut and paste.
+        let mut editor = editor_with_hello_selected();
+        assert!(editor.update(edit(text_editor::Edit::Insert('X'))));
+        assert_eq!(editor.text(), "X world");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello world");
+        assert_eq!(editor.content.selection().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn redo_after_undoing_a_cut_leaves_no_selection() {
+        let mut editor = editor_with_hello_selected();
+        editor.update(edit(text_editor::Edit::Delete));
+        editor.update(EditorMessage::Undo);
+
+        assert!(editor.update(EditorMessage::Redo));
+        assert_eq!(editor.text(), " world");
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn undo_restores_a_word_selection_as_a_word_selection() {
+        // The kind matters, not just the text: a word selection anchors at
+        // the click position with its bounds implied, so restoring it as a
+        // plain anchor-to-cursor range would collapse it to nothing.
+        let mut editor = plain_editor("hello world");
+        editor.move_cursor_to(0, 8); // inside "world"
+        editor.content.perform(text_editor::Action::SelectWord);
+        assert_eq!(editor.content.selection().as_deref(), Some("world"));
+
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        assert_eq!(editor.text(), "hello X");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello world");
+        assert_eq!(editor.content.selection().as_deref(), Some("world"));
+        assert_eq!(editor.selection().map(|s| s.kind), Some(SelectionKind::Word));
+    }
+
+    #[test]
+    fn undo_restores_a_line_selection_as_a_line_selection() {
+        let mut editor = plain_editor("first line\nsecond line");
+        editor.move_cursor_to(1, 3);
+        editor.content.perform(text_editor::Action::SelectLine);
+
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "first line\nsecond line");
+        assert_eq!(editor.content.selection().as_deref(), Some("second line"));
+        assert_eq!(editor.selection().map(|s| s.kind), Some(SelectionKind::Line));
+    }
+
+    #[test]
+    fn undo_of_plain_typing_leaves_a_collapsed_caret() {
+        // Nothing was selected before the edit, so nothing may be selected
+        // after the undo - in particular not a degenerate zero-width range.
+        let mut editor = plain_editor("hello");
+        editor.move_cursor_to(0, 5);
+        editor.update(edit(text_editor::Edit::Insert('!')));
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello");
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.cursor_position(), (0, 5));
+    }
+
+    #[test]
+    fn undo_of_a_word_delete_reselects_the_deleted_word() {
+        // `word_delete_backward` is a `Binding::Sequence`, and a sequence
+        // publishes each element as its own message - so the `Select` lands
+        // first and the `Backspace` records a caret that already has the word
+        // selected. Undo therefore brings it back selected. VS Code collapses
+        // the caret here instead; accepted, since it reads the same as undoing
+        // a cut and the alternative is an atomic word-delete command.
+        let mut editor = plain_editor("hello world");
+        editor.move_cursor_to(0, 11);
+        assert!(!editor.update(EditorMessage::Action(text_editor::Action::Select(
+            Motion::Left.widen()
+        ))));
+        assert!(editor.update(edit(text_editor::Edit::Backspace)));
+        assert_eq!(editor.text(), "hello ");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "hello world");
+        assert_eq!(editor.content.selection().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn a_selection_restoring_undo_keeps_the_cached_source_in_sync() {
+        // Restoring a selection replays `SelectWord`/`SelectLine`/`move_to`,
+        // none of which are edits - so the cache must be resynced exactly
+        // once, by the content swap, and not again by the restore.
+        let mut editor = editor_with_hello_selected();
+        editor.update(edit(text_editor::Edit::Delete));
+        let after_edit = editor.source.clone();
+
+        editor.update(EditorMessage::Undo);
+        assert_source_is_synced(&editor);
+        assert!(!Arc::ptr_eq(&after_edit, &editor.source), "undo changed the text");
     }
 
     #[test]
