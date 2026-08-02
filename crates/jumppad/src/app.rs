@@ -112,6 +112,9 @@ pub struct JumpPadApp {
     /// Tab ids that asked to close while a prompt was already showing
     close_queue: Vec<u64>,
     file_dialog_active: bool,
+    /// Whether files are currently being dragged over the window - drives the
+    /// drop overlay in `view`.
+    files_hovered: bool,
     /// Each tab's find palette, keyed by `Tab::id` rather than living on
     /// `Tab` - see `find.rs`. An entry is dropped when its tab closes.
     find: HashMap<u64, FindState>,
@@ -133,6 +136,15 @@ pub enum Message {
     NewTab,
     OpenFile,
     FileOpened(Result<(PathBuf, Arc<String>), OpenError>),
+    /// Files entered (`true`) or left (`false`) the window mid-drag.
+    FilesHovered(bool),
+    /// One file was dropped onto the window. A multi-file drop arrives as one
+    /// of these per file.
+    FileDropped(PathBuf),
+    /// A dropped file finished reading. Separate from `FileOpened` so the drop
+    /// path never touches `file_dialog_active` - a drop landing while a save
+    /// dialog is open must not clear that flag.
+    DroppedFileRead(Result<(PathBuf, Arc<String>), OpenError>),
     SaveFile,
     SaveFileAs,
     FileSaved(u64, Result<PathBuf, SaveError>),
@@ -288,6 +300,7 @@ impl JumpPadApp {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            files_hovered: false,
             find: HashMap::new(),
             modifiers: keyboard::Modifiers::default(),
         };
@@ -404,6 +417,35 @@ impl JumpPadApp {
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         self.arm_shadow_refresh();
         self.sync_session_metadata();
+        focus_editor()
+    }
+
+    /// Opens a dropped file, loading it into the active tab when that tab is
+    /// an untouched scratch tab rather than leaving a stray "Untitled" behind.
+    fn open_dropped_file(&mut self, path: PathBuf, contents: &str) -> Task<Message> {
+        let scratch = self.tabs.get(self.active).is_some_and(|tab| {
+            tab.document.path.is_none() && !tab.dirty && tab.editor.text().is_empty()
+        });
+        if !scratch {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.tabs
+                .push(Tab::from_file(id, path, contents, &self.editor_factory));
+            return self.switch_active(self.tabs.len() - 1);
+        }
+
+        // Rebuilt rather than `set_text`: the factory takes the extension, and
+        // that's what picks the grammar - an editor made for an untitled buffer
+        // would stay unhighlighted. The id carries over, since the session
+        // manifest and `find` are keyed by it.
+        let id = self.tabs[self.active].id;
+        self.tabs[self.active] = Tab::from_file(id, path, contents, &self.editor_factory);
+        // The index didn't move, so `switch_active` would call it a no-op -
+        // the same situation `new_tab` handles above.
+        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+        self.arm_shadow_refresh();
+        self.sync_session_metadata();
+        self.refresh_find();
         focus_editor()
     }
 
@@ -704,6 +746,44 @@ impl JumpPadApp {
                 self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
                 Task::none()
             }
+            Message::FilesHovered(hovered) => {
+                self.files_hovered = hovered;
+                Task::none()
+            }
+            Message::FileDropped(path) => {
+                // A completed drop emits no `FilesHoveredLeft` on Windows or
+                // macOS, so this is what actually dismisses the overlay.
+                self.files_hovered = false;
+                // Window events reach the app past the modal's scrim, which
+                // only blocks clicks - so the prompt has to turn a drop away
+                // itself, the way it does keystrokes.
+                if self.pending_close.is_some() {
+                    return Task::none();
+                }
+                // Already open - focus that tab rather than opening a second
+                // copy of the same file.
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| tab.document.path.as_deref() == Some(path.as_path()))
+                {
+                    return self.switch_active(index);
+                }
+                if path.is_dir() {
+                    self.error = Some(format!("Can't open {}: it's a folder", path.display()));
+                    return Task::none();
+                }
+                Task::perform(read_path(path), Message::DroppedFileRead)
+            }
+            Message::DroppedFileRead(Ok((path, contents))) => {
+                self.open_dropped_file(path, &contents)
+            }
+            Message::DroppedFileRead(Err(OpenError::Io { path, kind })) => {
+                self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
+                Task::none()
+            }
+            // No dialog is involved in a drop.
+            Message::DroppedFileRead(Err(OpenError::DialogClosed)) => Task::none(),
             Message::SaveFile => self.save_active_tab(false),
             Message::SaveFileAs => self.save_active_tab(true),
             Message::FileSaved(id, Ok(path)) => {
@@ -1248,6 +1328,22 @@ impl JumpPadApp {
             None => editor,
         };
 
+        // Same overlay treatment, and for the same reason: the tab bar stays
+        // visible and clickable underneath a drag. A plain container captures
+        // no events, so the drop itself still lands.
+        let editor = if self.files_hovered {
+            stack![
+                editor,
+                container(center(text("Drop to open")))
+                    .width(Fill)
+                    .height(Fill)
+                    .style(drop_overlay_style)
+            ]
+            .into()
+        } else {
+            editor
+        };
+
         let mut content = column![tab_bar, editor];
 
         if let Some(error) = &self.error {
@@ -1364,6 +1460,20 @@ impl JumpPadApp {
                     }
                     _ => None,
                 }
+            }),
+            // Files dragged in from Finder/Explorer. iced surfaces these
+            // itself; see AGENTS.md for the Wayland gap underneath.
+            iced::event::listen_with(|event, _status, _window| match event {
+                iced::Event::Window(iced::window::Event::FileHovered(_)) => {
+                    Some(Message::FilesHovered(true))
+                }
+                iced::Event::Window(iced::window::Event::FilesHoveredLeft) => {
+                    Some(Message::FilesHovered(false))
+                }
+                iced::Event::Window(iced::window::Event::FileDropped(path)) => {
+                    Some(Message::FileDropped(path))
+                }
+                _ => None,
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
             hotkey::subscription(),
@@ -1656,6 +1766,26 @@ fn find_palette_style(theme: &Theme) -> container::Style {
     container::Style::default().background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
 }
 
+/// How far the drag-and-drop overlay dims the document underneath. Lighter
+/// than a floating surface - it covers the whole editor, and the text below it
+/// should still read as text.
+const DROP_OVERLAY_DARKEN: f32 = 0.08;
+
+/// The overlay shown while files are dragged over the window. A wash, not a
+/// pre-darkened background copy, so a transparent window stays transparent
+/// through it (see AGENTS.md); the accent border is what carries the cue on
+/// the macOS software build, which is always opaque.
+fn drop_overlay_style(theme: &Theme) -> container::Style {
+    let palette = theme.extended_palette();
+    container::Style::default()
+        .background(darkening_wash(theme, DROP_OVERLAY_DARKEN))
+        .border(iced::Border {
+            color: palette.primary.base.color,
+            width: 2.0,
+            radius: 6.0.into(),
+        })
+}
+
 fn find_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
     let palette = theme.extended_palette();
     let default = text_input::default(theme, status);
@@ -1845,13 +1975,9 @@ async fn reload_from_disk(path: PathBuf) -> Result<Arc<String>, std::io::ErrorKi
         .map_err(|err| err.kind())
 }
 
-/// Shows the native Open File dialog and reads the chosen file's contents.
-async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
-    let handle = rfd::AsyncFileDialog::new()
-        .pick_file()
-        .await
-        .ok_or(OpenError::DialogClosed)?;
-    let path = handle.path().to_owned();
+/// Reads a path that's already known - a dropped file, and the tail of the
+/// Open dialog once it has produced one.
+async fn read_path(path: PathBuf) -> Result<(PathBuf, Arc<String>), OpenError> {
     let contents = tokio::fs::read_to_string(&path)
         .await
         .map(Arc::new)
@@ -1860,6 +1986,15 @@ async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
             kind: err.kind(),
         })?;
     Ok((path, contents))
+}
+
+/// Shows the native Open File dialog and reads the chosen file's contents.
+async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
+    let handle = rfd::AsyncFileDialog::new()
+        .pick_file()
+        .await
+        .ok_or(OpenError::DialogClosed)?;
+    read_path(handle.path().to_owned()).await
 }
 
 async fn save_to(
@@ -2053,6 +2188,7 @@ mod tests {
             pending_close: None,
             close_queue: Vec::new(),
             file_dialog_active: false,
+            files_hovered: false,
             find: HashMap::new(),
             modifiers: Modifiers::default(),
         }
@@ -2828,6 +2964,111 @@ mod tests {
             kind: std::io::ErrorKind::NotFound,
         })));
         assert!(!app.file_dialog_active);
+    }
+
+    #[test]
+    fn hovering_files_over_the_window_toggles_the_drop_overlay() {
+        let mut app = test_app(1);
+        let _ = app.update(Message::FilesHovered(true));
+        assert!(app.files_hovered);
+        let _ = app.update(Message::FilesHovered(false));
+        assert!(!app.files_hovered);
+    }
+
+    #[test]
+    fn dropping_a_file_clears_the_hover_overlay() {
+        // Windows and macOS send no `FilesHoveredLeft` after a completed drop,
+        // so the drop itself has to dismiss the overlay.
+        let mut app = test_app(1);
+        app.files_hovered = true;
+        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+        assert!(!app.files_hovered);
+    }
+
+    #[test]
+    fn dropping_onto_an_empty_scratch_tab_loads_into_it() {
+        let mut app = test_app(1);
+        let id = app.tabs[0].id;
+        let _ = app.update(Message::DroppedFileRead(Ok((
+            PathBuf::from("/tmp/dropped.txt"),
+            Arc::new("body".to_string()),
+        ))));
+
+        assert_eq!(app.tabs.len(), 1, "no stray Untitled left behind");
+        assert_eq!(app.tabs[0].id, id, "the tab keeps its id");
+        assert_eq!(
+            app.tabs[0].document.path.as_deref(),
+            Some(Path::new("/tmp/dropped.txt"))
+        );
+    }
+
+    #[test]
+    fn dropping_onto_a_file_backed_tab_opens_a_new_one() {
+        let mut app = test_app(1);
+        app.tabs[0].document.path = Some(PathBuf::from("/tmp/already-open.txt"));
+        let _ = app.update(Message::DroppedFileRead(Ok((
+            PathBuf::from("/tmp/dropped.txt"),
+            Arc::new("body".to_string()),
+        ))));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.active, 1);
+        assert_eq!(
+            app.tabs[1].document.path.as_deref(),
+            Some(Path::new("/tmp/dropped.txt"))
+        );
+    }
+
+    #[test]
+    fn dropping_an_already_open_file_focuses_its_tab() {
+        let mut app = test_app(2);
+        app.tabs[1].document.path = Some(PathBuf::from("/tmp/already-open.txt"));
+        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/already-open.txt")));
+
+        assert_eq!(app.tabs.len(), 2, "no duplicate tab");
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn dropping_a_file_leaves_an_in_flight_dialog_alone() {
+        let mut app = test_app(1);
+        app.file_dialog_active = true;
+        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+        assert!(app.file_dialog_active);
+
+        let _ = app.update(Message::DroppedFileRead(Ok((
+            PathBuf::from("/tmp/dropped.txt"),
+            Arc::new("body".to_string()),
+        ))));
+        assert!(app.file_dialog_active);
+    }
+
+    #[test]
+    fn the_unsaved_changes_prompt_turns_drops_away() {
+        let mut app = test_app(1);
+        app.pending_close = Some(PendingClose {
+            tab_id: app.tabs[0].id,
+            title: "Untitled".into(),
+            focused: 0,
+        });
+        app.files_hovered = true;
+        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+
+        assert!(!app.files_hovered, "the overlay still clears");
+        assert!(app.tabs[0].document.path.is_none(), "nothing was opened");
+        assert_eq!(app.tabs.len(), 1);
+    }
+
+    #[test]
+    fn an_unreadable_dropped_file_surfaces_an_error() {
+        let mut app = test_app(1);
+        let _ = app.update(Message::DroppedFileRead(Err(OpenError::Io {
+            path: PathBuf::from("/tmp/dropped.bin"),
+            kind: std::io::ErrorKind::InvalidData,
+        })));
+
+        assert!(app.error.is_some());
+        assert_eq!(app.tabs.len(), 1);
     }
 
     #[test]

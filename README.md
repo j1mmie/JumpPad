@@ -41,11 +41,16 @@ file, saving a note, or drafting a message.
  - Speed
  - Portability
  - Tabs
+ - Drag and drop files in to open them (see the caveat below on Wayland)
  - Syntax highlighting
  - Transparency
  - Automatic draft saving
  - Configurable via TOML
  - More to come...
+
+Drag and drop works on macOS, Windows, and Linux/X11. On a native Wayland
+session it does nothing - the underlying windowing library doesn't implement
+file drops there yet - so use the Open dialog instead.
 
 ## Design principles
 
