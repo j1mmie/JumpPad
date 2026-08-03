@@ -58,6 +58,9 @@ build "$work/make" make
 clone "tree-sitter-grammars/tree-sitter-pem" pem
 build "$work/pem" pem
 
+clone "tree-sitter-grammars/tree-sitter-html" html
+build "$work/html" html
+
 # xml and csv each bundle multiple grammars as subdirectories of one repo.
 clone "tree-sitter-grammars/tree-sitter-xml" xml
 build "$work/xml/xml" xml

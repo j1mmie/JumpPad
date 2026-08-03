@@ -6,7 +6,7 @@
 
 A lightweight, cross-platform, Rust-based plaintext editor with modern features and minimal bloat
 
-<img width="1120" height="784" alt="image" src="https://github.com/user-attachments/assets/eacb8fa7-04d2-401e-ad77-eae455abf96d" />
+<img width="720" alt="screenshot" src="https://github.com/user-attachments/assets/6f46d11d-0b78-4d3d-83b4-daf910fe23e3" />
 
 </div>
 
@@ -15,24 +15,27 @@ A lightweight, cross-platform, Rust-based plaintext editor with modern features 
 JumpPad is a learning project in the Rust ecosystem. It can be seen as a
 replacement for Notepad or Textedit - a handy, plaintext editor with a
 minimal featureset and low system requirements. At the same time, it tries
-to improve upon shortcomings of those projects, such as:
+to improve upon those products with the following:
 
-- Poor performance
-- Overconsumption of memory
-- Bloat from features that nobody asked for, like
-  - Markdown rendering
-  - Cloud support (OpenDrive, iCloud)
-- [Security vulnerabilities due to the above](https://www.cve.org/CVERecord?id=CVE-2026-20841)
+- Better performance
+- Lower memory consumption
+- Small, targeted feature set
+  - No rendering (Markdown, HTML, rich-text, etc)
+  - No cloud storage nags (OpenDrive, iCloud)
+  - No AI upsell
+  - No "smart quotes"
+- Better security model
+  - Syntax highlighting runs in a VM. [Avoids possible exploits like Notepad had](https://www.cve.org/CVERecord?id=CVE-2026-20841)
 
 JumpPad starts instantly, uses very little memory, and only includes features
 that are useful to text editing.
 
-JumpPad is **not** a code editor; it (purposely) lacks many features
+JumpPad is **not** a code editor; it purposely lacks many features
 that a code editor has:
-- no debugger
-- no terminal
-- no plugin ecosystem
-- no project explorer
+- No debugger
+- No terminal
+- No plugin ecosystem
+- No project explorer
 
 It's meant to be small and handy, for everyday tasks like editing a config
 file, saving a note, or drafting a message.
