@@ -845,6 +845,35 @@ take a `[patch.crates-io]` fork - and it's global, meaning every rounded
 corner and stroked border in the app (the modal, its focused button, the
 scrollbar) would go jagged to fix a seam the tab bar no longer has.
 
+## Drag and drop
+
+No crate needed for this - iced already delivers it. `iced_winit`'s
+`conversion.rs` maps winit's `HoveredFile`/`DroppedFile`/`HoveredFileCancelled`
+onto `iced::window::Event::{FileHovered, FileDropped, FilesHoveredLeft}`, and
+`subscription()` picks those three off `iced::event::listen_with`. Don't add a
+DnD dependency.
+
+Two things that will bite:
+
+- **A completed drop emits no `FilesHoveredLeft` on Windows or macOS.** The
+  `FileDropped` arm has to clear `files_hovered` itself, or the overlay sticks
+  after a successful drop.
+- **Native Wayland delivers nothing.** winit's Wayland backend has no file-DnD
+  implementation (0.30.13 and earlier), so drops are silently inert there while
+  X11, Win32, and macOS all work. Nothing in this repo can fix that; the file
+  dialog is the fallback. Don't chase a bug report about it as if it were
+  JumpPad's.
+- **The unsaved-changes modal's scrim doesn't stop a drop.** Window events
+  never go through the widget tree, so the scrim - which only swallows clicks -
+  is no defense. The `FileDropped` arm turns drops away while a prompt is up,
+  the same way `KeyPressed` intercepts keystrokes.
+
+A multi-file drop arrives as one `FileDropped` per file, so nothing special is
+needed to open several at once. Dropping onto an untouched scratch tab rebuilds
+that tab in place rather than calling `set_text` - the editor factory takes the
+file extension, and that's what selects the grammar, so a reused editor built
+for an untitled buffer would render unhighlighted.
+
 ## Config (`jumppad_config`)
 
 `config.toml` is looked for next to the running executable first, then
