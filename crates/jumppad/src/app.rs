@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use editor_core::{
     EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN, SavedSelection, SelectionKind, Tab,
@@ -20,6 +20,7 @@ use iced::{
 
 use crate::find::FindState;
 use crate::hotkey::{self, Hotkey};
+use crate::reload;
 use crate::session;
 use crate::visor::{self, Animation};
 
@@ -121,6 +122,18 @@ pub struct JumpPadApp {
     /// Live keyboard modifier state - iced's mouse events carry no
     /// modifiers, so shift+click handling reads it from here.
     modifiers: keyboard::Modifiers,
+    /// The config in effect - the baseline `apply_config` diffs a reloaded
+    /// file against.
+    config: jumppad_config::Config,
+    /// Same, for `apply_keybinds`.
+    keybinds: jumppad_config::KeybindsConfig,
+    /// Editor settings shared with every open tab's `TextArea` - the handle
+    /// a config reload writes through.
+    editor_config: Arc<jumppad_textarea::SharedEditorConfig>,
+    /// Whether the window was created transparent. Fixed at startup, so a
+    /// reloaded `alpha.background` can't cross it - see `apply_config`.
+    window_transparent: bool,
+    config_watch: reload::ConfigWatch,
 }
 
 /// State for the unsaved-changes modal - `focused` indexes the three
@@ -207,6 +220,14 @@ pub enum Message {
     /// The keyboard modifier state changed - keeps `JumpPadApp::modifiers`
     /// current between key presses.
     ModifiersChanged(keyboard::Modifiers),
+    /// The window regained focus - checks the config files for changes made
+    /// while it was away.
+    WindowFocused,
+    /// The OS file watcher saw activity on a config file.
+    ConfigFileEvent(reload::WatchedFile),
+    /// Periodic while a config-reload burst is pending - applies the
+    /// debounced reload once the files stop changing.
+    ConfigSettleTick,
 }
 
 /// The three choices offered by the unsaved-changes prompt (see
@@ -254,8 +275,13 @@ impl JumpPadApp {
         // the highlighting-poll subscription below re-checks periodically instead.
         let keybinds = jumppad_config::load_keybinds();
         let keybind_overrides = Arc::new(build_app_overrides(&keybinds));
-        let editor_overrides = Arc::new(build_editor_overrides(&keybinds));
         warn_unrecognized_overrides(&keybinds.overrides);
+
+        let editor_config = jumppad_textarea::SharedEditorConfig::new(
+            config.alpha.background,
+            build_editor_overrides(&keybinds),
+        );
+        editor_config.set_foreground_alpha(config.alpha.foreground);
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -265,9 +291,7 @@ impl JumpPadApp {
         // Which `TextEditorWidget` implementation new tabs are created with.
         let editor_factory: EditorFactory = Box::new(jumppad_textarea::TextArea::factory(
             registry,
-            editor_overrides,
-            config.alpha.background,
-            config.alpha.foreground,
+            editor_config.clone(),
         ));
 
         let session_candidates = session::candidate_dirs();
@@ -312,6 +336,13 @@ impl JumpPadApp {
             files_hovered: false,
             find: HashMap::new(),
             modifiers: keyboard::Modifiers::default(),
+            // The same expression `run()` derives the window's transparent
+            // flag from - this field is what remembers the outcome.
+            window_transparent: config.alpha.background < 1.0,
+            editor_config,
+            config_watch: reload::ConfigWatch::new(),
+            config,
+            keybinds,
         };
 
         let window_task = iced::window::latest().map(Message::WindowReady);
@@ -742,6 +773,95 @@ impl JumpPadApp {
         session::write_manifest_sync(&self.session_dir, &manifest);
     }
 
+    /// Reloads whichever config files settled out of a change burst. A file
+    /// that no longer parses keeps the current in-memory settings and says
+    /// so in the error banner - a save mid-edit must not reset anything.
+    fn reload_settled_configs(&mut self) {
+        for file in self.config_watch.settled(Instant::now()) {
+            let result = match file {
+                reload::WatchedFile::Config => {
+                    jumppad_config::try_load().map(|config| self.apply_config(config))
+                }
+                reload::WatchedFile::Keybinds => {
+                    jumppad_config::try_load_keybinds()
+                        .map(|keybinds| self.apply_keybinds(keybinds))
+                }
+            };
+            if let Err(err) = result {
+                eprintln!("jumppad: couldn't reload {}: {err}", file.name());
+                self.error = Some(format!(
+                    "{}: {err} - keeping the previous settings",
+                    file.name()
+                ));
+            }
+        }
+    }
+
+    /// Applies a freshly reloaded `config.toml`, diffing against the one in
+    /// effect. The single wiring point for live config: a new reloadable
+    /// setting gets its arm here, and a setting that can only apply at
+    /// startup gets a `restart_required` line instead.
+    fn apply_config(&mut self, new: jumppad_config::Config) {
+        let current = &self.config;
+        let mut repaint = false;
+
+        if new.theme != current.theme {
+            self.theme = resolve_theme(&new.theme);
+            repaint = true;
+        }
+
+        if new.alpha.foreground != current.alpha.foreground {
+            self.editor_config.set_foreground_alpha(new.alpha.foreground);
+            repaint = true;
+        }
+
+        if new.alpha.background != current.alpha.background {
+            if self.window_transparent {
+                self.background_alpha = new.alpha.background.clamp(0.0, 1.0);
+                self.editor_config.set_background_alpha(new.alpha.background);
+                repaint = true;
+            } else if new.alpha.background < 1.0 {
+                // Applying anyway would darken the window without revealing
+                // the desktop: an opaque surface presents `rgb * a` as-is.
+                restart_required("[alpha] background on a window that started opaque");
+            }
+        }
+
+        if new.window != current.window {
+            restart_required("[window] decorations");
+        }
+        if new.visor.enabled != current.visor.enabled {
+            restart_required("[visor] enabled");
+        }
+        if new.syntaxes != current.syntaxes {
+            restart_required("[syntaxes]");
+        }
+
+        if repaint {
+            // tiny-skia's damage tracking can otherwise skip presenting a
+            // change that moved no widget - an alpha-only reload, say.
+            self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+        }
+        self.config = new;
+    }
+
+    /// Mirror of `apply_config` for `keybinds.toml`. The override tables are
+    /// rebuilt wholesale - they're small - so added, changed, and removed
+    /// binds all land in one pass.
+    fn apply_keybinds(&mut self, new: jumppad_config::KeybindsConfig) {
+        self.keybind_overrides = Arc::new(build_app_overrides(&new));
+        self.editor_config.set_overrides(build_editor_overrides(&new));
+        warn_unrecognized_overrides(&new.overrides);
+
+        // Re-registered only on an actual change: dropping the old
+        // registration releases the chord to other apps, however briefly.
+        if self.visor_enabled && new.toggle != self.keybinds.toggle {
+            self.hotkey = None;
+            self.hotkey = Hotkey::register(new.toggle);
+        }
+        self.keybinds = new;
+    }
+
     fn save_active_tab(&mut self, force_dialog: bool) -> Task<Message> {
         let Some(tab) = self.tabs.get(self.active) else {
             return Task::none();
@@ -842,6 +962,7 @@ impl JumpPadApp {
             Message::SaveFileAs => self.save_active_tab(true),
             Message::FileSaved(id, Ok(path)) => {
                 self.file_dialog_active = false;
+                self.config_watch.note_saved(&path, Instant::now());
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
                     tab.document.path = Some(path);
                     tab.dirty = false;
@@ -1025,6 +1146,18 @@ impl JumpPadApp {
             }
             Message::ModifiersChanged(modifiers) => {
                 self.modifiers = modifiers;
+                Task::none()
+            }
+            Message::WindowFocused => {
+                self.config_watch.check(Instant::now());
+                Task::none()
+            }
+            Message::ConfigFileEvent(file) => {
+                self.config_watch.note_event(file, Instant::now());
+                Task::none()
+            }
+            Message::ConfigSettleTick => {
+                self.reload_settled_configs();
                 Task::none()
             }
             Message::DismissError => {
@@ -1527,10 +1660,14 @@ impl JumpPadApp {
                 iced::Event::Window(iced::window::Event::FileDropped(path)) => {
                     Some(Message::FileDropped(path))
                 }
+                iced::Event::Window(iced::window::Event::Focused) => {
+                    Some(Message::WindowFocused)
+                }
                 _ => None,
             }),
             iced::window::close_requests().map(Message::WindowCloseRequested),
             hotkey::subscription(),
+            reload::subscription(),
             iced::window::resize_events().map(|_| Message::WindowResized),
         ];
 
@@ -1568,6 +1705,12 @@ impl JumpPadApp {
         {
             subscriptions
                 .push(iced::time::every(AUTOSAVE_INTERVAL).map(|_| Message::AutosaveTick));
+        }
+
+        if self.config_watch.pending() {
+            subscriptions.push(
+                iced::time::every(reload::SETTLE_TICK).map(|_| Message::ConfigSettleTick),
+            );
         }
 
         Subscription::batch(subscriptions)
@@ -1952,6 +2095,12 @@ fn premultiply(color: Color) -> Color {
     }
 }
 
+/// A reloaded setting that only applies at startup. Logged, not shown in
+/// the banner: the change is valid, it just waits for the next start.
+fn restart_required(what: &str) {
+    eprintln!("jumppad: {what} changed - takes effect on restart");
+}
+
 /// Matches a config-file theme name against `Theme::ALL` by display name
 /// (`"Dracula"`, `"Solarized Light"`, ...), case-insensitively so hand-edited
 /// TOML doesn't have to get the exact casing right. Falls back to the
@@ -2245,6 +2394,11 @@ mod tests {
             files_hovered: false,
             find: HashMap::new(),
             modifiers: Modifiers::default(),
+            config: jumppad_config::Config::default(),
+            keybinds: jumppad_config::KeybindsConfig::default(),
+            editor_config: jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
+            window_transparent: false,
+            config_watch: reload::ConfigWatch::new(),
         }
     }
 
@@ -2260,8 +2414,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);
@@ -2316,8 +2469,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);
@@ -2352,8 +2504,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);
@@ -2860,6 +3011,103 @@ mod tests {
             ),
         );
         assert!(build_app_overrides(&keybinds).is_empty());
+    }
+
+    #[test]
+    fn apply_keybinds_swaps_both_override_tables_live() {
+        let mut app = test_app(1);
+        let keybinds: jumppad_config::KeybindsConfig = toml::from_str(
+            r#"
+            toggle = "control+Backquote"
+
+            [overrides]
+            new_tab = "control+alt+n"
+            undo = "control+alt+z"
+            "#,
+        )
+        .unwrap();
+        app.apply_keybinds(keybinds);
+
+        // App level: the very next key press resolves through the new table.
+        assert!(matches!(
+            handle_hotkey(
+                Key::Character("n".into()),
+                Modifiers::CTRL | Modifiers::ALT,
+                key::Physical::Code(key::Code::KeyN),
+                &app.keybind_overrides
+            ),
+            Some(Message::NewTab)
+        ));
+        // Editor level: the shared handle every open tab reads was updated.
+        assert_eq!(
+            app.editor_config
+                .overrides()
+                .get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::KeyZ)),
+            Some(&jumppad_textarea::EditorCommand::Undo)
+        );
+
+        // A revert to defaults removes the binds just as live.
+        app.apply_keybinds(jumppad_config::KeybindsConfig::default());
+        assert!(app.keybind_overrides.is_empty());
+        assert!(app.editor_config.overrides().is_empty());
+    }
+
+    #[test]
+    fn apply_config_swaps_the_theme_and_arms_a_repaint() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            theme: "Dracula".to_string(),
+            ..Default::default()
+        };
+        app.apply_config(config);
+        assert_eq!(app.theme.to_string(), "Dracula");
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+        assert_eq!(app.config.theme, "Dracula");
+    }
+
+    #[test]
+    fn apply_config_background_alpha_needs_a_window_born_transparent() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            alpha: jumppad_config::AlphaConfig { background: 0.5, foreground: 1.0 },
+            ..Default::default()
+        };
+
+        // Booted opaque: the surface can't turn translucent, so nothing moves.
+        app.apply_config(config.clone());
+        assert_eq!(app.background_alpha, 1.0);
+        assert_eq!(app.editor_config.background_alpha(), 1.0);
+
+        // Booted transparent: the window style and the editors both follow.
+        app.window_transparent = true;
+        app.config = jumppad_config::Config::default();
+        app.apply_config(config);
+        assert_eq!(app.background_alpha, 0.5);
+        assert_eq!(app.editor_config.background_alpha(), 0.5);
+    }
+
+    #[test]
+    fn restart_required_settings_mutate_no_live_state() {
+        let mut app = test_app(1);
+        let theme_before = app.theme.to_string();
+        let config = jumppad_config::Config {
+            window: jumppad_config::WindowConfig { decorations: false },
+            visor: jumppad_config::VisorConfig { enabled: true },
+            syntaxes: jumppad_config::SyntaxesConfig(
+                [("toml".to_string(), vec!["toml".to_string()])].into(),
+            ),
+            ..Default::default()
+        };
+
+        app.apply_config(config.clone());
+        assert_eq!(app.theme.to_string(), theme_before);
+        assert_eq!(app.background_alpha, 1.0);
+        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
+        assert!(!app.visor_enabled);
+        // The new values still become the diff baseline, so the
+        // restart-required log fires once per transition rather than on
+        // every later unrelated reload.
+        assert_eq!(app.config, config);
     }
 
     fn key_press(named: Named, modifiers: Modifiers, code: key::Code) -> Message {

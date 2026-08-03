@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use editor_core::SavedSelection;
+use editor_core::{Debounce, SavedSelection};
 
 /// Where the caret was and what was selected - the state undo has to put
 /// back, not just the cursor pair. Undoing an edit that replaced a
@@ -29,7 +29,9 @@ const COALESCE_WINDOW: Duration = Duration::from_millis(750);
 pub struct History {
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
-    last_edit_at: Option<Instant>,
+    /// A burst of edits is one undo step - its leading edge is what pushes
+    /// a snapshot.
+    burst: Debounce,
 }
 
 struct Snapshot {
@@ -42,7 +44,7 @@ impl History {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
-            last_edit_at: None,
+            burst: Debounce::new(COALESCE_WINDOW),
         }
     }
 
@@ -61,11 +63,7 @@ impl History {
     }
 
     fn record_before_edit_at(&mut self, text: &str, cursor: CursorState, now: Instant) {
-        let start_new_step = match self.last_edit_at {
-            Some(last) => now.duration_since(last) > COALESCE_WINDOW,
-            None => true,
-        };
-        if start_new_step {
+        if self.burst.poke(now) {
             self.undo.push(Snapshot {
                 text: text.to_string(),
                 cursor,
@@ -75,7 +73,6 @@ impl History {
             }
         }
         self.redo.clear();
-        self.last_edit_at = Some(now);
     }
 
     /// Pops the most recent undo step, pushing `current` onto the redo stack
@@ -99,7 +96,7 @@ impl History {
         });
         // The next edit should always start a fresh undo step rather than
         // possibly coalescing with whatever came before the undo.
-        self.last_edit_at = None;
+        self.burst.reset();
         Some((snapshot.text, snapshot.cursor))
     }
 
@@ -114,7 +111,7 @@ impl History {
             text: current_text.to_string(),
             cursor: current_cursor,
         });
-        self.last_edit_at = None;
+        self.burst.reset();
         Some((snapshot.text, snapshot.cursor))
     }
 }

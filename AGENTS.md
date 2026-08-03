@@ -1004,6 +1004,43 @@ the editor from opening. Config sections (`syntaxes`, `theme`) are
 independently defaulted so old config files stay valid as new sections
 get added.
 
+### Live reload
+
+`config.toml` and `keybinds.toml` reload while the app runs, debounced.
+Three signals feed one `ConfigWatch` (`crates/jumppad/src/reload.rs`):
+the editor saving a watched file itself (`FileSaved` → `note_saved`),
+native file-system events (`notify`, watching the candidate
+*directories* so atomic-save renames don't lose the watch), and a
+fingerprint check on window focus as the safety net for missed events.
+Each signal only marks a file dirty and pokes a shared
+`editor_core::Debounce`; `settled` is the single decider of what
+reloads, so the signals can't conflict or double-apply.
+
+**Adding a live setting means adding an arm to `apply_config` (or
+`apply_keybinds`) in `app.rs` - nowhere else.** Both diff against the
+stored `self.config`/`self.keybinds` baseline and only touch what
+changed. A setting that can only apply at startup (window decorations,
+visor mode, `[syntaxes]`, and `alpha.background` on a window that booted
+opaque - the `transparent` window flag is creation-time) gets a
+`restart_required` log line instead of a half-working apply.
+
+Reloads go through `try_load`/`try_load_keybinds`, which never write
+default files and never fall back to `Default` - a half-edited file
+keeps the last good in-memory config, with the parse error in the
+dismissible banner. Contrast with startup's `load()`, which must never
+fail (above).
+
+Two things reach the *editor* widgets on reload, both via the
+`SharedEditorConfig` handle every `TextArea` reads per view (the app
+can't reach into a `Box<dyn TextEditorWidget>`): the editor keybind
+overrides and `alpha.background`. `alpha.foreground` rides the same
+setter but is stored in a static atomic (`to_format` must stay a bare
+`fn` pointer), and it also sits in `HighlighterSettings`' hand-written
+`PartialEq` - without that, syntax-colored spans keep their old alpha
+until an unrelated edit, same bug class as the find-state fields. Any
+visual apply also arms `redraw_nudge_frames`, since tiny-skia's damage
+tracking can otherwise skip presenting a change that moved no widget.
+
 ## Where the grammar files live
 
 `syntaxes/` at the repo root holds the `.wasm` grammars and

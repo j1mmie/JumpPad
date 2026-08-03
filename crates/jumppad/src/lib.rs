@@ -7,6 +7,7 @@ mod find;
 mod hotkey;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+mod reload;
 mod session;
 mod visor;
 #[cfg(target_os = "windows")]
