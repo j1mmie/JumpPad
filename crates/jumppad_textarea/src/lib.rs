@@ -188,7 +188,12 @@ impl TextArea {
         else {
             return false;
         };
+        // The rebuilt content starts at the top of the document, so the view
+        // has to be carried across by hand - without it, undoing an edit that
+        // is already on screen would still jump the document around.
+        let view = self.content.scrolled_to();
         self.content = Content::with_text(&restored_text);
+        self.content.restore_view(view);
         self.resync_source();
         // Replaying the selection is the point: `move_cursor_to` clears one,
         // so an undo that only moved the cursor would drop the selection the
