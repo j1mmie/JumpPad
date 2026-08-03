@@ -845,6 +845,33 @@ take a `[patch.crates-io]` fork - and it's global, meaning every rounded
 corner and stroked border in the app (the modal, its focused button, the
 scrollbar) would go jagged to fix a seam the tab bar no longer has.
 
+## Opening files
+
+Three entry points reach the same place. `Cmd/Ctrl+O` goes through `rfd`'s
+dialog, a drop through the window events below, and a path named on the command
+line through `Message::OpenPaths` - all of them end at
+`JumpPadApp::open_loaded_file`, which decides between reusing an untouched
+scratch tab and pushing a new one. Add a fourth entry point there, not beside it.
+
+`parse_args` in `lib.rs` treats everything that isn't `--help`/`--version` as a
+path. Resist growing that into a flag parser; the two flags exist because
+packagers expect them.
+
+Argv paths are read *synchronously*, unlike a drop's `Task::perform`. That's
+deliberate: concurrent reads would land in nondeterministic order, and
+`jumppad a.txt b.txt` has to produce tabs in that order. They're also deferred
+one message past `JumpPadApp::new` (via `Task::done`) so `next_id` is already
+settled by whatever the session restored before any argv tab is pushed.
+
+A named file that doesn't exist opens an empty tab bound to its path rather
+than erroring - that's how you start a new file. Two consequences: this is the
+one place argv behaves differently from a drop (where a missing file *is* an
+error, though a dropped file always exists), and session restore has to
+tolerate a clean file-backed tab whose file was never created, which is why the
+restore branch in `new()` skips `reload_from_disk` for a path that doesn't
+exist. Undo that skip and you get a spurious "Couldn't reload a restored tab"
+on every launch after someone runs `jumppad newfile.txt` and quits.
+
 ## Drag and drop
 
 No crate needed for this - iced already delivers it. `iced_winit`'s

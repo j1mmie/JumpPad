@@ -42,6 +42,7 @@ file, saving a note, or drafting a message.
  - Portability
  - Tabs
  - Drag and drop files in to open them (see the caveat below on Wayland)
+ - Open files from the command line
  - Syntax highlighting
  - Transparency
  - Automatic draft saving
@@ -50,7 +51,19 @@ file, saving a note, or drafting a message.
 
 Drag and drop works on macOS, Windows, and Linux/X11. On a native Wayland
 session it does nothing - the underlying windowing library doesn't implement
-file drops there yet - so use the Open dialog instead.
+file drops there yet - so use the command line or the Open dialog instead.
+
+## Usage
+
+```
+jumppad [FILE]...
+```
+
+Each `FILE` opens in its own tab, in the order given. A file that doesn't
+exist yet opens as an empty tab bound to that path, so `jumppad newnote.md`
+is a fine way to start one - the first save creates it.
+
+`-h`/`--help` and `-V`/`--version` print and exit. There are no other flags.
 
 ## Design principles
 

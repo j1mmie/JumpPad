@@ -12,7 +12,44 @@ mod visor;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
+
 use app::JumpPadApp;
+
+/// What the command line asked for.
+#[derive(Debug, PartialEq, Eq)]
+enum Invocation {
+    Help,
+    Version,
+    /// Files to open at startup, in the order they were named.
+    Open(Vec<PathBuf>),
+}
+
+/// Everything that isn't `--help`/`--version` is a path. Deliberately not a
+/// flag parser: the two flags packagers expect, and nothing that would grow
+/// into a CLI surface this editor doesn't want.
+fn parse_args(args: impl Iterator<Item = OsString>) -> Invocation {
+    let mut paths = Vec::new();
+    for arg in args {
+        match arg.to_str() {
+            Some("--help" | "-h") => return Invocation::Help,
+            Some("--version" | "-V") => return Invocation::Version,
+            _ => paths.push(PathBuf::from(arg)),
+        }
+    }
+    Invocation::Open(paths)
+}
+
+/// The name this binary was invoked as - `run()` is shared by both binaries,
+/// and the lib crate can't see `CARGO_BIN_NAME`.
+fn program_name(argv0: Option<&OsString>) -> String {
+    argv0
+        .map(Path::new)
+        .and_then(Path::file_name)
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "jumppad".to_string())
+}
 
 /// Why `[alpha] background < 1.0` will be ignored on this build, or `None`
 /// when the window can really be translucent. One known case, evidenced in
@@ -29,6 +66,32 @@ const OPAQUE_WINDOW_REASON: Option<&str> =
 
 /// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {
+    let mut argv = std::env::args_os();
+    let program = program_name(argv.next().as_ref());
+    let paths = match parse_args(argv) {
+        Invocation::Help => {
+            println!(
+                "\
+{program} - a lightweight plaintext editor
+
+Usage: {program} [FILE]...
+
+Opens each FILE in its own tab. A FILE that doesn't exist yet opens as an
+empty tab saved to that path on the first save.
+
+Options:
+  -h, --help       Print this help
+  -V, --version    Print the version"
+            );
+            return Ok(());
+        }
+        Invocation::Version => {
+            println!("{program} {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Invocation::Open(paths) => paths,
+    };
+
     let config = jumppad_config::load();
     let visor_enabled = config.visor.enabled;
     // Visor mode wins: a drop-down visor is undecorated by definition.
@@ -51,8 +114,13 @@ pub fn run() -> iced::Result {
         }
     }
 
-    // `config` is cloned per call since the boot closure must be `Fn`, not just `FnOnce`.
-    iced::application(move || JumpPadApp::new(config.clone()), JumpPadApp::update, JumpPadApp::view)
+    // `config` and `paths` are cloned per call since the boot closure must be
+    // `Fn`, not just `FnOnce`.
+    iced::application(
+        move || JumpPadApp::new(config.clone(), paths.clone()),
+        JumpPadApp::update,
+        JumpPadApp::view,
+    )
         .title("JumpPad")
         .window_size(iced::Size::new(900.0, 600.0))
         .decorations(decorations)
@@ -74,4 +142,57 @@ pub fn run() -> iced::Result {
         // Runs a last-ditch draft flush before actually closing the window.
         .exit_on_close_request(false)
         .run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Invocation {
+        parse_args(args.iter().map(OsString::from))
+    }
+
+    fn paths(args: &[&str]) -> Vec<PathBuf> {
+        match parse(args) {
+            Invocation::Open(paths) => paths,
+            other => panic!("expected paths, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_arguments_opens_nothing() {
+        assert!(paths(&[]).is_empty());
+    }
+
+    #[test]
+    fn bare_arguments_are_paths_in_order() {
+        assert_eq!(
+            paths(&["a.txt", "../b.md"]),
+            vec![PathBuf::from("a.txt"), PathBuf::from("../b.md")]
+        );
+    }
+
+    #[test]
+    fn help_and_version_win_wherever_they_appear() {
+        assert_eq!(parse(&["-h"]), Invocation::Help);
+        assert_eq!(parse(&["--help"]), Invocation::Help);
+        assert_eq!(parse(&["a.txt", "--help"]), Invocation::Help);
+        assert_eq!(parse(&["-V"]), Invocation::Version);
+        assert_eq!(parse(&["--version"]), Invocation::Version);
+        assert_eq!(parse(&["a.txt", "--version"]), Invocation::Version);
+    }
+
+    #[test]
+    fn an_unrecognized_flag_is_just_a_filename() {
+        // No flag surface beyond the two above - `-x` becomes a path, and
+        // fails later as a missing file rather than as a usage error.
+        assert_eq!(paths(&["-x"]), vec![PathBuf::from("-x")]);
+    }
+
+    #[test]
+    fn program_name_falls_back_when_argv0_is_missing_or_odd() {
+        assert_eq!(program_name(Some(&OsString::from("/usr/bin/jumppad"))), "jumppad");
+        assert_eq!(program_name(Some(&OsString::from("jumppad-gpu"))), "jumppad-gpu");
+        assert_eq!(program_name(None), "jumppad");
+    }
 }

@@ -145,6 +145,8 @@ pub enum Message {
     /// path never touches `file_dialog_active` - a drop landing while a save
     /// dialog is open must not clear that flag.
     DroppedFileRead(Result<(PathBuf, Arc<String>), OpenError>),
+    /// Files named on the command line, opened in the order given.
+    OpenPaths(Vec<PathBuf>),
     SaveFile,
     SaveFileAs,
     FileSaved(u64, Result<PathBuf, SaveError>),
@@ -238,7 +240,14 @@ impl JumpPadApp {
     /// Takes the already-loaded config rather than loading it itself: `run()`
     /// (in `lib.rs`) loads it before the iced runtime starts, which is
     /// before this constructor ever runs.
-    pub fn new(config: jumppad_config::Config) -> (Self, Task<Message>) {
+    pub fn new(config: jumppad_config::Config, paths: Vec<PathBuf>) -> (Self, Task<Message>) {
+        // Deferred to a message rather than opened here, so the paths land
+        // after `next_id` has been settled by whatever the session restored.
+        let argv_task = if paths.is_empty() {
+            Task::none()
+        } else {
+            Task::done(Message::OpenPaths(paths))
+        };
         let search_dirs = default_search_dirs();
         log_wasm_files_found(&search_dirs);
         // No push-based wake-up needed (unlike egui's `ctx.request_repaint()`) -
@@ -311,7 +320,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, focus_editor()]),
+                Task::batch([task, window_task, focus_editor(), argv_task]),
             );
         };
 
@@ -361,10 +370,15 @@ impl JumpPadApp {
                     false,
                     &app.editor_factory,
                 ));
-                let id = entry.id;
-                reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
-                    Message::SessionFileLoaded(id, result)
-                }));
+                // A file that isn't there is the ordinary state of a tab named
+                // on the command line and never saved - restore it as the empty
+                // buffer it was, rather than reading it and reporting an error.
+                if path.exists() {
+                    let id = entry.id;
+                    reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
+                        Message::SessionFileLoaded(id, result)
+                    }));
+                }
             } else {
                 app.tabs.push(Tab::untitled(entry.id, &app.editor_factory));
             }
@@ -374,7 +388,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, focus_editor()]),
+                Task::batch([task, window_task, focus_editor(), argv_task]),
             );
         }
 
@@ -398,7 +412,7 @@ impl JumpPadApp {
         let task = Task::batch(
             reload_tasks
                 .into_iter()
-                .chain([switch_task, focus_task, window_task]),
+                .chain([switch_task, focus_task, window_task, argv_task]),
         );
         (app, task)
     }
@@ -420,9 +434,52 @@ impl JumpPadApp {
         focus_editor()
     }
 
-    /// Opens a dropped file, loading it into the active tab when that tab is
-    /// an untouched scratch tab rather than leaving a stray "Untitled" behind.
-    fn open_dropped_file(&mut self, path: PathBuf, contents: &str) -> Task<Message> {
+    /// Opens each path named on the command line, in order, leaving the last
+    /// one active.
+    ///
+    /// Reads synchronously, the way restored drafts already do: these are the
+    /// files the user is waiting on, so blocking beats a frame of latency, and
+    /// concurrent reads wouldn't preserve the order they were named in.
+    fn open_paths(&mut self, paths: Vec<PathBuf>) -> Task<Message> {
+        let mut tasks = Vec::new();
+        let mut problems = Vec::new();
+        for path in paths {
+            if let Some(index) = self.tab_index_for(&path) {
+                tasks.push(self.switch_active(index));
+                continue;
+            }
+            if path.is_dir() {
+                problems.push(format!("{}: is a folder", path.display()));
+                continue;
+            }
+            match std::fs::read_to_string(&path) {
+                Ok(contents) => tasks.push(self.open_loaded_file(path, &contents)),
+                // Naming a file that isn't there yet is how you start one -
+                // an empty tab, saved to that path on the first save.
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    tasks.push(self.open_loaded_file(path, ""))
+                }
+                Err(err) => problems.push(format!("{}: {}", path.display(), err.kind())),
+            }
+        }
+        // One row, so several bad paths have to share it.
+        if !problems.is_empty() {
+            self.error = Some(format!("Couldn't open {}", problems.join("; ")));
+        }
+        Task::batch(tasks)
+    }
+
+    /// The tab already showing `path`, if one is open.
+    fn tab_index_for(&self, path: &Path) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.document.path.as_deref() == Some(path))
+    }
+
+    /// Opens an already-read file, loading it into the active tab when that tab
+    /// is an untouched scratch tab rather than leaving a stray "Untitled"
+    /// behind. Shared by dropped files and files named on the command line.
+    fn open_loaded_file(&mut self, path: PathBuf, contents: &str) -> Task<Message> {
         let scratch = self.tabs.get(self.active).is_some_and(|tab| {
             tab.document.path.is_none() && !tab.dirty && tab.editor.text().is_empty()
         });
@@ -762,11 +819,7 @@ impl JumpPadApp {
                 }
                 // Already open - focus that tab rather than opening a second
                 // copy of the same file.
-                if let Some(index) = self
-                    .tabs
-                    .iter()
-                    .position(|tab| tab.document.path.as_deref() == Some(path.as_path()))
-                {
+                if let Some(index) = self.tab_index_for(&path) {
                     return self.switch_active(index);
                 }
                 if path.is_dir() {
@@ -776,7 +829,7 @@ impl JumpPadApp {
                 Task::perform(read_path(path), Message::DroppedFileRead)
             }
             Message::DroppedFileRead(Ok((path, contents))) => {
-                self.open_dropped_file(path, &contents)
+                self.open_loaded_file(path, &contents)
             }
             Message::DroppedFileRead(Err(OpenError::Io { path, kind })) => {
                 self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
@@ -784,6 +837,7 @@ impl JumpPadApp {
             }
             // No dialog is involved in a drop.
             Message::DroppedFileRead(Err(OpenError::DialogClosed)) => Task::none(),
+            Message::OpenPaths(paths) => self.open_paths(paths),
             Message::SaveFile => self.save_active_tab(false),
             Message::SaveFileAs => self.save_active_tab(true),
             Message::FileSaved(id, Ok(path)) => {
@@ -2964,6 +3018,107 @@ mod tests {
             kind: std::io::ErrorKind::NotFound,
         })));
         assert!(!app.file_dialog_active);
+    }
+
+    /// A fresh scratch directory per test, under the OS temp dir - the same
+    /// shape `session.rs`'s tests use.
+    fn argv_scratch_dir() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir()
+            .join(format!("jumppad-argv-test-{}-{id}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("scratch dir");
+        dir
+    }
+
+    #[test]
+    fn a_named_file_loads_into_the_startup_scratch_tab() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "hello").expect("write");
+
+        let mut app = test_app(1);
+        let id = app.tabs[0].id;
+        let _ = app.update(Message::OpenPaths(vec![file.clone()]));
+
+        assert_eq!(app.tabs.len(), 1, "no stray Untitled left behind");
+        assert_eq!(app.tabs[0].id, id);
+        assert_eq!(app.tabs[0].document.path.as_deref(), Some(file.as_path()));
+    }
+
+    #[test]
+    fn named_files_open_in_order_with_the_last_active() {
+        let dir = argv_scratch_dir();
+        let first = dir.join("a.txt");
+        let second = dir.join("b.txt");
+        std::fs::write(&first, "a").expect("write");
+        std::fs::write(&second, "b").expect("write");
+
+        let mut app = test_app(1);
+        let _ = app.update(Message::OpenPaths(vec![first.clone(), second.clone()]));
+
+        assert_eq!(app.tabs.len(), 2);
+        assert_eq!(app.tabs[0].document.path.as_deref(), Some(first.as_path()));
+        assert_eq!(app.tabs[1].document.path.as_deref(), Some(second.as_path()));
+        assert_eq!(app.active, 1, "the last one named is the one you land on");
+    }
+
+    #[test]
+    fn naming_a_file_that_does_not_exist_opens_an_empty_buffer_for_it() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("brand-new.md");
+
+        let mut app = test_app(1);
+        let _ = app.update(Message::OpenPaths(vec![file.clone()]));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert_eq!(
+            app.tabs[0].document.path.as_deref(),
+            Some(file.as_path()),
+            "bound to the path, so the first save creates it"
+        );
+        assert!(app.tabs[0].editor.text().is_empty());
+        assert!(!app.tabs[0].dirty, "nothing typed yet");
+        assert!(app.error.is_none(), "a file you're about to create isn't an error");
+    }
+
+    #[test]
+    fn naming_a_directory_surfaces_an_error_and_opens_nothing() {
+        let dir = argv_scratch_dir();
+
+        let mut app = test_app(1);
+        let _ = app.update(Message::OpenPaths(vec![dir.clone()]));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.tabs[0].document.path.is_none());
+        let error = app.error.expect("an error row");
+        assert!(error.contains("is a folder"), "got {error:?}");
+    }
+
+    #[test]
+    fn naming_an_already_open_file_focuses_its_tab() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("restored.txt");
+        std::fs::write(&file, "body").expect("write");
+
+        let mut app = test_app(2);
+        app.tabs[1].document.path = Some(file.clone());
+        let _ = app.update(Message::OpenPaths(vec![file]));
+
+        assert_eq!(app.tabs.len(), 2, "no duplicate of a restored tab");
+        assert_eq!(app.active, 1);
+    }
+
+    #[test]
+    fn naming_no_files_changes_nothing() {
+        let mut app = test_app(1);
+        let _ = app.update(Message::OpenPaths(Vec::new()));
+
+        assert_eq!(app.tabs.len(), 1);
+        assert!(app.tabs[0].document.path.is_none());
+        assert!(app.error.is_none());
     }
 
     #[test]
