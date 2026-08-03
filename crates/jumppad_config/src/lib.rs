@@ -22,6 +22,32 @@ pub struct Config {
     pub visor: VisorConfig,
     pub alpha: AlphaConfig,
     pub window: WindowConfig,
+    /// `[[comment_styles]]` entries; last so the array-of-tables lands at
+    /// the end of the written default file.
+    pub comment_styles: Vec<CommentStyle>,
+}
+
+impl Config {
+    /// Flattens `[[comment_styles]]` into extension -> prefix, lowercasing
+    /// keys (lookups lowercase too). An extension listed twice keeps the
+    /// later entry's prefix.
+    pub fn comment_prefixes(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        for style in &self.comment_styles {
+            for language in &style.languages {
+                map.insert(language.to_lowercase(), style.prefix.clone());
+            }
+        }
+        map
+    }
+}
+
+/// One single-line comment style: the file extensions (`languages`, no
+/// leading dot) that toggle-comment uses `prefix` for.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CommentStyle {
+    pub languages: Vec<String>,
+    pub prefix: String,
 }
 
 impl Default for Config {
@@ -482,6 +508,61 @@ mod tests {
         )
         .unwrap();
         assert!(!config.window.decorations);
+    }
+
+    #[test]
+    fn config_toml_with_no_comment_styles_keeps_the_builtin_defaults() {
+        let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
+        let prefixes = config.comment_prefixes();
+        assert_eq!(prefixes.get("rs").map(String::as_str), Some("// "));
+        assert_eq!(prefixes.get("toml").map(String::as_str), Some("# "));
+        assert_eq!(prefixes.get("lua").map(String::as_str), Some("-- "));
+    }
+
+    #[test]
+    fn a_comment_styles_section_replaces_the_defaults_wholesale() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [[comment_styles]]
+            languages = ["cpp", "js"]
+            prefix = "// "
+            "#,
+        )
+        .unwrap();
+        let prefixes = config.comment_prefixes();
+        assert_eq!(prefixes.get("cpp").map(String::as_str), Some("// "));
+        assert_eq!(prefixes.get("rs"), None, "built-in defaults are gone");
+    }
+
+    #[test]
+    fn comment_prefixes_lowercases_keys_and_lets_a_later_entry_win() {
+        let config = Config {
+            comment_styles: vec![
+                CommentStyle {
+                    languages: vec!["RS".to_string(), "c".to_string()],
+                    prefix: "// ".to_string(),
+                },
+                CommentStyle {
+                    languages: vec!["c".to_string()],
+                    prefix: "# ".to_string(),
+                },
+            ],
+            ..Default::default()
+        };
+        let prefixes = config.comment_prefixes();
+        assert_eq!(prefixes.get("rs").map(String::as_str), Some("// "));
+        assert_eq!(prefixes.get("c").map(String::as_str), Some("# "));
+    }
+
+    /// Guards the first-run `write_default` path: the default config -
+    /// array-of-tables included - must serialize and parse back unchanged.
+    #[test]
+    fn default_config_round_trips_through_toml() {
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        let reparsed: Config = toml::from_str(&written).unwrap();
+        assert_eq!(reparsed, Config::default());
     }
 
     #[test]

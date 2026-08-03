@@ -282,6 +282,7 @@ impl JumpPadApp {
             build_editor_overrides(&keybinds),
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
+        editor_config.set_comment_prefixes(config.comment_prefixes());
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -825,6 +826,11 @@ impl JumpPadApp {
                 // the desktop: an opaque surface presents `rgb * a` as-is.
                 restart_required("[alpha] background on a window that started opaque");
             }
+        }
+
+        // No repaint: nothing on screen changes until the next toggle.
+        if new.comment_styles != current.comment_styles {
+            self.editor_config.set_comment_prefixes(new.comment_prefixes());
         }
 
         if new.window != current.window {
@@ -3084,6 +3090,24 @@ mod tests {
         app.apply_config(config);
         assert_eq!(app.background_alpha, 0.5);
         assert_eq!(app.editor_config.background_alpha(), 0.5);
+    }
+
+    #[test]
+    fn apply_config_reaches_the_shared_comment_prefixes() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            comment_styles: vec![jumppad_config::CommentStyle {
+                languages: vec!["zig".to_string()],
+                prefix: "// ".to_string(),
+            }],
+            ..Default::default()
+        };
+        app.apply_config(config);
+        assert_eq!(
+            app.editor_config.comment_prefixes().get("zig").map(String::as_str),
+            Some("// ")
+        );
+        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
     }
 
     #[test]

@@ -1,3 +1,4 @@
+mod comment;
 mod history;
 mod scrollbar;
 pub mod text_editor;
@@ -32,6 +33,7 @@ pub enum EditorCommand {
     SelectDocumentEnd,
     Undo,
     Redo,
+    ToggleComment,
 }
 
 /// The canonical `keybinds.toml` override name for each [`EditorCommand`].
@@ -44,6 +46,7 @@ pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
     ("select_document_end", EditorCommand::SelectDocumentEnd),
     ("undo", EditorCommand::Undo),
     ("redo", EditorCommand::Redo),
+    ("toggle_comment", EditorCommand::ToggleComment),
 ];
 
 /// A user override's resolved chord, keyed by physical key (layout-
@@ -61,6 +64,9 @@ pub struct SharedEditorConfig {
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole map.
     overrides: RwLock<Arc<EditorOverrides>>,
+    /// Extension -> single-line comment prefix, flattened from config's
+    /// `[[comment_styles]]`. Keys are lowercase; look up lowercased.
+    comment_prefixes: RwLock<Arc<HashMap<String, String>>>,
 }
 
 impl SharedEditorConfig {
@@ -68,6 +74,7 @@ impl SharedEditorConfig {
         Arc::new(Self {
             background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
             overrides: RwLock::new(Arc::new(overrides)),
+            comment_prefixes: RwLock::new(Arc::new(HashMap::new())),
         })
     }
 
@@ -93,6 +100,14 @@ impl SharedEditorConfig {
     pub fn set_overrides(&self, overrides: EditorOverrides) {
         *self.overrides.write().unwrap() = Arc::new(overrides);
     }
+
+    pub fn comment_prefixes(&self) -> Arc<HashMap<String, String>> {
+        self.comment_prefixes.read().unwrap().clone()
+    }
+
+    pub fn set_comment_prefixes(&self, prefixes: HashMap<String, String>) {
+        *self.comment_prefixes.write().unwrap() = Arc::new(prefixes);
+    }
 }
 
 /// A [`TextEditorWidget`] backed by this crate's forked [`text_editor`], with
@@ -116,6 +131,9 @@ pub struct TextArea {
     registry: Arc<SyntaxRegistry>,
     history: History,
     settings: Arc<SharedEditorConfig>,
+    /// The file extension this tab was opened from, lowercased - what
+    /// toggle-comment resolves its prefix by.
+    extension: Option<String>,
     /// Find-palette matches to recolor, and which one is current. `Arc` so
     /// rebuilding `HighlighterSettings` on every `view` is a refcount bump
     /// rather than a copy of the whole match list.
@@ -172,6 +190,7 @@ impl TextArea {
             registry: registry.clone(),
             history: History::new(),
             settings,
+            extension: extension.map(str::to_lowercase),
             find_matches: Arc::new(Vec::new()),
             find_current: None,
         }
@@ -224,13 +243,7 @@ impl TextArea {
         else {
             return false;
         };
-        // The rebuilt content starts at the top of the document, so the view
-        // has to be carried across by hand - without it, undoing an edit that
-        // is already on screen would still jump the document around.
-        let view = self.content.scrolled_to();
-        self.content = Content::with_text(&restored_text);
-        self.content.restore_view(view);
-        self.resync_source();
+        self.replace_document(&restored_text);
         // Replaying the selection is the point: `move_cursor_to` clears one,
         // so an undo that only moved the cursor would drop the selection the
         // undone edit had replaced. Neither branch changes text, so neither
@@ -238,6 +251,85 @@ impl TextArea {
         match restored.selection {
             Some(selection) => self.restore_selection(selection, restored.position),
             None => self.move_cursor_to(restored.position.0, restored.position.1),
+        }
+        true
+    }
+
+    /// Replaces the whole document, carrying the view across - the rebuilt
+    /// content starts at the top of the document, so without the restore an
+    /// edit already on screen would still jump the document around. Shared
+    /// by undo/redo and toggle-comment; always `Content::with_text`, never
+    /// SelectAll+Paste, which is quadratic (see AGENTS.md).
+    fn replace_document(&mut self, text: &str) {
+        let view = self.content.scrolled_to();
+        self.content = Content::with_text(text);
+        self.content.restore_view(view);
+        self.resync_source();
+    }
+
+    /// The single-line comment prefix configured for this tab's file type.
+    fn comment_prefix(&self) -> Option<String> {
+        let extension = self.extension.as_deref()?;
+        self.settings.comment_prefixes().get(extension).cloned()
+    }
+
+    /// The document with lines `first..first + replacements.len()` swapped
+    /// out, joined the way `Content::text()` joins (separators between
+    /// lines, never after the last) - so everything outside the replaced
+    /// range, line endings included, round-trips byte-identically.
+    fn text_with_lines_replaced(&self, first: usize, replacements: &[String]) -> String {
+        let mut text = String::with_capacity(self.source.len());
+        let mut lines = self.content.lines().enumerate().peekable();
+        while let Some((index, line)) = lines.next() {
+            match index.checked_sub(first).and_then(|i| replacements.get(i)) {
+                Some(replacement) => text.push_str(replacement),
+                None => text.push_str(&line.text),
+            }
+            if lines.peek().is_some() {
+                text.push_str(if line.ending == text_editor::LineEnding::None {
+                    text_editor::LineEnding::default().as_str()
+                } else {
+                    line.ending.as_str()
+                });
+            }
+        }
+        text
+    }
+
+    /// Comments or uncomments the covered lines with the file type's
+    /// configured prefix. A file with no style, or all-blank coverage, is a
+    /// silent no-op that leaves the tab clean.
+    fn toggle_comment(&mut self) -> bool {
+        let Some(prefix) = self.comment_prefix() else {
+            return false;
+        };
+        let cursor = self.cursor_position();
+        let selection = self.selection();
+        let (first, last) = comment::covered_lines(cursor, selection);
+        let covered: Vec<String> = (first..=last)
+            .filter_map(|index| self.content.line(index).map(|line| line.text.into_owned()))
+            .collect();
+        let covered: Vec<&str> = covered.iter().map(String::as_str).collect();
+        let Some(toggled) = comment::toggle_comment(&covered, &prefix) else {
+            return false;
+        };
+
+        // Its own undo step - a toggle shouldn't fold into a typing burst -
+        // recorded only now that an edit is certain to happen.
+        self.history.record_isolated(&self.source, self.cursor_state());
+        let new_text = self.text_with_lines_replaced(first, &toggled.lines);
+        self.replace_document(&new_text);
+
+        let shift = |pos| comment::shift_position(pos, first, &toggled.edits);
+        match selection {
+            Some(saved) => self.restore_selection(
+                SavedSelection { anchor: shift(saved.anchor), ..saved },
+                shift(cursor),
+            ),
+            None => {
+                let (line, column) = shift(cursor);
+                self.move_cursor_to(line, column);
+            }
         }
         true
     }
@@ -299,6 +391,7 @@ impl TextEditorWidget for TextArea {
             }
             EditorMessage::Undo => self.apply_history(History::undo),
             EditorMessage::Redo => self.apply_history(History::redo),
+            EditorMessage::ToggleComment => self.toggle_comment(),
         }
     }
 
@@ -649,6 +742,7 @@ fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
         EditorCommand::SelectDocumentEnd => Binding::Select(Motion::DocumentEnd),
         EditorCommand::Undo => Binding::Custom(EditorMessage::Undo),
         EditorCommand::Redo => Binding::Custom(EditorMessage::Redo),
+        EditorCommand::ToggleComment => Binding::Custom(EditorMessage::ToggleComment),
     }
 }
 
@@ -716,6 +810,10 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
                 }
                 'z' => return Some(binding_for(EditorCommand::Undo)),
                 'y' => return Some(binding_for(EditorCommand::Redo)),
+                // On layouts where `/` needs a modifier (German: Shift+7)
+                // this never fires - keybinds.toml overrides by physical
+                // key and covers those.
+                '/' => return Some(binding_for(EditorCommand::ToggleComment)),
                 _ => {}
             }
         }
@@ -940,6 +1038,115 @@ mod tests {
 
     fn edit(edit: text_editor::Edit) -> EditorMessage {
         EditorMessage::Action(text_editor::Action::Edit(edit))
+    }
+
+    /// An editor opened as a `.rs` file with `// ` configured - what the
+    /// toggle-comment tests run against.
+    fn rust_editor(text: &str) -> TextArea {
+        let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+        let settings = SharedEditorConfig::new(1.0, EditorOverrides::new());
+        settings.set_comment_prefixes([("rs".to_string(), "// ".to_string())].into());
+        TextArea::new(text, &registry, Some("rs"), settings)
+    }
+
+    #[test]
+    fn toggle_comment_round_trips_text_and_cursor() {
+        let mut editor = rust_editor("    let x = 1;");
+        editor.move_cursor_to(0, 8);
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "    // let x = 1;");
+        assert_eq!(editor.cursor_position(), (0, 11));
+        assert_source_is_synced(&editor);
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "    let x = 1;");
+        assert_eq!(editor.cursor_position(), (0, 8));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn toggle_comment_covers_a_multi_line_selection_and_keeps_it() {
+        let mut editor = rust_editor("aaa\nbbb");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            (1, 2),
+        );
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "// aaa\n// bbb");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (0, 4), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (1, 5));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_selection_ending_at_column_zero_leaves_that_line_alone() {
+        let mut editor = rust_editor("aaa\nbbb\nccc");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            (2, 0),
+        );
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "// aaa\n// bbb\nccc");
+    }
+
+    #[test]
+    fn toggle_without_a_configured_style_is_a_clean_no_op() {
+        let mut editor = plain_editor("text");
+        assert!(!editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "text");
+        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+    }
+
+    #[test]
+    fn a_toggle_between_keystrokes_stays_its_own_undo_step() {
+        // All three edits land inside one coalesce window; the toggle must
+        // not fold into either typing burst.
+        let mut editor = rust_editor("fn main() {}");
+        let _ = editor.update(edit(text_editor::Edit::Insert('a')));
+        assert!(editor.update(EditorMessage::ToggleComment));
+        let _ = editor.update(edit(text_editor::Edit::Insert('b')));
+        assert_eq!(editor.text(), "// abfn main() {}");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "// afn main() {}");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "afn main() {}");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "fn main() {}");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn undo_of_a_selection_toggle_restores_the_selection() {
+        let mut editor = rust_editor("aaa\nbbb");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            (1, 2),
+        );
+        assert!(editor.update(EditorMessage::ToggleComment));
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (1, 2));
+    }
+
+    #[test]
+    fn crlf_line_endings_survive_a_toggle_round_trip() {
+        let mut editor = rust_editor("aaa\r\nbbb");
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "// aaa\r\nbbb");
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "aaa\r\nbbb");
+        assert_source_is_synced(&editor);
     }
 
     #[test]
@@ -1187,6 +1394,40 @@ mod tests {
         ));
         assert!(matches!(binding_for(EditorCommand::Undo), Binding::Custom(EditorMessage::Undo)));
         assert!(matches!(binding_for(EditorCommand::Redo), Binding::Custom(EditorMessage::Redo)));
+        assert!(matches!(
+            binding_for(EditorCommand::ToggleComment),
+            Binding::Custom(EditorMessage::ToggleComment)
+        ));
+    }
+
+    #[test]
+    fn command_slash_binds_toggle_comment_by_default() {
+        // CTRL stands in for `Modifiers::command()` on non-mac test runners,
+        // same as the undo/redo chord tests.
+        let event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::Slash,
+            keyboard::Key::Character("/".into()),
+        );
+        assert!(matches!(
+            key_binding(event, &EditorOverrides::new()),
+            Some(Binding::Custom(EditorMessage::ToggleComment))
+        ));
+    }
+
+    #[test]
+    fn an_override_on_command_slash_wins_over_toggle_comment() {
+        let mut overrides = EditorOverrides::new();
+        overrides.insert((keyboard::Modifiers::CTRL, key::Code::Slash), EditorCommand::Undo);
+        let event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::Slash,
+            keyboard::Key::Character("/".into()),
+        );
+        assert!(matches!(
+            key_binding(event, &overrides),
+            Some(Binding::Custom(EditorMessage::Undo))
+        ));
     }
 
     #[test]
