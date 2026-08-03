@@ -140,6 +140,29 @@ pub fn config_file() -> Option<PathBuf> {
     config_paths().into_iter().find(|path| path.is_file())
 }
 
+/// The directories a config file can live in, deduped, in search order -
+/// what a file watcher should watch. Canonicalized so the exe's directory
+/// and the cwd collapse into one entry when they're the same place.
+pub fn candidate_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for path in config_paths() {
+        let dir = match path.parent() {
+            // The cwd candidate is the bare relative `config.toml`, whose
+            // parent is the empty path.
+            Some(dir) if dir.as_os_str().is_empty() => PathBuf::from("."),
+            Some(dir) => dir.to_path_buf(),
+            None => continue,
+        };
+        let Ok(dir) = std::fs::canonicalize(&dir) else {
+            continue;
+        };
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 /// Same, for `keybinds.toml`.
 pub fn keybinds_file() -> Option<PathBuf> {
     keybind_paths().into_iter().find(|path| path.is_file())
@@ -415,7 +438,7 @@ mod tests {
     #[test]
     fn try_parse_surfaces_a_parse_error_instead_of_defaulting() {
         let file = TempFile::with_contents("broken.toml", "theme = ");
-        let result: Result<Config, _> = try_parse(&[file.0.clone()]);
+        let result: Result<Config, _> = try_parse(std::slice::from_ref(&file.0));
         assert!(matches!(result, Err(ReloadError::Parse(_))));
     }
 
@@ -430,7 +453,7 @@ mod tests {
             new_tab = "not a real chord"
             "#,
         );
-        let result: Result<KeybindsConfig, _> = try_parse(&[file.0.clone()]);
+        let result: Result<KeybindsConfig, _> = try_parse(std::slice::from_ref(&file.0));
         assert!(matches!(result, Err(ReloadError::Parse(_))));
     }
 

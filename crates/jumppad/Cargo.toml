@@ -48,6 +48,7 @@ editor_core.workspace = true
 jumppad_textarea.workspace = true
 syntax_registry.workspace = true
 jumppad_config.workspace = true
+notify = "8"
 rfd = "0.15"
 tokio = { version = "1", features = ["fs"] }
 serde.workspace = true
