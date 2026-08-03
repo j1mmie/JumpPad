@@ -254,8 +254,13 @@ impl JumpPadApp {
         // the highlighting-poll subscription below re-checks periodically instead.
         let keybinds = jumppad_config::load_keybinds();
         let keybind_overrides = Arc::new(build_app_overrides(&keybinds));
-        let editor_overrides = Arc::new(build_editor_overrides(&keybinds));
         warn_unrecognized_overrides(&keybinds.overrides);
+
+        let editor_config = jumppad_textarea::SharedEditorConfig::new(
+            config.alpha.background,
+            build_editor_overrides(&keybinds),
+        );
+        editor_config.set_foreground_alpha(config.alpha.foreground);
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -265,9 +270,7 @@ impl JumpPadApp {
         // Which `TextEditorWidget` implementation new tabs are created with.
         let editor_factory: EditorFactory = Box::new(jumppad_textarea::TextArea::factory(
             registry,
-            editor_overrides,
-            config.alpha.background,
-            config.alpha.foreground,
+            editor_config.clone(),
         ));
 
         let session_candidates = session::candidate_dirs();
@@ -2260,8 +2263,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);
@@ -2316,8 +2318,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);
@@ -2352,8 +2353,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                Arc::new(HashMap::new()),
-                1.0,
+                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             ))
         });
         let mut app = test_app(0);

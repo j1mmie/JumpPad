@@ -4,7 +4,8 @@ pub mod text_editor;
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, RwLock};
 
 use editor_core::{
     EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection, SelectionKind,
@@ -50,6 +51,50 @@ pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
 /// below, which stay logical-key based.
 pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorCommand>;
 
+/// Editor settings the app can change after construction: a config reload
+/// writes here, and every open [`TextArea`] reads through a shared handle
+/// on each `view`, which is what lets a reload reach tabs that already
+/// exist. One per app, created alongside [`TextArea::factory`].
+pub struct SharedEditorConfig {
+    /// `f32` bits - an atomic can't hold a float directly.
+    background_alpha: AtomicU32,
+    /// `Arc` inside the lock so `view` clones a refcount out per redraw,
+    /// not the whole map.
+    overrides: RwLock<Arc<EditorOverrides>>,
+}
+
+impl SharedEditorConfig {
+    pub fn new(background_alpha: f32, overrides: EditorOverrides) -> Arc<Self> {
+        Arc::new(Self {
+            background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
+            overrides: RwLock::new(Arc::new(overrides)),
+        })
+    }
+
+    pub fn background_alpha(&self) -> f32 {
+        f32::from_bits(self.background_alpha.load(Ordering::Relaxed))
+    }
+
+    pub fn overrides(&self) -> Arc<EditorOverrides> {
+        self.overrides.read().unwrap().clone()
+    }
+
+    pub fn set_background_alpha(&self, alpha: f32) {
+        self.background_alpha
+            .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Routed through here so settings have one mutation API, but stored in
+    /// `FOREGROUND_ALPHA` - see that static for why it's global.
+    pub fn set_foreground_alpha(&self, alpha: f32) {
+        FOREGROUND_ALPHA.store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_overrides(&self, overrides: EditorOverrides) {
+        *self.overrides.write().unwrap() = Arc::new(overrides);
+    }
+}
+
 /// A [`TextEditorWidget`] backed by this crate's forked [`text_editor`], with
 /// optional tree-sitter/WASM syntax highlighting layered on via a
 /// [`syntax_registry::SyntaxRegistry`].
@@ -70,11 +115,7 @@ pub struct TextArea {
     /// highlighter only when `HighlighterSettings` compare unequal.
     registry: Arc<SyntaxRegistry>,
     history: History,
-    overrides: Arc<EditorOverrides>,
-    /// Scales the editor's own background color (see `editor_style`).
-    /// Captured per-instance, unlike `foreground_alpha`, since it's only
-    /// used inside a `.style()` closure that's allowed to capture state.
-    background_alpha: f32,
+    settings: Arc<SharedEditorConfig>,
     /// Find-palette matches to recolor, and which one is current. `Arc` so
     /// rebuilding `HighlighterSettings` on every `view` is a refcount bump
     /// rather than a copy of the whole match list.
@@ -83,14 +124,15 @@ pub struct TextArea {
 }
 
 /// Scales every syntax-highlighted color `color_for` produces. Global
-/// rather than a field like `background_alpha` because
+/// rather than a field on [`SharedEditorConfig`] because
 /// `text_editor::highlight_with`'s `to_format` callback must be a bare `fn`
 /// pointer - it can't capture state, so `color_for` has nothing else to
-/// read this from. Set once in `factory`, before any editor is constructed.
-static FOREGROUND_ALPHA: OnceLock<f32> = OnceLock::new();
+/// read this from. `f32` bits; written via
+/// [`SharedEditorConfig::set_foreground_alpha`], including on config reload.
+static FOREGROUND_ALPHA: AtomicU32 = AtomicU32::new(f32::to_bits(1.0));
 
 fn foreground_alpha() -> f32 {
-    *FOREGROUND_ALPHA.get().unwrap_or(&1.0)
+    f32::from_bits(FOREGROUND_ALPHA.load(Ordering::Relaxed))
 }
 
 enum Highlighting {
@@ -111,8 +153,7 @@ impl TextArea {
         text: &str,
         registry: &Arc<SyntaxRegistry>,
         extension: Option<&str>,
-        overrides: Arc<EditorOverrides>,
-        background_alpha: f32,
+        settings: Arc<SharedEditorConfig>,
     ) -> Self {
         let highlighting = match extension {
             None => Highlighting::None,
@@ -130,25 +171,20 @@ impl TextArea {
             highlighting,
             registry: registry.clone(),
             history: History::new(),
-            overrides,
-            background_alpha: background_alpha.clamp(0.0, 1.0),
+            settings,
             find_matches: Arc::new(Vec::new()),
             find_current: None,
         }
     }
 
-    /// Builds an [`editor_core::EditorFactory`]-shaped closure that
-    /// captures a shared syntax registry and the resolved keybind overrides
-    /// once, and sets `FOREGROUND_ALPHA`.
+    /// Builds an [`editor_core::EditorFactory`]-shaped closure that captures
+    /// a shared syntax registry and the app's live [`SharedEditorConfig`].
     pub fn factory(
         registry: Arc<SyntaxRegistry>,
-        overrides: Arc<EditorOverrides>,
-        background_alpha: f32,
-        foreground_alpha: f32,
+        settings: Arc<SharedEditorConfig>,
     ) -> impl Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget> {
-        let _ = FOREGROUND_ALPHA.set(foreground_alpha.clamp(0.0, 1.0));
         move |text, extension| {
-            Box::new(Self::new(text, &registry, extension, overrides.clone(), background_alpha))
+            Box::new(Self::new(text, &registry, extension, settings.clone()))
         }
     }
 
@@ -217,6 +253,7 @@ impl TextArea {
             revision: self.registry.revision(),
             matches: self.find_matches.clone(),
             current_match: self.find_current,
+            foreground_alpha: foreground_alpha(),
         }
     }
 }
@@ -224,8 +261,8 @@ impl TextArea {
 impl TextEditorWidget for TextArea {
     fn view(&self) -> Element<'_, EditorMessage> {
         let settings = self.highlighter_settings();
-        let overrides = self.overrides.clone();
-        let background_alpha = self.background_alpha;
+        let overrides = self.settings.overrides();
+        let background_alpha = self.settings.background_alpha();
         let foreground_alpha = foreground_alpha();
         text_editor(&self.content)
             .id(iced::advanced::widget::Id::new(editor_core::EDITOR_WIDGET_ID))
@@ -400,6 +437,10 @@ struct HighlighterSettings {
     revision: u64,
     matches: Arc<Vec<FindMatch>>,
     current_match: Option<usize>,
+    /// Not read by the highlighter itself - `to_format` resolves colors
+    /// through `FOREGROUND_ALPHA` directly. It rides along so a config
+    /// reload makes the settings compare unequal (see `PartialEq` below).
+    foreground_alpha: f32,
 }
 
 impl PartialEq for HighlighterSettings {
@@ -423,6 +464,10 @@ impl PartialEq for HighlighterSettings {
             // leaving it out here would freeze the match coloring.
             && self.current_match == other.current_match
             && Arc::ptr_eq(&self.matches, &other.matches)
+            // Same for the foreground alpha: without it, a config reload
+            // would leave every syntax-colored span at its old alpha until
+            // an unrelated edit changed `source`.
+            && self.foreground_alpha == other.foreground_alpha
     }
 }
 
@@ -758,7 +803,12 @@ mod tests {
     /// An editor with no highlighting and default alpha, for cursor/selection tests.
     fn plain_editor(text: &str) -> TextArea {
         let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-        TextArea::new(text, &registry, None, Arc::new(EditorOverrides::new()), 1.0)
+        TextArea::new(
+            text,
+            &registry,
+            None,
+            SharedEditorConfig::new(1.0, EditorOverrides::new()),
+        )
     }
 
     /// The invariant the `source` cache exists to maintain: it holds exactly
@@ -1040,6 +1090,7 @@ mod tests {
             revision: 0,
             matches: Arc::new(Vec::new()),
             current_match: None,
+            foreground_alpha: 1.0,
         };
         assert!(settings("ab") != settings("ab"));
     }
@@ -1253,18 +1304,41 @@ mod tests {
     }
 
     #[test]
-    fn color_for_scales_by_whatever_foreground_alpha_is_currently_set() {
-        // `FOREGROUND_ALPHA.set` only takes effect once per process, so
-        // this derives the expected value from its actual current reading
-        // rather than assuming 0.25 won.
-        let _ = FOREGROUND_ALPHA.set(0.25);
-        let alpha = foreground_alpha();
+    fn set_foreground_alpha_reaches_color_for() {
+        // The only test that writes the global, restored at the end so the
+        // parallel test threads never see a scaled alpha.
+        let settings = SharedEditorConfig::new(1.0, EditorOverrides::new());
+        settings.set_foreground_alpha(0.25);
         let keyword = Highlighted::Syntax(HighlightCategory::Keyword);
         let color = color_for(keyword);
         let base = base_color_for(keyword);
+        settings.set_foreground_alpha(1.0);
+
         assert_eq!((color.r, color.g, color.b), (base.r, base.g, base.b));
-        let expected_alpha = if alpha >= 1.0 { base.a } else { base.a * alpha };
-        assert!((color.a - expected_alpha).abs() < f32::EPSILON);
+        assert!((color.a - base.a * 0.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn shared_editor_config_round_trips_its_settings() {
+        let settings = SharedEditorConfig::new(0.8, EditorOverrides::new());
+        assert_eq!(settings.background_alpha(), 0.8);
+        settings.set_background_alpha(0.4);
+        assert_eq!(settings.background_alpha(), 0.4);
+        // Out-of-range input clamps rather than propagating.
+        settings.set_background_alpha(2.0);
+        assert_eq!(settings.background_alpha(), 1.0);
+
+        assert!(settings.overrides().is_empty());
+        let mut overrides = EditorOverrides::new();
+        overrides.insert(
+            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
+            EditorCommand::Undo,
+        );
+        settings.set_overrides(overrides);
+        assert_eq!(
+            settings.overrides().get(&(keyboard::Modifiers::CTRL, key::Code::KeyZ)),
+            Some(&EditorCommand::Undo)
+        );
     }
 
     /// Builds a highlighter over `source` with `matches` already applied.
@@ -1279,6 +1353,7 @@ mod tests {
             revision: 0,
             matches: Arc::new(matches),
             current_match: current,
+            foreground_alpha: 1.0,
         })
     }
 
@@ -1338,6 +1413,7 @@ mod tests {
             revision: 0,
             matches: matches.clone(),
             current_match: None,
+            foreground_alpha: 1.0,
         };
 
         let same = HighlighterSettings { ..base.clone() };
@@ -1366,9 +1442,26 @@ mod tests {
             revision: 0,
             matches: Arc::new(Vec::new()),
             current_match: None,
+            foreground_alpha: 1.0,
         };
         let loaded_something = HighlighterSettings { revision: 1, ..base.clone() };
         assert!(base != loaded_something);
+    }
+
+    #[test]
+    fn settings_differing_only_in_foreground_alpha_are_not_equal() {
+        // How a config reload's new alpha reaches text already on screen:
+        // nothing else about the settings moves when only alpha changes.
+        let base = HighlighterSettings {
+            source: Arc::new("ab".to_string()),
+            grammar: None,
+            revision: 0,
+            matches: Arc::new(Vec::new()),
+            current_match: None,
+            foreground_alpha: 1.0,
+        };
+        let faded = HighlighterSettings { foreground_alpha: 0.5, ..base.clone() };
+        assert!(base != faded);
     }
 
     #[test]
