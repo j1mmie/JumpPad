@@ -51,8 +51,8 @@ file, saving a note, or drafting a message.
  - Automatic draft saving
  - Configurable via TOML, with live reload - theme, transparency, and
    keybind changes apply the moment the file is saved
- - Toggle comments with Cmd+/ (macOS) or Ctrl+/, with per-language
-   prefixes configurable in TOML
+ - Toggle comments with Cmd+/ (macOS) or Ctrl+/ - single-line prefixes
+   or multi-line delimiters, per language, configurable in TOML
  - More to come...
 
 Drag and drop works on macOS, Windows, and Linux/X11. On a native Wayland

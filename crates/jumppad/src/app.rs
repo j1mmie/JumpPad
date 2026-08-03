@@ -282,11 +282,11 @@ impl JumpPadApp {
             build_editor_overrides(&keybinds),
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
-        editor_config.set_comment_styles(single_styles(config.comment_prefixes()));
+        editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
-            config.syntaxes.extension_to_grammar(),
+            config.extension_to_grammar(),
             || {},
         );
         // Which `TextEditorWidget` implementation new tabs are created with.
@@ -828,9 +828,11 @@ impl JumpPadApp {
             }
         }
 
-        // No repaint: nothing on screen changes until the next toggle.
-        if new.comment_styles != current.comment_styles {
-            self.editor_config.set_comment_styles(single_styles(new.comment_prefixes()));
+        // One [[languages]] edit can feed two consumers, so diff the derived
+        // views: comment styles apply live (no repaint - nothing on screen
+        // changes until the next toggle), grammar mappings can't.
+        if new.comment_styles_by_extension() != current.comment_styles_by_extension() {
+            self.editor_config.set_comment_styles(build_comment_styles(&new));
         }
 
         if new.window != current.window {
@@ -839,8 +841,8 @@ impl JumpPadApp {
         if new.visor.enabled != current.visor.enabled {
             restart_required("[visor] enabled");
         }
-        if new.syntaxes != current.syntaxes {
-            restart_required("[syntaxes]");
+        if new.extension_to_grammar() != current.extension_to_grammar() {
+            restart_required("[[languages]] extension-to-syntax mappings");
         }
 
         if repaint {
@@ -2101,14 +2103,25 @@ fn premultiply(color: Color) -> Color {
     }
 }
 
-/// Temporary shim while the config only carries single-line prefixes -
-/// replaced when `[[languages]]` lands full comment styles.
-fn single_styles(
-    prefixes: HashMap<String, String>,
+/// Mirror of `build_editor_overrides` for comment styles - built here so
+/// `jumppad_textarea` doesn't need to depend on `jumppad_config`.
+fn build_comment_styles(
+    config: &jumppad_config::Config,
 ) -> HashMap<String, jumppad_textarea::CommentStyle> {
-    prefixes
+    config
+        .comment_styles_by_extension()
         .into_iter()
-        .map(|(ext, prefix)| (ext, jumppad_textarea::CommentStyle::Single(prefix)))
+        .map(|(extension, style)| {
+            let style = match style {
+                jumppad_config::CommentSyntax::Single(prefix) => {
+                    jumppad_textarea::CommentStyle::Single(prefix)
+                }
+                jumppad_config::CommentSyntax::Multi { left, right } => {
+                    jumppad_textarea::CommentStyle::Multi { left, right }
+                }
+            };
+            (extension, style)
+        })
         .collect()
 }
 
@@ -3103,17 +3116,41 @@ mod tests {
         assert_eq!(app.editor_config.background_alpha(), 0.5);
     }
 
+    fn language(
+        name: &str,
+        syntax: Option<&str>,
+        extensions: &[&str],
+        comment: Option<jumppad_config::CommentSyntax>,
+    ) -> jumppad_config::LanguageConfig {
+        jumppad_config::LanguageConfig {
+            name: name.to_string(),
+            syntax: syntax.map(str::to_string),
+            extensions: extensions.iter().map(|ext| ext.to_string()).collect(),
+            comment,
+        }
+    }
+
     #[test]
-    fn apply_config_reaches_the_shared_comment_prefixes() {
+    fn apply_config_reaches_the_shared_comment_styles() {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
-            syntaxes: jumppad_config::SyntaxesConfig(
-                [("zig".to_string(), vec!["zig".to_string()])].into(),
-            ),
-            comment_styles: vec![jumppad_config::CommentStyle {
-                syntaxes: vec!["zig".to_string()],
-                prefix: "// ".to_string(),
-            }],
+            languages: vec![
+                language(
+                    "Zig",
+                    Some("zig"),
+                    &["zig"],
+                    Some(jumppad_config::CommentSyntax::Single("// ".to_string())),
+                ),
+                language(
+                    "HTML",
+                    None,
+                    &["html"],
+                    Some(jumppad_config::CommentSyntax::Multi {
+                        left: "<!--".to_string(),
+                        right: "-->".to_string(),
+                    }),
+                ),
+            ],
             ..Default::default()
         };
         app.apply_config(config);
@@ -3121,21 +3158,40 @@ mod tests {
             app.editor_config.comment_styles().get("zig"),
             Some(&jumppad_textarea::CommentStyle::Single("// ".to_string()))
         );
+        assert_eq!(
+            app.editor_config.comment_styles().get("html"),
+            Some(&jumppad_textarea::CommentStyle::Multi {
+                left: "<!--".to_string(),
+                right: "-->".to_string(),
+            })
+        );
         assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
+    }
+
+    #[test]
+    fn a_name_only_change_applies_nothing() {
+        let mut app = test_app(1);
+        let before = app.editor_config.comment_styles();
+        let mut config = jumppad_config::Config::default();
+        config.languages[0].name = "Renamed".to_string();
+
+        app.apply_config(config);
+        // Neither derived view moved, so the setter never ran.
+        assert!(Arc::ptr_eq(&before, &app.editor_config.comment_styles()));
     }
 
     #[test]
     fn restart_required_settings_mutate_no_live_state() {
         let mut app = test_app(1);
         let theme_before = app.theme.to_string();
-        let config = jumppad_config::Config {
+        let mut config = jumppad_config::Config {
             window: jumppad_config::WindowConfig { decorations: false },
             visor: jumppad_config::VisorConfig { enabled: true },
-            syntaxes: jumppad_config::SyntaxesConfig(
-                [("toml".to_string(), vec!["toml".to_string()])].into(),
-            ),
             ..Default::default()
         };
+        // A new grammar mapping without a comment style: restart-required,
+        // nothing live to apply.
+        config.languages.push(language("Zig", Some("zig"), &["zig"], None));
 
         app.apply_config(config.clone());
         assert_eq!(app.theme.to_string(), theme_before);

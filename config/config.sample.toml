@@ -19,17 +19,48 @@ decorations = true
 [visor]
 enabled = false
 
-[syntaxes]
-markdown = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]
-yaml = ["yaml", "yml"]
-toml = ["toml", "tml"]
-json = ["json", "jsonc"]
-xml = ["xml", "xsl", "xsd", "svg", "html", "htm", "xhtml"]
-dtd = ["dtd"]
+# Each [[languages]] entry maps file extensions to a syntax (its .wasm
+# grammar) and a toggle-comment style. Replaces the built-in list wholesale.
 
-# Single-line comment prefixes for toggle-comment, keyed by [syntaxes] name.
-# Providing any entry replaces the built-in defaults wholesale.
-#
-# [[comment_styles]]
-# syntaxes = ["toml", "yaml"]
-# prefix = "# "
+[[languages]]
+name = "Markdown"
+syntax = "markdown"
+extensions = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]
+
+[[languages]]
+name = "YAML"
+syntax = "yaml"
+extensions = ["yaml", "yml"]
+comment.single = "# "
+
+[[languages]]
+name = "TOML"
+syntax = "toml"
+extensions = ["toml", "tml"]
+comment.single = "# "
+
+[[languages]]
+name = "JSON"
+syntax = "json"
+extensions = ["json", "jsonc"]
+
+[[languages]]
+name = "XML"
+syntax = "xml"
+extensions = ["xml", "xsl", "xsd", "svg"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"
+
+[[languages]]
+name = "HTML"
+syntax = "html"
+extensions = ["htm", "html", "xhtml"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"
+
+[[languages]]
+name = "DTD"
+syntax = "dtd"
+extensions = ["dtd"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"

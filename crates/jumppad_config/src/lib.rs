@@ -14,7 +14,6 @@ pub use keybind_overrides::ResolvedKeybind;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    pub syntaxes: SyntaxesConfig,
     /// The display name of an `iced::Theme` variant (e.g. `"Dracula"`),
     /// matched case-insensitively - kept as a plain string so this crate
     /// doesn't need to depend on `iced`.
@@ -22,36 +21,109 @@ pub struct Config {
     pub visor: VisorConfig,
     pub alpha: AlphaConfig,
     pub window: WindowConfig,
-    /// `[[comment_styles]]` entries; last so the array-of-tables lands at
-    /// the end of the written default file.
-    pub comment_styles: Vec<CommentStyle>,
+    /// `[[languages]]` entries; last so the array-of-tables lands at the
+    /// end of the written default file.
+    pub languages: Vec<LanguageConfig>,
 }
 
 impl Config {
-    /// Flattens `[[comment_styles]]` through the `[syntaxes]` map into
-    /// extension -> prefix; a style naming an unknown syntax adds nothing.
-    pub fn comment_prefixes(&self) -> HashMap<String, String> {
+    /// Extension -> grammar name, for the syntax registry. An entry without
+    /// a `syntax` contributes nothing; a later entry wins an extension.
+    pub fn extension_to_grammar(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
-        for style in &self.comment_styles {
-            for syntax in &style.syntaxes {
-                let Some(extensions) = self.syntaxes.0.get(syntax) else {
-                    continue;
-                };
-                for extension in extensions {
-                    map.insert(extension.to_lowercase(), style.prefix.clone());
-                }
+        for language in &self.languages {
+            let Some(syntax) = &language.syntax else {
+                continue;
+            };
+            for extension in &language.extensions {
+                map.insert(extension.clone(), syntax.clone());
+            }
+        }
+        map
+    }
+
+    /// Extension (lowercased) -> comment style, for toggle-comment; a later
+    /// entry wins an extension.
+    pub fn comment_styles_by_extension(&self) -> HashMap<String, CommentSyntax> {
+        let mut map = HashMap::new();
+        for language in &self.languages {
+            let Some(comment) = &language.comment else {
+                continue;
+            };
+            for extension in &language.extensions {
+                map.insert(extension.to_lowercase(), comment.clone());
             }
         }
         map
     }
 }
 
-/// One single-line comment style: the `[syntaxes]` names whose files
-/// toggle-comment uses `prefix` in.
+/// One `[[languages]]` entry: file extensions plus an optional grammar and
+/// an optional toggle-comment style. `name` is for the file's readability.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct CommentStyle {
-    pub syntaxes: Vec<String>,
-    pub prefix: String,
+pub struct LanguageConfig {
+    pub name: String,
+    /// The `<syntax>.wasm` grammar these extensions highlight with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub syntax: Option<String>,
+    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<CommentSyntax>,
+}
+
+/// A language's comment syntax: exactly one of `comment.single` or
+/// `comment.multi` - defining both fails the whole file's parse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "RawCommentSyntax", into = "RawCommentSyntax")]
+pub enum CommentSyntax {
+    Single(String),
+    Multi { left: String, right: String },
+}
+
+/// The TOML-facing shape `CommentSyntax` validates from.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCommentSyntax {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    single: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    multi: Option<RawMultiComment>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMultiComment {
+    left: String,
+    right: String,
+}
+
+impl TryFrom<RawCommentSyntax> for CommentSyntax {
+    type Error = String;
+
+    fn try_from(raw: RawCommentSyntax) -> Result<Self, String> {
+        match (raw.single, raw.multi) {
+            (Some(prefix), None) => Ok(Self::Single(prefix)),
+            (None, Some(multi)) => Ok(Self::Multi { left: multi.left, right: multi.right }),
+            (Some(_), Some(_)) => Err(
+                "comment.single and comment.multi are mutually exclusive - keep exactly one"
+                    .to_string(),
+            ),
+            (None, None) => Err(
+                "comment must set comment.single or comment.multi (or be removed)".to_string(),
+            ),
+        }
+    }
+}
+
+impl From<CommentSyntax> for RawCommentSyntax {
+    fn from(comment: CommentSyntax) -> Self {
+        match comment {
+            CommentSyntax::Single(prefix) => Self { single: Some(prefix), multi: None },
+            CommentSyntax::Multi { left, right } => {
+                Self { single: None, multi: Some(RawMultiComment { left, right }) }
+            }
+        }
+    }
 }
 
 impl Default for Config {
@@ -129,25 +201,6 @@ impl KeybindsConfig {
     /// Resolves `overrides` into iced-native types, ready to compare against incoming key events.
     pub fn resolved_overrides(&self) -> HashMap<String, ResolvedKeybind> {
         keybind_overrides::resolved_overrides(&self.overrides)
-    }
-}
-
-/// Maps a grammar's name (the `<name>.wasm` file to look for) to the file
-/// extensions that should use it, e.g. `"yaml" -> ["yaml", "yml"]`.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SyntaxesConfig(pub HashMap<String, Vec<String>>);
-
-impl SyntaxesConfig {
-    /// Inverts the grammar -> extensions mapping into extension -> grammar.
-    pub fn extension_to_grammar(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        for (grammar, extensions) in &self.0 {
-            for extension in extensions {
-                map.insert(extension.clone(), grammar.clone());
-            }
-        }
-        map
     }
 }
 
@@ -515,57 +568,153 @@ mod tests {
     }
 
     #[test]
-    fn config_toml_with_no_comment_styles_keeps_the_builtin_defaults() {
+    fn config_toml_with_no_languages_keeps_the_builtin_defaults() {
         let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
-        let prefixes = config.comment_prefixes();
-        // Resolved through [syntaxes]: the yaml grammar covers both extensions.
-        assert_eq!(prefixes.get("toml").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.get("yaml").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.get("yml").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.get("mk").map(String::as_str), Some("# "));
+        let styles = config.comment_styles_by_extension();
+        assert_eq!(styles.get("yaml"), Some(&CommentSyntax::Single("# ".to_string())));
+        assert_eq!(styles.get("yml"), Some(&CommentSyntax::Single("# ".to_string())));
+        assert_eq!(
+            styles.get("html"),
+            Some(&CommentSyntax::Multi { left: "<!--".to_string(), right: "-->".to_string() })
+        );
+        assert_eq!(config.extension_to_grammar().get("yml").map(String::as_str), Some("yaml"));
     }
 
     #[test]
-    fn a_comment_styles_section_replaces_the_defaults_wholesale() {
+    fn a_languages_section_replaces_the_defaults_wholesale() {
         let config: Config = toml::from_str(
             r#"
             theme = "Light"
 
-            [[comment_styles]]
-            syntaxes = ["toml"]
-            prefix = "// "
+            [[languages]]
+            name = "TOML"
+            syntax = "toml"
+            extensions = ["toml"]
+            comment.single = "// "
             "#,
         )
         .unwrap();
-        let prefixes = config.comment_prefixes();
-        assert_eq!(prefixes.get("toml").map(String::as_str), Some("// "));
-        assert_eq!(prefixes.get("yaml"), None, "built-in defaults are gone");
+        let styles = config.comment_styles_by_extension();
+        assert_eq!(styles.get("toml"), Some(&CommentSyntax::Single("// ".to_string())));
+        assert_eq!(styles.get("yaml"), None, "built-in defaults are gone");
+        assert_eq!(config.extension_to_grammar().len(), 1);
     }
 
     #[test]
-    fn comment_prefixes_resolves_syntaxes_to_extensions() {
+    fn comment_single_and_multi_together_fail_the_parse() {
+        let result: Result<Config, _> = toml::from_str(
+            r#"
+            [[languages]]
+            name = "Broken"
+            extensions = ["x"]
+            comment.single = "// "
+            comment.multi.left = "<!--"
+            comment.multi.right = "-->"
+            "#,
+        );
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("mutually exclusive"), "got: {error}");
+    }
+
+    #[test]
+    fn an_empty_comment_table_fails_the_parse() {
+        let result: Result<Config, _> = toml::from_str(
+            r#"
+            [[languages]]
+            name = "Broken"
+            extensions = ["x"]
+
+            [languages.comment]
+            "#,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_language_without_a_comment_key_parses_as_none() {
+        let config: Config = toml::from_str(
+            r#"
+            [[languages]]
+            name = "Plain"
+            extensions = ["txt"]
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.languages[0].comment, None);
+        assert_eq!(config.languages[0].syntax, None);
+        assert!(config.comment_styles_by_extension().is_empty());
+    }
+
+    #[test]
+    fn comment_multi_parses_the_dotted_key_form() {
+        let config: Config = toml::from_str(
+            r#"
+            [[languages]]
+            name = "HTML"
+            syntax = "html"
+            extensions = ["htm", "html", "xhtml"]
+            comment.multi.left = "<!--"
+            comment.multi.right = "-->"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.languages[0].comment,
+            Some(CommentSyntax::Multi { left: "<!--".to_string(), right: "-->".to_string() })
+        );
+    }
+
+    #[test]
+    fn the_flatteners_lowercase_and_let_a_later_entry_win() {
         let config = Config {
-            syntaxes: SyntaxesConfig(
-                [("cpp".to_string(), vec!["cpp".to_string(), "HPP".to_string()])].into(),
-            ),
-            comment_styles: vec![
-                CommentStyle {
-                    syntaxes: vec!["cpp".to_string(), "not_a_syntax".to_string()],
-                    prefix: "// ".to_string(),
+            languages: vec![
+                LanguageConfig {
+                    name: "C++".to_string(),
+                    syntax: Some("cpp".to_string()),
+                    extensions: vec!["cpp".to_string(), "HPP".to_string()],
+                    comment: Some(CommentSyntax::Single("// ".to_string())),
                 },
-                CommentStyle {
-                    syntaxes: vec!["cpp".to_string()],
-                    prefix: "# ".to_string(),
+                LanguageConfig {
+                    name: "Rewrap".to_string(),
+                    syntax: None,
+                    extensions: vec!["cpp".to_string()],
+                    comment: Some(CommentSyntax::Single("# ".to_string())),
                 },
             ],
             ..Default::default()
         };
-        let prefixes = config.comment_prefixes();
-        // Extension keys are lowercased, the later entry wins, and a style
-        // naming an unknown syntax contributes nothing.
-        assert_eq!(prefixes.get("cpp").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.get("hpp").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.len(), 2);
+        let styles = config.comment_styles_by_extension();
+        assert_eq!(styles.get("cpp"), Some(&CommentSyntax::Single("# ".to_string())));
+        assert_eq!(styles.get("hpp"), Some(&CommentSyntax::Single("// ".to_string())));
+        // The grammar map keeps configured casing and skips syntax-less entries.
+        let grammars = config.extension_to_grammar();
+        assert_eq!(grammars.get("cpp").map(String::as_str), Some("cpp"));
+        assert_eq!(grammars.get("HPP").map(String::as_str), Some("cpp"));
+        assert_eq!(grammars.len(), 2);
+    }
+
+    #[test]
+    fn an_old_config_with_syntaxes_and_comment_styles_still_parses() {
+        // Pre-[[languages]] sections are ignored unknowns: the file loads,
+        // and those customizations fall back to the built-in defaults.
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Dracula"
+
+            [syntaxes]
+            toml = ["toml"]
+
+            [[comment_styles]]
+            syntaxes = ["toml"]
+            prefix = "; "
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.theme, "Dracula");
+        assert_eq!(
+            config.comment_styles_by_extension().get("toml"),
+            Some(&CommentSyntax::Single("# ".to_string()))
+        );
     }
 
     /// Guards the first-run `write_default` path: the default config -
@@ -575,6 +724,15 @@ mod tests {
         let written = toml::to_string_pretty(&Config::default()).unwrap();
         let reparsed: Config = toml::from_str(&written).unwrap();
         assert_eq!(reparsed, Config::default());
+    }
+
+    #[test]
+    fn the_sample_files_parse() {
+        let config: Config =
+            toml::from_str(include_str!("../../../config/config.sample.toml")).unwrap();
+        assert!(!config.languages.is_empty());
+        let _: KeybindsConfig =
+            toml::from_str(include_str!("../../../config/keybinds.sample.toml")).unwrap();
     }
 
     #[test]

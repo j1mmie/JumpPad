@@ -1008,9 +1008,20 @@ in the current directory (a `cargo run` convenience). If nothing is
 found, built-in defaults are written to the first location. A malformed
 config file logs an error and falls back to in-memory defaults rather
 than failing to start - a broken config should never be able to prevent
-the editor from opening. Config sections (`syntaxes`, `theme`) are
+the editor from opening. Config sections (`[[languages]]`, `theme`) are
 independently defaulted so old config files stay valid as new sections
 get added.
+
+`[[languages]]` is the one place a language is described: `name` (for
+the file's readability), an optional `syntax` (the `<syntax>.wasm`
+grammar its extensions highlight with), `extensions`, and an optional
+`comment` - exactly one of `comment.single` or `comment.multi.left`/
+`.right`; defining both fails the whole file's parse (enforced by a
+serde `try_from` on `CommentSyntax`). A user-provided array replaces the
+built-in default list wholesale. Comment tokens can't come from the
+tree-sitter grammars - a `.wasm` carries only parse tables and node-kind
+names, the comment token exists solely inside its compiled lexer - which
+is why this is config, like every other editor does it.
 
 ### Live reload
 
@@ -1028,16 +1039,12 @@ reloads, so the signals can't conflict or double-apply.
 `apply_keybinds`) in `app.rs` - nowhere else.** Both diff against the
 stored `self.config`/`self.keybinds` baseline and only touch what
 changed. A setting that can only apply at startup (window decorations,
-visor mode, `[syntaxes]`, and `alpha.background` on a window that booted
-opaque - the `transparent` window flag is creation-time) gets a
-`restart_required` log line instead of a half-working apply.
-`[[comment_styles]]` (toggle-comment's line prefix, keyed by `[syntaxes]`
-name and resolved to extensions through that map) is live this way; a
-user-provided section replaces the built-in defaults wholesale, same as
-`[syntaxes]`. The prefixes can't come from the tree-sitter grammars - a
-`.wasm` carries only parse tables and node-kind names, the comment token
-exists solely inside its compiled lexer - which is why this is config,
-like every other editor does it.
+visor mode, and `alpha.background` on a window that booted opaque - the
+`transparent` window flag is creation-time) gets a `restart_required`
+log line instead of a half-working apply. One `[[languages]]` edit can
+feed two consumers, so `apply_config` diffs its *derived views*: the
+comment-style map applies live, the extension-to-grammar map is baked
+into the registry at startup and logs restart-required.
 
 Reloads go through `try_load`/`try_load_keybinds`, which never write
 default files and never fall back to `Default` - a half-edited file
