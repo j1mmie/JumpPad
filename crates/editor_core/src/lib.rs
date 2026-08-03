@@ -1,8 +1,10 @@
+mod debounce;
 mod find;
 mod tab;
 mod theme;
 mod widget;
 
+pub use debounce::Debounce;
 pub use find::{FindMatch, find_matches};
 pub use tab::{Document, Tab};
 pub use theme::{
