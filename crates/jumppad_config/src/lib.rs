@@ -11,7 +11,7 @@ pub use keybind_overrides::ResolvedKeybind;
 
 /// JumpPad's user-editable settings. Each concern gets its own section so a
 /// missing section falls back to its own defaults rather than failing the file.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
     pub syntaxes: SyntaxesConfig,
@@ -32,7 +32,7 @@ impl Default for Config {
 
 /// Controls whether JumpPad runs as a drop-down "visor" (undecorated,
 /// always-on-top, hidden until summoned) or as an ordinary window.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct VisorConfig {
     pub enabled: bool,
@@ -73,7 +73,7 @@ impl Default for AlphaConfig {
 }
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct KeybindsConfig {
     /// Shows/hides the visor from anywhere, even without focus.
@@ -104,7 +104,7 @@ impl KeybindsConfig {
 
 /// Maps a grammar's name (the `<name>.wasm` file to look for) to the file
 /// extensions that should use it, e.g. `"yaml" -> ["yaml", "yml"]`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct SyntaxesConfig(pub HashMap<String, Vec<String>>);
 
@@ -132,6 +132,60 @@ fn config_paths() -> Vec<PathBuf> {
     }
     paths.push(PathBuf::from("config.toml"));
     paths
+}
+
+/// The file a reload would read: the first existing candidate, in the same
+/// order `load()` searches. `None` if no config file exists yet.
+pub fn config_file() -> Option<PathBuf> {
+    config_paths().into_iter().find(|path| path.is_file())
+}
+
+/// Same, for `keybinds.toml`.
+pub fn keybinds_file() -> Option<PathBuf> {
+    keybind_paths().into_iter().find(|path| path.is_file())
+}
+
+/// Why a reload attempt produced nothing.
+#[derive(Debug)]
+pub enum ReloadError {
+    /// No candidate file exists (deleted since the last load).
+    Missing,
+    Io(std::io::ErrorKind),
+    Parse(String),
+}
+
+impl std::fmt::Display for ReloadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReloadError::Missing => write!(f, "file not found"),
+            ReloadError::Io(kind) => write!(f, "{kind}"),
+            ReloadError::Parse(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+/// Fallible sibling of [`load`]: never writes a default file and never
+/// falls back to `Default`, so a half-edited file on disk keeps the
+/// caller's last good config live instead of resetting it.
+pub fn try_load() -> Result<Config, ReloadError> {
+    try_parse(&config_paths())
+}
+
+/// Fallible sibling of [`load_keybinds`] - see [`try_load`].
+pub fn try_load_keybinds() -> Result<KeybindsConfig, ReloadError> {
+    try_parse(&keybind_paths())
+}
+
+fn try_parse<T: serde::de::DeserializeOwned>(paths: &[PathBuf]) -> Result<T, ReloadError> {
+    for path in paths {
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(ReloadError::Io(err.kind())),
+        };
+        return toml::from_str(&text).map_err(|err| ReloadError::Parse(err.to_string()));
+    }
+    Err(ReloadError::Missing)
 }
 
 /// Loads the config from disk, writing a default file on first run. Never
@@ -322,6 +376,62 @@ mod tests {
     #[test]
     fn default_keybinds_config_has_no_overrides() {
         assert!(KeybindsConfig::default().overrides.is_empty());
+    }
+
+    /// A throwaway file that cleans up after itself, so the `try_parse`
+    /// tests can exercise the real read path.
+    struct TempFile(PathBuf);
+
+    impl TempFile {
+        fn with_contents(name: &str, contents: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("jumppad_config_test_{name}"));
+            std::fs::write(&path, contents).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TempFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    #[test]
+    fn try_parse_reads_the_first_existing_candidate() {
+        let file = TempFile::with_contents("valid.toml", r#"theme = "Dracula""#);
+        let missing = PathBuf::from("does_not_exist/config.toml");
+        let config: Config = try_parse(&[missing, file.0.clone()]).unwrap();
+        assert_eq!(config.theme, "Dracula");
+    }
+
+    #[test]
+    fn try_parse_with_no_existing_candidate_is_missing() {
+        let result: Result<Config, _> = try_parse(&[PathBuf::from("does_not_exist/config.toml")]);
+        assert!(matches!(result, Err(ReloadError::Missing)));
+    }
+
+    /// The deliberate contrast with `load()`: a broken file is an error the
+    /// caller can react to, not a silent reset to defaults.
+    #[test]
+    fn try_parse_surfaces_a_parse_error_instead_of_defaulting() {
+        let file = TempFile::with_contents("broken.toml", "theme = ");
+        let result: Result<Config, _> = try_parse(&[file.0.clone()]);
+        assert!(matches!(result, Err(ReloadError::Parse(_))));
+    }
+
+    #[test]
+    fn try_parse_surfaces_a_malformed_chord_as_a_parse_error() {
+        let file = TempFile::with_contents(
+            "bad_chord.toml",
+            r#"
+            toggle = "control+Backquote"
+
+            [overrides]
+            new_tab = "not a real chord"
+            "#,
+        );
+        let result: Result<KeybindsConfig, _> = try_parse(&[file.0.clone()]);
+        assert!(matches!(result, Err(ReloadError::Parse(_))));
     }
 
     #[test]
