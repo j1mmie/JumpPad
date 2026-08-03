@@ -29,22 +29,11 @@ pub(crate) fn config() -> Config {
         })
         .collect::<HashMap<String, Vec<String>>>();
 
-    // Covers common languages beyond the shipped grammars on purpose -
-    // toggle-comment is useful in files JumpPad can't highlight.
-    let comment_styles: &[(&[&str], &str)] = &[
-        (&["rs", "c", "h", "cpp", "hpp", "js", "ts", "jsx", "tsx", "java", "go"], "// "),
-        (&["py", "sh", "bash", "zsh", "rb", "yaml", "yml", "toml", "mk"], "# "),
-        (&["lua", "sql"], "-- "),
-        (&["ini"], "; "),
-    ];
-
-    let comment_styles = comment_styles
-        .iter()
-        .map(|(languages, prefix)| CommentStyle {
-            languages: languages.iter().map(|ext| ext.to_string()).collect(),
-            prefix: prefix.to_string(),
-        })
-        .collect();
+    // The default [syntaxes] entries that have a line comment.
+    let comment_styles = vec![CommentStyle {
+        syntaxes: vec!["toml".to_string(), "yaml".to_string(), "make".to_string()],
+        prefix: "# ".to_string(),
+    }];
 
     Config {
         syntaxes: SyntaxesConfig(syntaxes),

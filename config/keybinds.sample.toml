@@ -17,9 +17,8 @@ toggle = "control+Backquote"
 #     select_document_start, document_end, select_document_end, undo, redo,
 #     toggle_comment
 #
-# toggle_comment defaults to command+/ but that chord only fires where `/`
-# is an unshifted key - on layouts where it isn't (e.g. German), bind it
-# here; overrides match by physical key position.
+# toggle_comment's default chord needs an unshifted `/` key; on layouts
+# without one (e.g. German), bind it here - overrides match by physical key.
 #
 # Example:
 # [overrides]

@@ -76,8 +76,7 @@ impl History {
     }
 
     /// Records an undo step that stands alone: it neither joins the typing
-    /// burst before it nor absorbs the edit after it. For commands that
-    /// rewrite the document in one deliberate stroke (toggle-comment).
+    /// burst before it nor absorbs the edit after it.
     pub fn record_isolated(&mut self, text: &str, cursor: CursorState) {
         self.burst.reset();
         self.record_before_edit(text, cursor);

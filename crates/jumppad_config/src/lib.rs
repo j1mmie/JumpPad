@@ -28,25 +28,29 @@ pub struct Config {
 }
 
 impl Config {
-    /// Flattens `[[comment_styles]]` into extension -> prefix, lowercasing
-    /// keys (lookups lowercase too). An extension listed twice keeps the
-    /// later entry's prefix.
+    /// Flattens `[[comment_styles]]` through the `[syntaxes]` map into
+    /// extension -> prefix; a style naming an unknown syntax adds nothing.
     pub fn comment_prefixes(&self) -> HashMap<String, String> {
         let mut map = HashMap::new();
         for style in &self.comment_styles {
-            for language in &style.languages {
-                map.insert(language.to_lowercase(), style.prefix.clone());
+            for syntax in &style.syntaxes {
+                let Some(extensions) = self.syntaxes.0.get(syntax) else {
+                    continue;
+                };
+                for extension in extensions {
+                    map.insert(extension.to_lowercase(), style.prefix.clone());
+                }
             }
         }
         map
     }
 }
 
-/// One single-line comment style: the file extensions (`languages`, no
-/// leading dot) that toggle-comment uses `prefix` for.
+/// One single-line comment style: the `[syntaxes]` names whose files
+/// toggle-comment uses `prefix` in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommentStyle {
-    pub languages: Vec<String>,
+    pub syntaxes: Vec<String>,
     pub prefix: String,
 }
 
@@ -514,9 +518,11 @@ mod tests {
     fn config_toml_with_no_comment_styles_keeps_the_builtin_defaults() {
         let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
         let prefixes = config.comment_prefixes();
-        assert_eq!(prefixes.get("rs").map(String::as_str), Some("// "));
+        // Resolved through [syntaxes]: the yaml grammar covers both extensions.
         assert_eq!(prefixes.get("toml").map(String::as_str), Some("# "));
-        assert_eq!(prefixes.get("lua").map(String::as_str), Some("-- "));
+        assert_eq!(prefixes.get("yaml").map(String::as_str), Some("# "));
+        assert_eq!(prefixes.get("yml").map(String::as_str), Some("# "));
+        assert_eq!(prefixes.get("mk").map(String::as_str), Some("# "));
     }
 
     #[test]
@@ -526,34 +532,40 @@ mod tests {
             theme = "Light"
 
             [[comment_styles]]
-            languages = ["cpp", "js"]
+            syntaxes = ["toml"]
             prefix = "// "
             "#,
         )
         .unwrap();
         let prefixes = config.comment_prefixes();
-        assert_eq!(prefixes.get("cpp").map(String::as_str), Some("// "));
-        assert_eq!(prefixes.get("rs"), None, "built-in defaults are gone");
+        assert_eq!(prefixes.get("toml").map(String::as_str), Some("// "));
+        assert_eq!(prefixes.get("yaml"), None, "built-in defaults are gone");
     }
 
     #[test]
-    fn comment_prefixes_lowercases_keys_and_lets_a_later_entry_win() {
+    fn comment_prefixes_resolves_syntaxes_to_extensions() {
         let config = Config {
+            syntaxes: SyntaxesConfig(
+                [("cpp".to_string(), vec!["cpp".to_string(), "HPP".to_string()])].into(),
+            ),
             comment_styles: vec![
                 CommentStyle {
-                    languages: vec!["RS".to_string(), "c".to_string()],
+                    syntaxes: vec!["cpp".to_string(), "not_a_syntax".to_string()],
                     prefix: "// ".to_string(),
                 },
                 CommentStyle {
-                    languages: vec!["c".to_string()],
+                    syntaxes: vec!["cpp".to_string()],
                     prefix: "# ".to_string(),
                 },
             ],
             ..Default::default()
         };
         let prefixes = config.comment_prefixes();
-        assert_eq!(prefixes.get("rs").map(String::as_str), Some("// "));
-        assert_eq!(prefixes.get("c").map(String::as_str), Some("# "));
+        // Extension keys are lowercased, the later entry wins, and a style
+        // naming an unknown syntax contributes nothing.
+        assert_eq!(prefixes.get("cpp").map(String::as_str), Some("# "));
+        assert_eq!(prefixes.get("hpp").map(String::as_str), Some("# "));
+        assert_eq!(prefixes.len(), 2);
     }
 
     /// Guards the first-run `write_default` path: the default config -

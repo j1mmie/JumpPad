@@ -3096,8 +3096,11 @@ mod tests {
     fn apply_config_reaches_the_shared_comment_prefixes() {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
+            syntaxes: jumppad_config::SyntaxesConfig(
+                [("zig".to_string(), vec!["zig".to_string()])].into(),
+            ),
             comment_styles: vec![jumppad_config::CommentStyle {
-                languages: vec!["zig".to_string()],
+                syntaxes: vec!["zig".to_string()],
                 prefix: "// ".to_string(),
             }],
             ..Default::default()

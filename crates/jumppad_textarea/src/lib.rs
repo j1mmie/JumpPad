@@ -255,11 +255,8 @@ impl TextArea {
         true
     }
 
-    /// Replaces the whole document, carrying the view across - the rebuilt
-    /// content starts at the top of the document, so without the restore an
-    /// edit already on screen would still jump the document around. Shared
-    /// by undo/redo and toggle-comment; always `Content::with_text`, never
-    /// SelectAll+Paste, which is quadratic (see AGENTS.md).
+    /// Replaces the whole document, carrying the view across - a rebuilt
+    /// `Content` starts at the top. Never SelectAll+Paste (see AGENTS.md).
     fn replace_document(&mut self, text: &str) {
         let view = self.content.scrolled_to();
         self.content = Content::with_text(text);
@@ -274,9 +271,7 @@ impl TextArea {
     }
 
     /// The document with lines `first..first + replacements.len()` swapped
-    /// out, joined the way `Content::text()` joins (separators between
-    /// lines, never after the last) - so everything outside the replaced
-    /// range, line endings included, round-trips byte-identically.
+    /// out, joined exactly as `Content::text()` joins so the rest round-trips.
     fn text_with_lines_replaced(&self, first: usize, replacements: &[String]) -> String {
         let mut text = String::with_capacity(self.source.len());
         let mut lines = self.content.lines().enumerate().peekable();
@@ -297,8 +292,7 @@ impl TextArea {
     }
 
     /// Comments or uncomments the covered lines with the file type's
-    /// configured prefix. A file with no style, or all-blank coverage, is a
-    /// silent no-op that leaves the tab clean.
+    /// configured prefix; no style or all-blank coverage is a clean no-op.
     fn toggle_comment(&mut self) -> bool {
         let Some(prefix) = self.comment_prefix() else {
             return false;
@@ -810,9 +804,8 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
                 }
                 'z' => return Some(binding_for(EditorCommand::Undo)),
                 'y' => return Some(binding_for(EditorCommand::Redo)),
-                // On layouts where `/` needs a modifier (German: Shift+7)
-                // this never fires - keybinds.toml overrides by physical
-                // key and covers those.
+                // Never fires on layouts where `/` needs a modifier (German:
+                // Shift+7); a keybinds.toml override matches by physical key.
                 '/' => return Some(binding_for(EditorCommand::ToggleComment)),
                 _ => {}
             }

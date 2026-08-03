@@ -1031,12 +1031,13 @@ changed. A setting that can only apply at startup (window decorations,
 visor mode, `[syntaxes]`, and `alpha.background` on a window that booted
 opaque - the `transparent` window flag is creation-time) gets a
 `restart_required` log line instead of a half-working apply.
-`[[comment_styles]]` (extension -> line-comment prefix for
-toggle-comment) is live this way; a user-provided section replaces the
-built-in defaults wholesale, same as `[syntaxes]`. The prefixes can't
-come from the tree-sitter grammars - a `.wasm` carries only parse tables
-and node-kind names, the comment token exists solely inside its compiled
-lexer - which is why this is config, like every other editor does it.
+`[[comment_styles]]` (toggle-comment's line prefix, keyed by `[syntaxes]`
+name and resolved to extensions through that map) is live this way; a
+user-provided section replaces the built-in defaults wholesale, same as
+`[syntaxes]`. The prefixes can't come from the tree-sitter grammars - a
+`.wasm` carries only parse tables and node-kind names, the comment token
+exists solely inside its compiled lexer - which is why this is config,
+like every other editor does it.
 
 Reloads go through `try_load`/`try_load_keybinds`, which never write
 default files and never fall back to `Default` - a half-edited file

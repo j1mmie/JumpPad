@@ -1,6 +1,5 @@
-//! The toggle-comment transformation: pure functions over line texts, so
-//! the whole behavior tests without a window. `TextArea::toggle_comment`
-//! glues these to the document.
+//! The toggle-comment transformation: pure functions over line texts,
+//! glued to the document by `TextArea::toggle_comment`.
 
 use editor_core::{SavedSelection, SelectionKind};
 
@@ -21,12 +20,8 @@ pub struct ToggledLines {
     pub edits: Vec<LineEdit>,
 }
 
-/// Comments or uncomments `lines` (the covered lines' texts, endings
-/// excluded) with `prefix` (e.g. `"// "`). Uncomments only when every
-/// non-blank line is already commented; otherwise comments every non-blank
-/// line, at the leftmost non-whitespace column any of them starts at.
-/// `None` means nothing to do: every line is blank, or the prefix trims to
-/// empty (a whitespace-only configured prefix would match everything).
+/// Uncomments `lines` when every non-blank one is commented, else comments
+/// them at the leftmost non-whitespace column. `None` = nothing to do.
 pub fn toggle_comment(lines: &[&str], prefix: &str) -> Option<ToggledLines> {
     let token = prefix.trim_end();
     if token.is_empty() {
@@ -69,9 +64,8 @@ fn comment(lines: &[&str], prefix: &str, blank: impl Fn(&str) -> bool) -> Toggle
             toggled.edits.push(LineEdit { column: 0, delta: 0 });
             continue;
         }
-        // The min indent was measured on other lines' whitespace, so back
-        // it down to a char boundary of this one (multi-byte whitespace
-        // like NBSP would otherwise split a char).
+        // The min indent was measured on another line's whitespace; back it
+        // down to a char boundary of this one (NBSP would otherwise split).
         let mut column = insert_col;
         while !line.is_char_boundary(column) {
             column -= 1;
@@ -146,10 +140,8 @@ pub fn covered_lines(
     }
 }
 
-/// Shifts a saved `(line, byte column)` across the toggle's per-line edits.
-/// Columns before an edit stay put; columns at or after it move by the
-/// delta, clamped so a caret inside a removed prefix lands where the prefix
-/// was. Upper clamping is the caller's restore path's job.
+/// Shifts a saved `(line, byte column)` across the toggle's per-line edits,
+/// clamped so a caret inside a removed prefix lands where the prefix was.
 pub fn shift_position(
     pos: (usize, usize),
     first_line: usize,
