@@ -49,7 +49,8 @@ file, saving a note, or drafting a message.
  - Syntax highlighting
  - Transparency
  - Automatic draft saving
- - Configurable via TOML
+ - Configurable via TOML, with live reload - theme, transparency, and
+   keybind changes apply the moment the file is saved
  - More to come...
 
 Drag and drop works on macOS, Windows, and Linux/X11. On a native Wayland
