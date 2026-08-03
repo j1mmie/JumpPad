@@ -3,6 +3,8 @@ mod history;
 mod scrollbar;
 pub mod text_editor;
 
+pub use comment::CommentStyle;
+
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -64,9 +66,9 @@ pub struct SharedEditorConfig {
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole map.
     overrides: RwLock<Arc<EditorOverrides>>,
-    /// Extension -> single-line comment prefix, flattened from config's
-    /// `[[comment_styles]]`. Keys are lowercase; look up lowercased.
-    comment_prefixes: RwLock<Arc<HashMap<String, String>>>,
+    /// Extension -> comment style, flattened from the config by the app.
+    /// Keys are lowercase; look up lowercased.
+    comment_styles: RwLock<Arc<HashMap<String, CommentStyle>>>,
 }
 
 impl SharedEditorConfig {
@@ -74,7 +76,7 @@ impl SharedEditorConfig {
         Arc::new(Self {
             background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
             overrides: RwLock::new(Arc::new(overrides)),
-            comment_prefixes: RwLock::new(Arc::new(HashMap::new())),
+            comment_styles: RwLock::new(Arc::new(HashMap::new())),
         })
     }
 
@@ -101,12 +103,12 @@ impl SharedEditorConfig {
         *self.overrides.write().unwrap() = Arc::new(overrides);
     }
 
-    pub fn comment_prefixes(&self) -> Arc<HashMap<String, String>> {
-        self.comment_prefixes.read().unwrap().clone()
+    pub fn comment_styles(&self) -> Arc<HashMap<String, CommentStyle>> {
+        self.comment_styles.read().unwrap().clone()
     }
 
-    pub fn set_comment_prefixes(&self, prefixes: HashMap<String, String>) {
-        *self.comment_prefixes.write().unwrap() = Arc::new(prefixes);
+    pub fn set_comment_styles(&self, styles: HashMap<String, CommentStyle>) {
+        *self.comment_styles.write().unwrap() = Arc::new(styles);
     }
 }
 
@@ -264,10 +266,10 @@ impl TextArea {
         self.resync_source();
     }
 
-    /// The single-line comment prefix configured for this tab's file type.
-    fn comment_prefix(&self) -> Option<String> {
+    /// The comment style configured for this tab's file type.
+    fn comment_style(&self) -> Option<CommentStyle> {
         let extension = self.extension.as_deref()?;
-        self.settings.comment_prefixes().get(extension).cloned()
+        self.settings.comment_styles().get(extension).cloned()
     }
 
     /// The document with lines `first..first + replacements.len()` swapped
@@ -294,7 +296,7 @@ impl TextArea {
     /// Comments or uncomments the covered lines with the file type's
     /// configured prefix; no style or all-blank coverage is a clean no-op.
     fn toggle_comment(&mut self) -> bool {
-        let Some(prefix) = self.comment_prefix() else {
+        let Some(style) = self.comment_style() else {
             return false;
         };
         let cursor = self.cursor_position();
@@ -304,7 +306,7 @@ impl TextArea {
             .filter_map(|index| self.content.line(index).map(|line| line.text.into_owned()))
             .collect();
         let covered: Vec<&str> = covered.iter().map(String::as_str).collect();
-        let Some(toggled) = comment::toggle_comment(&covered, &prefix) else {
+        let Some(toggled) = comment::toggle_comment(&covered, &style) else {
             return false;
         };
 
@@ -1033,13 +1035,25 @@ mod tests {
         EditorMessage::Action(text_editor::Action::Edit(edit))
     }
 
-    /// An editor opened as a `.rs` file with `// ` configured - what the
-    /// toggle-comment tests run against.
-    fn rust_editor(text: &str) -> TextArea {
+    fn editor_with_style(text: &str, extension: &str, style: CommentStyle) -> TextArea {
         let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
         let settings = SharedEditorConfig::new(1.0, EditorOverrides::new());
-        settings.set_comment_prefixes([("rs".to_string(), "// ".to_string())].into());
-        TextArea::new(text, &registry, Some("rs"), settings)
+        settings.set_comment_styles([(extension.to_string(), style)].into());
+        TextArea::new(text, &registry, Some(extension), settings)
+    }
+
+    /// An editor opened as a `.rs` file with `// ` configured.
+    fn rust_editor(text: &str) -> TextArea {
+        editor_with_style(text, "rs", CommentStyle::Single("// ".to_string()))
+    }
+
+    /// An editor opened as an `.html` file with `<!--` / `-->` configured.
+    fn html_editor(text: &str) -> TextArea {
+        editor_with_style(
+            text,
+            "html",
+            CommentStyle::Multi { left: "<!--".to_string(), right: "-->".to_string() },
+        )
     }
 
     #[test]
@@ -1139,6 +1153,94 @@ mod tests {
         assert_eq!(editor.text(), "// aaa\r\nbbb");
         assert!(editor.update(EditorMessage::ToggleComment));
         assert_eq!(editor.text(), "aaa\r\nbbb");
+        assert_source_is_synced(&editor);
+    }
+
+    /// The user-facing acceptance example for multi-line styles: wrap two
+    /// list items, keeping the same characters selected.
+    #[test]
+    fn multi_toggle_keeps_the_selected_characters() {
+        let text = "    <ul>\n\
+                    \x20       <li>Do you have an Internet connection? </li>\n\
+                    \x20       <li>Is anti-virus software or a firewall preventing ROBLOX from accessing the Internet?</li>     \n\
+                    \x20   </ul>";
+        let mut editor = html_editor(text);
+        editor.restore_selection(
+            SavedSelection { anchor: (1, 24), kind: SelectionKind::Range },
+            (2, 25),
+        );
+        let selected_before = editor.content.selection();
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(
+            editor.text(),
+            "    <ul>\n\
+             \x20       <!--<li>Do you have an Internet connection? </li>\n\
+             \x20       <li>Is anti-virus software or a firewall preventing ROBLOX from accessing the Internet?</li>     -->\n\
+             \x20   </ul>"
+        );
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (1, 28), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (2, 25));
+        assert_eq!(editor.content.selection(), selected_before, "same characters selected");
+        assert_source_is_synced(&editor);
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), text);
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (1, 24), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (2, 25));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn multi_toggle_on_a_caret_line_round_trips() {
+        let mut editor = html_editor("    foo");
+        editor.move_cursor_to(0, 7);
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "    <!--foo-->");
+        assert_eq!(editor.cursor_position(), (0, 11), "caret stays before -->");
+
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "    foo");
+        assert_eq!(editor.cursor_position(), (0, 7));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn undo_of_a_multi_toggle_restores_text_and_selection() {
+        let mut editor = html_editor("aaa\nbbb");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            (1, 2),
+        );
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "<!--aaa\nbbb-->");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (1, 2));
+    }
+
+    #[test]
+    fn crlf_survives_a_multi_toggle_round_trip() {
+        let mut editor = html_editor("aaa\r\nbbb\r\nccc");
+        editor.restore_selection(
+            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            (1, 3),
+        );
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "<!--aaa\r\nbbb-->\r\nccc");
+        assert!(editor.update(EditorMessage::ToggleComment));
+        assert_eq!(editor.text(), "aaa\r\nbbb\r\nccc");
         assert_source_is_synced(&editor);
     }
 

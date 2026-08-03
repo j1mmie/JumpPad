@@ -282,7 +282,7 @@ impl JumpPadApp {
             build_editor_overrides(&keybinds),
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
-        editor_config.set_comment_prefixes(config.comment_prefixes());
+        editor_config.set_comment_styles(single_styles(config.comment_prefixes()));
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -830,7 +830,7 @@ impl JumpPadApp {
 
         // No repaint: nothing on screen changes until the next toggle.
         if new.comment_styles != current.comment_styles {
-            self.editor_config.set_comment_prefixes(new.comment_prefixes());
+            self.editor_config.set_comment_styles(single_styles(new.comment_prefixes()));
         }
 
         if new.window != current.window {
@@ -2101,6 +2101,17 @@ fn premultiply(color: Color) -> Color {
     }
 }
 
+/// Temporary shim while the config only carries single-line prefixes -
+/// replaced when `[[languages]]` lands full comment styles.
+fn single_styles(
+    prefixes: HashMap<String, String>,
+) -> HashMap<String, jumppad_textarea::CommentStyle> {
+    prefixes
+        .into_iter()
+        .map(|(ext, prefix)| (ext, jumppad_textarea::CommentStyle::Single(prefix)))
+        .collect()
+}
+
 /// A reloaded setting that only applies at startup. Logged, not shown in
 /// the banner: the change is valid, it just waits for the next start.
 fn restart_required(what: &str) {
@@ -3107,8 +3118,8 @@ mod tests {
         };
         app.apply_config(config);
         assert_eq!(
-            app.editor_config.comment_prefixes().get("zig").map(String::as_str),
-            Some("// ")
+            app.editor_config.comment_styles().get("zig"),
+            Some(&jumppad_textarea::CommentStyle::Single("// ".to_string()))
         );
         assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
     }
