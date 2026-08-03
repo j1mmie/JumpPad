@@ -554,6 +554,47 @@ unreachable from app code - `iced_wgpu` builds its `InstanceDescriptor` with
 dead, read only by `Dx12SwapchainKind::from_env`, which nothing in `wgpu`,
 `wgpu-core`, or `wgpu-hal` calls. That is all true and all irrelevant.)
 
+## Why the software renderer isn't compiled at `opt-level = "z"`
+
+`[profile.release]` uses `opt-level = "z"` for binary size, but
+`[profile.release.package]` pulls the per-frame drawing crates back up to `3`.
+Measured on a 1800x1200 surface (a default window at 2x), clearing plus 40 rows
+of translucent quads: **43.6ms/frame at "z", 12.7ms at 3** - 23fps vs 79fps, for
+one repaint. tiny-skia says why in `src/wide/u16x16_t.rs`: its blend pipeline is
+plain `[u16; 16]` arrays that rely on autovectorization, which `-Oz` turns off,
+and `#[inline]` hints it calls mandatory, which `-Oz` declines. `jumppad-gpu`
+never runs any of it, which is why the two binaries felt so different.
+
+Raising it costs ~320KB of binary. If a crate ever shows up hot on the draw
+path, add it to that list. `-C target-cpu=x86-64-v3` would help further on Intel
+(tiny-skia's `f32x8` only uses AVX under `target_feature = "avx"`), but keep it
+out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
+crash on older CPUs, and moot on Apple Silicon where NEON is baseline.
+
+## macOS: softbuffer disables damage tracking entirely
+
+`iced_tiny_skia`'s `present` only diffs damage when it can identify the previous
+buffer, via `buffer.age()`; otherwise it falls back to
+`vec![Rectangle::with_size(viewport.logical_size())]` - the whole window.
+**softbuffer's CoreGraphics backend hardcodes `age() -> 0`**
+(`src/backends/cg.rs`), because it has nothing to age: it allocates a fresh
+zeroed framebuffer every frame and hands it to a `CGDataProvider`.
+
+So on macOS there is no damage tracking. Per-frame cost is proportional to
+**window area, not to what changed**, and a maximized Retina window is the worst
+case. Selection drags and scrolling show it first, since both redraw in bursts -
+one per mouse-move and one per wheel step. Windows and X11 return `1` once
+presented and do get real diffing, so this is macOS-only.
+
+Fixing it means forking softbuffer for buffer reuse plus a real `age()`. That is
+the next big lever if the renderer still feels slow; nothing in JumpPad can work
+around it.
+
+One consequence for the "zero idle CPU" goal in `README.md`: it holds for
+JumpPad's *scheduling* (see the scrollbar's `next_redraw`), but on macOS the
+500ms caret blink costs two full-window repaints per second whenever the window
+is focused.
+
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
 `iced`'s tiny-skia compositor skips presenting a frame it thinks looks
