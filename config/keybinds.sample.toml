@@ -14,7 +14,12 @@ toggle = "control+Backquote"
 #     find, find_next, find_previous
 #   Editor-level (crates/jumppad_textarea/src/lib.rs, EDITOR_COMMAND_NAMES):
 #     word_delete_backward, word_delete_forward, document_start,
-#     select_document_start, document_end, select_document_end, undo, redo
+#     select_document_start, document_end, select_document_end, undo, redo,
+#     toggle_comment
+#
+# toggle_comment defaults to command+/ but that chord only fires where `/`
+# is an unshifted key - on layouts where it isn't (e.g. German), bind it
+# here; overrides match by physical key position.
 #
 # Example:
 # [overrides]

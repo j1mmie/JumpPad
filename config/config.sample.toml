@@ -26,3 +26,17 @@ toml = ["toml", "tml"]
 json = ["json", "jsonc"]
 xml = ["xml", "xsl", "xsd", "svg", "html", "htm", "xhtml"]
 dtd = ["dtd"]
+
+# Single-line comment styles for the toggle-comment command (Cmd+/ on macOS,
+# Ctrl+/ elsewhere). `languages` are file extensions, no leading dot.
+# Providing any [[comment_styles]] section replaces the built-in defaults
+# wholesale; a file whose extension matches no style makes the command do
+# nothing. Changes apply live, no restart needed.
+#
+# [[comment_styles]]
+# languages = ["cpp", "js"]
+# prefix = "// "
+#
+# [[comment_styles]]
+# languages = ["sh", "toml"]
+# prefix = "# "
