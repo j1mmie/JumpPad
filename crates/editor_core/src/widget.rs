@@ -97,6 +97,10 @@ pub enum EditorMessage {
     Undo,
     /// Mirror of `Undo`, restoring the most recently undone entry.
     Redo,
+    /// Comment or uncomment the cursor's line / the selection's lines.
+    /// Like `Undo`, not a `text_editor::Action` - the transformation is the
+    /// widget's own logic.
+    ToggleComment,
 }
 
 impl EditorMessage {

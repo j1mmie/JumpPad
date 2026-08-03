@@ -75,6 +75,15 @@ impl History {
         self.redo.clear();
     }
 
+    /// Records an undo step that stands alone: it neither joins the typing
+    /// burst before it nor absorbs the edit after it. For commands that
+    /// rewrite the document in one deliberate stroke (toggle-comment).
+    pub fn record_isolated(&mut self, text: &str, cursor: CursorState) {
+        self.burst.reset();
+        self.record_before_edit(text, cursor);
+        self.burst.reset();
+    }
+
     /// Pops the most recent undo step, pushing `current` onto the redo stack
     /// so it can be returned to. `None` if there's nothing to undo.
     ///
@@ -185,6 +194,32 @@ mod tests {
         let restored = history.undo("abcd", caret(0, 4));
         assert_eq!(restored, Some(("a".to_string(), caret(0, 1))));
         assert!(history.undo("abcd", caret(0, 4)).is_none());
+    }
+
+    #[test]
+    fn an_isolated_record_stays_its_own_step_inside_a_typing_burst() {
+        let mut history = History::new();
+        // All three records land well inside one coalesce window; without
+        // the isolation they would collapse into a single step.
+        history.record_before_edit("a", caret(0, 1));
+        history.record_isolated("ab", caret(0, 2));
+        history.record_before_edit("ab//", caret(0, 4));
+
+        let restored = history.undo("ab//c", caret(0, 5));
+        assert_eq!(restored, Some(("ab//".to_string(), caret(0, 4))));
+        let restored = history.undo("ab//", caret(0, 4));
+        assert_eq!(restored, Some(("ab".to_string(), caret(0, 2))));
+        let restored = history.undo("ab", caret(0, 2));
+        assert_eq!(restored, Some(("a".to_string(), caret(0, 1))));
+    }
+
+    #[test]
+    fn an_isolated_record_clears_the_redo_stack() {
+        let mut history = History::new();
+        history.record_before_edit("abc", caret(0, 3));
+        history.undo("abcd", caret(0, 4));
+        history.record_isolated("abc", caret(0, 3));
+        assert!(history.redo("// abc", caret(0, 6)).is_none());
     }
 
     #[test]
