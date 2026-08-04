@@ -196,6 +196,15 @@ order of cost:
 Don't reach for a third option of scaling `LineHeight` to fake smaller
 steps: `set_metrics` resets shaping for the whole document.
 
+**Checked against `iced-rs/iced` master on 2026-08-04, not just the
+released 0.14.0: still whole lines.** `Action::Scroll` is byte-identical,
+`iced_graphics::text::Editor` still exposes only `new`/`buffer`/`downgrade`,
+and the widget's wheel handling is the same `partial_scroll` accumulation.
+Master's new `buffer.set_scroll` calls are the *horizontal* scrolling work
+(keeping the caret in view on unwrapped lines) and don't help here. The
+`[Unreleased]` changelog section is empty, so a PR adding a fractional
+lever would apply cleanly - worth checking again before doing route 2.
+
 ### Revealing the cursor after a change
 
 A change made while the cursor is off screen (scrolled away with the wheel or
