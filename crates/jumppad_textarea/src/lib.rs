@@ -378,6 +378,7 @@ impl TextEditorWidget for TextArea {
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
             .key_binding(move |press| key_binding(press, &overrides))
             .on_action(EditorMessage::Action)
+            .on_scroll(EditorMessage::Scroll)
             .into()
     }
 
@@ -401,6 +402,13 @@ impl TextEditorWidget for TextArea {
                     self.resync_source();
                 }
                 is_edit
+            }
+            EditorMessage::Scroll(pixels) => {
+                // Moves the view, never the text - so no `source` rebuild,
+                // for the same reason `Scroll`'s action counterpart needs
+                // none.
+                self.content.scroll_by(pixels);
+                false
             }
             EditorMessage::Undo => self.apply_history(History::undo),
             EditorMessage::Redo => self.apply_history(History::redo),
@@ -986,6 +994,25 @@ mod tests {
                 "{action:?} must not rebuild the cached source"
             );
         }
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_pixel_scroll_is_not_an_edit_and_does_not_rebuild_the_source() {
+        // Same contract as the non-edit actions above: `Scroll` moves the
+        // view, never the text, so the highlighter must not be re-run for it.
+        // It arrives on its own message rather than as a `text_editor::Action`
+        // because `Action::Scroll` can't carry a fractional distance.
+        let mut editor = plain_editor("hello world\nsecond line");
+        let before = editor.source.clone();
+
+        let edited = editor.update(EditorMessage::Scroll(7.5));
+
+        assert!(!edited, "a scroll is not an edit");
+        assert!(
+            Arc::ptr_eq(&before, &editor.source),
+            "a scroll must not rebuild the cached source"
+        );
         assert_source_is_synced(&editor);
     }
 

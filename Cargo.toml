@@ -40,6 +40,29 @@ jumppad_textarea = { path = "crates/jumppad_textarea" }
 syntax_registry = { path = "crates/syntax_registry" }
 jumppad_config = { path = "crates/jumppad_config" }
 
+# `iced_graphics` 0.14.0 plus one additive method, `Editor::scroll_by(pixels)`,
+# which is what makes scrolling pixel-granular rather than line-snapped (see
+# AGENTS.md). Branched from the `0.14.0` tag, not `master`: master is
+# `0.15.0-dev`, and a patch has to keep satisfying the `^0.14` requirements
+# every other iced crate states, or Cargo refuses it.
+#
+# Only this one crate is patched. `iced_core`'s `Action::Scroll` keeps its
+# `i32`, so `iced_widget`, `iced_wgpu`, `iced_tiny_skia` and `iced` itself all
+# stay on crates.io untouched. Widening `Action::Scroll` instead would have
+# dragged `iced_widget` into the patch set, and that cannot work here - the
+# `0.14.0` tag has it at 0.14.0 while crates.io ships 0.14.2.
+#
+# `iced_core` and `iced_futures` are patched only to keep the graph from
+# splitting. `iced_graphics` depends on its workspace siblings by *path*, so
+# patching it alone pulls a second `iced_core` out of the fork and leaves the
+# registry copy in place for everything else - two `iced_core::Font` types
+# that don't unify, and a wall of "expected X, found X". They carry no changes
+# of ours; they are byte-identical to the 0.14.0 tag.
+[patch.crates-io]
+iced_graphics = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
+iced_core = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
+iced_futures = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
+
 [profile.release]
 strip = true
 panic = "abort"
