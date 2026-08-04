@@ -19,6 +19,13 @@ decorations = true
 [visor]
 enabled = false
 
+[scroll]
+# Multiplier on how far the mouse wheel and trackpad scroll the document.
+# 1.0 is the shipped speed; 2.0 is twice as far per notch, 0.5 half.
+# Clamped to 0.05..=20.0, so a typo slows the wheel down rather than
+# breaking it. Applies live - no restart needed.
+sensitivity = 1.0
+
 # Each [[languages]] entry maps file extensions to a syntax (its .wasm
 # grammar) and a toggle-comment style. Replaces the built-in list wholesale.
 

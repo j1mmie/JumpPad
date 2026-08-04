@@ -155,6 +155,47 @@ themes, where a wash has almost nothing left to darken. A test in `app.rs`
 asserts the two stay equal across every theme, since they're defined in
 different crates.
 
+### Why scrolling lands on whole lines
+
+The view always starts a line at its top edge - scroll and the top row is
+never half cut off, the way it is in most modern editors. That is **not** a
+limit of the text control. cosmic-text scrolls by *pixels*
+(`cosmic_text::Action::Scroll { pixels: f32 }`), keeps the sub-line
+remainder in `Scroll::vertical`, and subtracts it from every layout run's
+`line_top`, so a partly-hidden top row is a thing it already draws. The
+test `the_buffer_can_sit_between_two_lines` pins that down: shape a view
+that isn't a whole number of rows tall, scroll to the end, and the buffer
+comes to rest half a line down and renders there.
+
+The quantization is entirely in the way in. `iced_core`'s
+`text::editor::Action::Scroll` carries whole `lines: i32`, and
+`iced_graphics::text::Editor::perform` multiplies that by the line height on
+its way to cosmic-text - so the smallest step iced can express is one line.
+`Editor` exposes `buffer()` immutably and nothing else, so there is no
+public route to `set_scroll` either. This widget already accumulates the
+leftover fraction in `State::partial_scroll` and spends it only once it
+makes a whole line.
+
+Getting pixel granularity means getting at a fractional lever, in rough
+order of cost:
+
+1. **Patch `iced_graphics`** (`[patch.crates-io]` on a fork, ideally with an
+   upstream PR behind it) to add e.g. `Editor::scroll_by(pixels: f32)`, or to
+   take `lines: f32`. Additive, contained to one crate, and the rest of the
+   stack needs nothing: the renderer, the scrollbar (`metrics` already
+   divides `scroll.vertical` by the line height), and `scrolled_to` are all
+   fractional already. This is the cheap one.
+2. **Offset the draw ourselves** - keep whole-line scroll in the buffer,
+   track the remainder here, and pass `fill_editor` a position shifted up by
+   it, clipped to `text_bounds`. No patched dependency, but the remainder
+   then has to be added back into `Action::Click`/`Drag` positions, the
+   cursor and selection quads, and the scrollbar position, and the buffer has
+   to be laid out a row taller than the view or the bottom edge shows a gap.
+   Strictly more moving parts than (1) for the same result.
+
+Don't reach for a third option of scaling `LineHeight` to fake smaller
+steps: `set_metrics` resets shaping for the whole document.
+
 ### Revealing the cursor after a change
 
 A change made while the cursor is off screen (scrolled away with the wheel or
@@ -1012,6 +1053,20 @@ the editor from opening. Config sections (`[[languages]]`, `theme`) are
 independently defaulted so old config files stay valid as new sections
 get added.
 
+`[scroll] sensitivity` is a plain multiplier on wheel and trackpad
+scroll distance, defaulting to `1.0`. The shipped speed is deliberately
+*half* of upstream `iced_widget`'s (`LINES_PER_WHEEL_NOTCH` is 2, not
+4; `PIXELS_PER_LINE` is 8, not 4), so the knob reads as "×1 is normal"
+rather than "×0.5 is normal" - the old speed is `2.0`. The range check
+lives in the widget (`clamp_scroll_sensitivity`), not in
+`jumppad_config`, which keeps this crate free of a `iced` dependency
+the same way `AlphaConfig` does. The multiplier is applied to a *float*
+line count and the leftover fraction is banked in
+`State::partial_scroll`, so a sensitivity below 1.0 scrolls slowly
+rather than not at all; a wheel event that banks to zero whole lines
+publishes nothing, since `Action::Scroll { lines: 0 }` would wake the
+app for a view that hasn't moved.
+
 `[[languages]]` is the one place a language is described: `name` (for
 the file's readability), an optional `syntax` (the `<syntax>.wasm`
 grammar its extensions highlight with), `extensions`, and an optional
@@ -1052,10 +1107,13 @@ keeps the last good in-memory config, with the parse error in the
 dismissible banner. Contrast with startup's `load()`, which must never
 fail (above).
 
-Two things reach the *editor* widgets on reload, both via the
+Three things reach the *editor* widgets on reload, all via the
 `SharedEditorConfig` handle every `TextArea` reads per view (the app
 can't reach into a `Box<dyn TextEditorWidget>`): the editor keybind
-overrides and `alpha.background`. `alpha.foreground` rides the same
+overrides, `alpha.background`, and `scroll.sensitivity`. The scroll
+sensitivity is the one that arms no repaint - nothing on screen changes
+until the next wheel event, and the `view` that event causes is where
+the widget picks the new value up. `alpha.foreground` rides the same
 setter but is stored in a static atomic (`to_format` must stay a bare
 `fn` pointer), and it also sits in `HighlighterSettings`' hand-written
 `PartialEq` - without that, syntax-colored spans keep their old alpha

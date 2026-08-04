@@ -63,6 +63,9 @@ pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorComma
 pub struct SharedEditorConfig {
     /// `f32` bits - an atomic can't hold a float directly.
     background_alpha: AtomicU32,
+    /// `f32` bits, same reason. Range-checked by the widget's
+    /// `scroll_sensitivity` builder, not here.
+    scroll_sensitivity: AtomicU32,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole map.
     overrides: RwLock<Arc<EditorOverrides>>,
@@ -75,6 +78,7 @@ impl SharedEditorConfig {
     pub fn new(background_alpha: f32, overrides: EditorOverrides) -> Arc<Self> {
         Arc::new(Self {
             background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
+            scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
             overrides: RwLock::new(Arc::new(overrides)),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
         })
@@ -91,6 +95,18 @@ impl SharedEditorConfig {
     pub fn set_background_alpha(&self, alpha: f32) {
         self.background_alpha
             .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// The multiplier on wheel and trackpad scroll distance. `1.0` is the
+    /// shipped speed; the widget clamps whatever lands here to a usable
+    /// range, so a nonsense `config.toml` value can't disable scrolling.
+    pub fn scroll_sensitivity(&self) -> f32 {
+        f32::from_bits(self.scroll_sensitivity.load(Ordering::Relaxed))
+    }
+
+    pub fn set_scroll_sensitivity(&self, sensitivity: f32) {
+        self.scroll_sensitivity
+            .store(sensitivity.to_bits(), Ordering::Relaxed);
     }
 
     /// Routed through here so settings have one mutation API, but stored in
@@ -357,6 +373,7 @@ impl TextEditorWidget for TextArea {
             .placeholder("")
             .font(Font::MONOSPACE)
             .height(Fill)
+            .scroll_sensitivity(self.settings.scroll_sensitivity())
             .style(move |theme, status| editor_style(theme, status, background_alpha, foreground_alpha))
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
             .key_binding(move |press| key_binding(press, &overrides))

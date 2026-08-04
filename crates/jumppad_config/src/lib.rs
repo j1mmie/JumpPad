@@ -21,6 +21,7 @@ pub struct Config {
     pub visor: VisorConfig,
     pub alpha: AlphaConfig,
     pub window: WindowConfig,
+    pub scroll: ScrollConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -171,6 +172,22 @@ impl Default for AlphaConfig {
             background: 1.0,
             foreground: 1.0,
         }
+    }
+}
+
+/// Mouse-wheel and trackpad scrolling. `sensitivity` is a plain multiplier
+/// on the distance JumpPad scrolls per unit of wheel input: `1.0` is the
+/// shipped speed, `2.0` twice as far, `0.5` half. Clamped where applied,
+/// not here, so this crate doesn't need an `iced` dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScrollConfig {
+    pub sensitivity: f32,
+}
+
+impl Default for ScrollConfig {
+    fn default() -> Self {
+        Self { sensitivity: 1.0 }
     }
 }
 
@@ -733,6 +750,27 @@ mod tests {
         assert!(!config.languages.is_empty());
         let _: KeybindsConfig =
             toml::from_str(include_str!("../../../config/keybinds.sample.toml")).unwrap();
+    }
+
+    #[test]
+    fn config_toml_with_no_scroll_section_falls_back_to_the_shipped_speed() {
+        let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
+        assert_eq!(config.scroll, ScrollConfig::default());
+        assert_eq!(config.scroll.sensitivity, 1.0);
+    }
+
+    #[test]
+    fn config_toml_with_a_scroll_section_parses() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [scroll]
+            sensitivity = 2.5
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.scroll.sensitivity, 2.5);
     }
 
     #[test]
