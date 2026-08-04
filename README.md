@@ -49,8 +49,10 @@ file, saving a note, or drafting a message.
  - Syntax highlighting
  - Transparency
  - Automatic draft saving
- - Configurable via TOML, with live reload - theme, transparency, and
-   keybind changes apply the moment the file is saved
+ - Configurable via TOML, with live reload - theme, transparency, scroll
+   speed, and keybind changes apply the moment the file is saved
+ - Adjustable scroll sensitivity (`[scroll] sensitivity` in `config.toml`;
+   `1.0` is the default speed, `2.0` twice as fast, `0.5` half)
  - Toggle comments with Cmd+/ (macOS) or Ctrl+/ - single-line prefixes
    or multi-line delimiters, per language, configurable in TOML
  - More to come...

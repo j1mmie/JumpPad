@@ -282,6 +282,7 @@ impl JumpPadApp {
             build_editor_overrides(&keybinds),
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
+        editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
@@ -826,6 +827,13 @@ impl JumpPadApp {
                 // the desktop: an opaque surface presents `rgb * a` as-is.
                 restart_required("[alpha] background on a window that started opaque");
             }
+        }
+
+        // No repaint: nothing on screen changes until the next wheel event,
+        // and the widget reads the new value on the `view` that one causes.
+        if new.scroll.sensitivity != current.scroll.sensitivity {
+            self.editor_config
+                .set_scroll_sensitivity(new.scroll.sensitivity);
         }
 
         // One [[languages]] edit can feed two consumers, so diff the derived

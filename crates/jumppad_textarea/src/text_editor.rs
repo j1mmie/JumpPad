@@ -51,6 +51,56 @@ fn scrollbar_layout(
     Some(scrollbar::Layout::new(text_bounds, metrics, width))
 }
 
+/// Lines scrolled per notch of a discrete wheel, at `sensitivity == 1.0`.
+/// Upstream `iced_widget` uses 4.0; JumpPad ships half that, and puts the
+/// rest of the range behind `[scroll] sensitivity` in `config.toml`.
+const LINES_PER_WHEEL_NOTCH: f32 = 2.0;
+
+/// Pixels of a precise (trackpad, or a free-spinning wheel) delta that make
+/// one line, at `sensitivity == 1.0`. Upstream divides by 4.0; doubling the
+/// divisor halves the speed, to match `LINES_PER_WHEEL_NOTCH`.
+const PIXELS_PER_LINE: f32 = 8.0;
+
+/// The multiplier `[scroll] sensitivity` is held to. The ceiling is only
+/// there to keep a typo'd config from making the wheel useless; the floor is
+/// above zero so scrolling never stops entirely.
+const SCROLL_SENSITIVITY_RANGE: ops::RangeInclusive<f32> = 0.05..=20.0;
+
+/// One wheel or trackpad event, in lines to scroll down by - fractional, so
+/// a sensitivity below `1.0` doesn't round every event to a standstill. The
+/// caller banks the fraction (`State::partial_scroll`) until it makes a whole
+/// line, which is the only unit `Action::Scroll` can carry.
+fn wheel_lines(delta: mouse::ScrollDelta, sensitivity: f32) -> f32 {
+    sensitivity
+        * match delta {
+            // A discrete wheel: `y` is notches, and the floor keeps a
+            // fraction of a notch from reading as no scroll at all.
+            mouse::ScrollDelta::Lines { y, .. } => {
+                if y.abs() > 0.0 {
+                    y.signum() * -(y.abs() * LINES_PER_WHEEL_NOTCH).max(1.0)
+                } else {
+                    0.0
+                }
+            }
+            // A precise device: `y` is already pixels of intended travel.
+            mouse::ScrollDelta::Pixels { y, .. } => -y / PIXELS_PER_LINE,
+        }
+}
+
+/// [`TextEditor::scroll_sensitivity`]'s guard, split out so the range is
+/// enforced in one place. A non-finite value falls back to the default
+/// rather than clamping - `NaN` has no meaningful end of the range.
+fn clamp_scroll_sensitivity(sensitivity: f32) -> f32 {
+    if sensitivity.is_finite() {
+        sensitivity.clamp(
+            *SCROLL_SENSITIVITY_RANGE.start(),
+            *SCROLL_SENSITIVITY_RANGE.end(),
+        )
+    } else {
+        1.0
+    }
+}
+
 /// Visible lines left between the cursor and the edge it came in from when a
 /// change pulls an off-screen cursor back into view - so the cursor lands on
 /// the sixth visible line rather than hard against the edge, which is where
@@ -277,6 +327,9 @@ pub struct TextEditor<
     max_height: f32,
     padding: Padding,
     wrapping: Wrapping,
+    /// Multiplier on wheel and trackpad scroll distance - see
+    /// [`TextEditor::scroll_sensitivity`].
+    scroll_sensitivity: f32,
     class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -310,6 +363,7 @@ where
             max_height: f32::INFINITY,
             padding: Padding::new(5.0),
             wrapping: Wrapping::default(),
+            scroll_sensitivity: 1.0,
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
@@ -415,6 +469,16 @@ where
         self
     }
 
+    /// Scales how far one unit of wheel or trackpad input scrolls the
+    /// document. `1.0` is the shipped speed; larger is faster. Out-of-range
+    /// values are clamped rather than rejected - this sits on the path from
+    /// a hand-edited `config.toml`, and a bad number should slow the wheel
+    /// down, not break it.
+    pub fn scroll_sensitivity(mut self, sensitivity: f32) -> Self {
+        self.scroll_sensitivity = clamp_scroll_sensitivity(sensitivity);
+        self
+    }
+
     /// Highlights the [`TextEditor`] with the given [`Highlighter`] and
     /// a strategy to turn its highlights into some text format.
     pub fn highlight_with<H: text::Highlighter>(
@@ -438,6 +502,7 @@ where
             max_height: self.max_height,
             padding: self.padding,
             wrapping: self.wrapping,
+            scroll_sensitivity: self.scroll_sensitivity,
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
@@ -1030,6 +1095,7 @@ where
             layout.bounds(),
             self.padding,
             cursor,
+            self.scroll_sensitivity,
             self.key_binding.as_deref(),
         ) {
             match update {
@@ -1065,9 +1131,15 @@ where
                     let lines = lines + state.partial_scroll;
                     state.partial_scroll = lines.fract();
 
-                    shell.publish(on_edit(Action::Scroll {
-                        lines: lines as i32,
-                    }));
+                    // A low `[scroll] sensitivity` leaves plenty of events
+                    // carrying less than a whole line, which the fraction
+                    // above banks for the next one. Publishing those as
+                    // `Scroll { lines: 0 }` would wake the app and redraw
+                    // for a view that hasn't moved.
+                    let lines = lines as i32;
+                    if lines != 0 {
+                        shell.publish(on_edit(Action::Scroll { lines }));
+                    }
                     shell.capture_event();
                 }
                 Update::InputMethod(update) => match update {
@@ -1608,6 +1680,7 @@ impl<Message> Update<Message> {
         bounds: Rectangle,
         padding: Padding,
         cursor: mouse::Cursor,
+        scroll_sensitivity: f32,
         key_binding: Option<&dyn Fn(KeyPress) -> Option<Binding<Message>>>,
     ) -> Option<Self> {
         let binding = |binding| Some(Update::Binding(binding));
@@ -1647,16 +1720,7 @@ impl<Message> Update<Message> {
                 mouse::Event::WheelScrolled { delta }
                     if cursor.is_over(bounds) =>
                 {
-                    Some(Update::Scroll(match delta {
-                        mouse::ScrollDelta::Lines { y, .. } => {
-                            if y.abs() > 0.0 {
-                                y.signum() * -(y.abs() * 4.0).max(1.0)
-                            } else {
-                                0.0
-                            }
-                        }
-                        mouse::ScrollDelta::Pixels { y, .. } => -y / 4.0,
-                    }))
+                    Some(Update::Scroll(wheel_lines(*delta, scroll_sensitivity)))
                 }
                 _ => None,
             },
@@ -2207,5 +2271,108 @@ mod tests {
         // whichever edge it was past.
         assert_eq!(restore_offset(9.0, 5.0), Some(7));
         assert_eq!(restore_offset(-9.0, 5.0), Some(-11));
+    }
+
+    fn notch(y: f32) -> mouse::ScrollDelta {
+        mouse::ScrollDelta::Lines { x: 0.0, y }
+    }
+
+    fn precise(y: f32) -> mouse::ScrollDelta {
+        mouse::ScrollDelta::Pixels { x: 0.0, y }
+    }
+
+    #[test]
+    fn sensitivity_scales_the_wheel_in_both_directions() {
+        // Wheel `y` is positive scrolling up, and the editor counts lines
+        // down, so the sign flips on the way through.
+        assert_eq!(wheel_lines(notch(-1.0), 1.0), LINES_PER_WHEEL_NOTCH);
+        assert_eq!(wheel_lines(notch(1.0), 1.0), -LINES_PER_WHEEL_NOTCH);
+
+        assert_eq!(wheel_lines(notch(-1.0), 2.0), LINES_PER_WHEEL_NOTCH * 2.0);
+        assert_eq!(wheel_lines(notch(-1.0), 0.5), LINES_PER_WHEEL_NOTCH / 2.0);
+    }
+
+    #[test]
+    fn sensitivity_scales_a_precise_device_the_same_way() {
+        assert_eq!(wheel_lines(precise(-PIXELS_PER_LINE), 1.0), 1.0);
+        assert_eq!(wheel_lines(precise(-PIXELS_PER_LINE), 0.5), 0.5);
+        assert_eq!(wheel_lines(precise(PIXELS_PER_LINE), 2.0), -2.0);
+    }
+
+    #[test]
+    fn the_shipped_speed_is_half_of_upstream_iced() {
+        // The reason `[scroll] sensitivity` defaults to 1.0 rather than 0.5:
+        // the knob reads as a multiplier on what JumpPad ships, and what it
+        // ships is half of `iced_widget`'s 4 lines a notch / 4 pixels a line.
+        assert_eq!(wheel_lines(notch(-1.0), 1.0), 4.0 / 2.0);
+        assert_eq!(wheel_lines(precise(-4.0), 1.0), 1.0 / 2.0);
+    }
+
+    #[test]
+    fn a_low_sensitivity_still_moves_the_view() {
+        // The floor in `wheel_lines` is on the notch count, not on the
+        // result, so a small multiplier keeps its fraction - which
+        // `partial_scroll` banks - instead of rounding to a dead wheel.
+        let lines = wheel_lines(notch(-1.0), *SCROLL_SENSITIVITY_RANGE.start());
+        assert!(lines > 0.0 && lines < 1.0, "{lines}");
+    }
+
+    #[test]
+    fn a_fraction_of_a_notch_still_counts_as_a_whole_one() {
+        // Upstream's floor, kept: a device reporting 0.1 of a notch must not
+        // scroll a tenth as far as one that reports a whole notch.
+        assert_eq!(wheel_lines(notch(-0.1), 1.0), 1.0);
+        assert_eq!(wheel_lines(notch(0.0), 1.0), 0.0);
+    }
+
+    #[test]
+    fn a_nonsense_sensitivity_lands_somewhere_usable() {
+        assert_eq!(clamp_scroll_sensitivity(1.0), 1.0);
+        assert_eq!(
+            clamp_scroll_sensitivity(0.0),
+            *SCROLL_SENSITIVITY_RANGE.start()
+        );
+        assert_eq!(
+            clamp_scroll_sensitivity(-3.0),
+            *SCROLL_SENSITIVITY_RANGE.start()
+        );
+        assert_eq!(
+            clamp_scroll_sensitivity(1e9),
+            *SCROLL_SENSITIVITY_RANGE.end()
+        );
+        // No end of the range to clamp `NaN` to, so it takes the default.
+        assert_eq!(clamp_scroll_sensitivity(f32::NAN), 1.0);
+    }
+    /// The reference for any future pixel-granular scrolling: the buffer
+    /// underneath already *holds and renders* a sub-line offset. Only the
+    /// way in is quantized - `iced_core`'s `Action::Scroll` carries whole
+    /// `lines: i32`, and `iced_graphics` multiplies that by the line height
+    /// on the way to cosmic-text's pixel-valued scroll. Nothing here needs
+    /// custom drawing; it needs a fractional lever iced doesn't expose yet.
+    #[test]
+    fn the_buffer_can_sit_between_two_lines() {
+        // A view whose height is *not* a whole number of rows, scrolled hard
+        // against the end of the document. cosmic-text clamps that by pixels
+        // (`shape_until_scroll`), so this is where a sub-line offset shows.
+        let mut editor = graphics::text::Editor::with_text(&document_text());
+        let bounds = Size::new(400.0, 19.5 * LINE_HEIGHT);
+        shape(&mut editor, bounds);
+
+        editor.perform(Action::Scroll { lines: 10_000 });
+        shape(&mut editor, bounds);
+
+        let scroll = editor.buffer().scroll();
+        assert_eq!(
+            scroll.vertical,
+            LINE_HEIGHT / 2.0,
+            "the top row should be half cut off, not snapped to a line"
+        );
+        // And `scrolled_to` reports it - the scrollbar reads through this,
+        // which is why the thumb is already smooth where the text is not.
+        assert_eq!(
+            scrolled_to(&editor),
+            Some(scroll.line as f32 + 0.5),
+            "a half-line offset must survive into the reported position"
+        );
     }
 }
