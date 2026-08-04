@@ -49,7 +49,14 @@ comment.single = "# "
 [[languages]]
 name = "JSON"
 syntax = "json"
-extensions = ["json", "jsonc"]
+extensions = ["json"]
+
+[[languages]]
+name = "JSONC"
+syntax = "json"
+extensions = [ "jsonc" ]
+comment.multi.left = "/*"
+comment.multi.right = "*/"
 
 [[languages]]
 name = "XML"
