@@ -101,6 +101,11 @@ pub enum EditorMessage {
     /// Like `Undo`, not a `text_editor::Action` - the transformation is the
     /// widget's own logic.
     ToggleComment,
+    /// Scroll the view by a number of *pixels*, which is what the wheel and
+    /// the scrollbar thumb actually ask for. Not a `text_editor::Action`:
+    /// `Action::Scroll` counts in whole lines and would snap the view to a
+    /// line boundary (see AGENTS.md).
+    Scroll(f32),
 }
 
 impl EditorMessage {

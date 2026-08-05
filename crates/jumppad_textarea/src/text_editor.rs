@@ -334,6 +334,11 @@ pub struct TextEditor<
     #[allow(clippy::type_complexity)]
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
     on_edit: Option<Box<dyn Fn(Action) -> Message + 'a>>,
+    /// Pixel scrolls, which `Action` can't carry - see
+    /// [`TextEditor::on_scroll`]. Without one set, the wheel falls back to
+    /// whole lines through `on_edit`.
+    #[allow(clippy::type_complexity)]
+    on_scroll: Option<Box<dyn Fn(f32) -> Message + 'a>>,
     highlighter_settings: Highlighter::Settings,
     highlighter_format: fn(
         &Highlighter::Highlight,
@@ -367,6 +372,7 @@ where
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
+            on_scroll: None,
             highlighter_settings: (),
             highlighter_format: |_highlight, _theme| {
                 highlighter::Format::default()
@@ -431,6 +437,20 @@ where
         on_edit: impl Fn(Action) -> Message + 'a,
     ) -> Self {
         self.on_edit = Some(Box::new(on_edit));
+        self
+    }
+
+    /// Sets the message produced when the wheel or the scrollbar thumb
+    /// scrolls the view, carrying a distance in **pixels**.
+    ///
+    /// Separate from [`on_action`](Self::on_action) because `Action::Scroll`
+    /// counts in whole lines, which is exactly the quantization this exists
+    /// to avoid. Handle it with `Content::scroll_by`.
+    ///
+    /// Optional: with no handler set, scrolling falls back to whole lines
+    /// through `on_action`, which is how upstream behaves.
+    pub fn on_scroll(mut self, on_scroll: impl Fn(f32) -> Message + 'a) -> Self {
+        self.on_scroll = Some(Box::new(on_scroll));
         self
     }
 
@@ -506,6 +526,7 @@ where
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
+            on_scroll: self.on_scroll,
             highlighter_settings: settings,
             highlighter_format: to_format,
             last_status: self.last_status,
@@ -709,6 +730,21 @@ where
         internal.editor.perform(action);
     }
 
+    /// Scrolls the view by a number of pixels, leaving it wherever that
+    /// lands - between two lines as readily as on one.
+    ///
+    /// The counterpart to `Action::Scroll`, which counts in whole lines and
+    /// is what everything that *wants* a line boundary still uses (the
+    /// cursor reveal in `shape_and_reveal`, and `restore_view`). This is for
+    /// the wheel and the scrollbar thumb, where the user is pointing at a
+    /// position rather than counting lines.
+    ///
+    /// Never records a `pending_view`: scrolling is not an edit, so there is
+    /// no cursor to chase back onto the screen afterwards.
+    pub fn scroll_by(&mut self, pixels: f32) {
+        self.0.get_mut().editor.scroll_by(pixels);
+    }
+
     /// Where the view sits, in lines from the top of the document, or `None`
     /// before the first layout has given it any line metrics to measure with.
     pub fn scrolled_to(&self) -> Option<f32> {
@@ -833,6 +869,16 @@ where
     Theme: Catalog,
     Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
+    /// One line's height in pixels, which is what turns a scroll measured in
+    /// lines into one measured in pixels.
+    fn absolute_line_height(&self, renderer: &Renderer) -> f32 {
+        self.line_height
+            .to_absolute(
+                self.text_size.unwrap_or_else(|| renderer.default_size()),
+            )
+            .0
+    }
+
     /// The scrollbar's geometry against the widget's laid-out bounds.
     fn scrollbar(&self, layout: Layout<'_>, width: f32) -> Option<scrollbar::Layout> {
         let text_bounds = layout.bounds().shrink(self.padding);
@@ -1055,7 +1101,15 @@ where
                         );
 
                     if let Some(lines) = lines {
-                        shell.publish(on_edit(Action::Scroll { lines }));
+                        if let Some(on_scroll) = self.on_scroll.as_ref() {
+                            shell.publish(on_scroll(
+                                lines * self.absolute_line_height(renderer),
+                            ));
+                        } else {
+                            shell.publish(on_edit(Action::Scroll {
+                                lines: lines as i32,
+                            }));
+                        }
                     }
                     shell.capture_event();
                     shell.request_redraw();
@@ -1128,17 +1182,27 @@ where
                         return;
                     }
 
-                    let lines = lines + state.partial_scroll;
-                    state.partial_scroll = lines.fract();
+                    if let Some(on_scroll) = self.on_scroll.as_ref() {
+                        // The whole point: hand the distance over in pixels
+                        // so the view can land between two lines. No
+                        // accumulator, because nothing is being rounded off -
+                        // a tenth of a line scrolls a tenth of a line.
+                        let pixels = lines * self.absolute_line_height(renderer);
 
-                    // A low `[scroll] sensitivity` leaves plenty of events
-                    // carrying less than a whole line, which the fraction
-                    // above banks for the next one. Publishing those as
-                    // `Scroll { lines: 0 }` would wake the app and redraw
-                    // for a view that hasn't moved.
-                    let lines = lines as i32;
-                    if lines != 0 {
-                        shell.publish(on_edit(Action::Scroll { lines }));
+                        if pixels != 0.0 {
+                            shell.publish(on_scroll(pixels));
+                        }
+                    } else {
+                        // No pixel handler: fall back to upstream's
+                        // whole-line behavior, banking the remainder until
+                        // it makes a line.
+                        let lines = lines + state.partial_scroll;
+                        state.partial_scroll = lines.fract();
+
+                        let lines = lines as i32;
+                        if lines != 0 {
+                            shell.publish(on_edit(Action::Scroll { lines }));
+                        }
                     }
                     shell.capture_event();
                 }
@@ -2271,6 +2335,90 @@ mod tests {
         // whichever edge it was past.
         assert_eq!(restore_offset(9.0, 5.0), Some(7));
         assert_eq!(restore_offset(-9.0, 5.0), Some(-11));
+    }
+
+    #[test]
+    fn a_sub_line_scroll_leaves_the_view_between_two_lines() {
+        // The whole feature, at its smallest: a quarter of a line in, and the
+        // view rests a quarter of a line down - the top row clipped by five
+        // pixels rather than snapped back to its own top edge.
+        let (mut editor, bounds) = document();
+        assert_eq!(scrolled_to(&editor), Some(0.0));
+
+        editor.scroll_by(LINE_HEIGHT / 4.0);
+        shape(&mut editor, bounds);
+
+        assert_eq!(scrolled_to(&editor), Some(0.25));
+    }
+
+    #[test]
+    fn sub_line_scrolls_accumulate_across_a_line_boundary() {
+        // Nothing banks the remainder any more, so crossing a line has to
+        // fall out of the buffer's own arithmetic: three quarter-lines sit
+        // inside line 0, the fourth rolls over into line 1 with nothing left.
+        let (mut editor, bounds) = document();
+
+        for expected in [0.25, 0.5, 0.75, 1.0] {
+            editor.scroll_by(LINE_HEIGHT / 4.0);
+            shape(&mut editor, bounds);
+            assert_eq!(scrolled_to(&editor), Some(expected));
+        }
+
+        // And the rollover really did advance the buffer's line, rather than
+        // parking a whole line's worth in the sub-line offset.
+        assert_eq!(editor.buffer().scroll().line, 1);
+        assert_eq!(editor.buffer().scroll().vertical, 0.0);
+    }
+
+    #[test]
+    fn scrolling_up_from_a_sub_line_offset_is_symmetric() {
+        let (mut editor, bounds) = document();
+
+        editor.scroll_by(LINE_HEIGHT * 3.5);
+        shape(&mut editor, bounds);
+        assert_eq!(scrolled_to(&editor), Some(3.5));
+
+        editor.scroll_by(-LINE_HEIGHT * 0.25);
+        shape(&mut editor, bounds);
+        assert_eq!(scrolled_to(&editor), Some(3.25));
+
+        // Back across a line boundary, which is where an offset kept as a
+        // positive remainder has to borrow from the line above.
+        editor.scroll_by(-LINE_HEIGHT * 0.5);
+        shape(&mut editor, bounds);
+        assert_eq!(scrolled_to(&editor), Some(2.75));
+        assert_eq!(editor.buffer().scroll().line, 2);
+    }
+
+    #[test]
+    fn the_whole_line_action_still_snaps_and_is_still_what_reveal_uses() {
+        // The contrast that makes the two levers worth having. `scroll_by` is
+        // for pointing at a position; `Action::Scroll` is for counting lines,
+        // which is what the cursor reveal in `shape_and_reveal` wants.
+        let (mut editor, bounds) = document();
+
+        editor.scroll_by(LINE_HEIGHT / 2.0);
+        shape(&mut editor, bounds);
+        assert_eq!(scrolled_to(&editor), Some(0.5));
+
+        // A whole-line action moves by whole lines and *preserves* the
+        // sub-line offset rather than re-snapping to a boundary - which is
+        // what lets the reveal run without visibly straightening the view.
+        editor.perform(Action::Scroll { lines: 2 });
+        shape(&mut editor, bounds);
+        assert_eq!(scrolled_to(&editor), Some(2.5));
+    }
+
+    #[test]
+    fn a_scroll_of_zero_pixels_does_nothing() {
+        let (mut editor, bounds) = document();
+        editor.scroll_by(LINE_HEIGHT * 2.0);
+        shape(&mut editor, bounds);
+
+        editor.scroll_by(0.0);
+        shape(&mut editor, bounds);
+
+        assert_eq!(scrolled_to(&editor), Some(2.0));
     }
 
     fn notch(y: f32) -> mouse::ScrollDelta {

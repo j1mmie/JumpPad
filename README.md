@@ -51,6 +51,8 @@ file, saving a note, or drafting a message.
  - Automatic draft saving
  - Configurable via TOML, with live reload - theme, transparency, scroll
    speed, and keybind changes apply the moment the file is saved
+ - Pixel-granular scrolling - the view rests wherever you left it, with the
+   top line partly clipped, rather than snapping to whole lines
  - Adjustable scroll sensitivity (`[scroll] sensitivity` in `config.toml`;
    `1.0` is the default speed, `2.0` twice as fast, `0.5` half)
  - Toggle comments with Cmd+/ (macOS) or Ctrl+/ - single-line prefixes
@@ -109,6 +111,14 @@ Requires `git` and `npm`.
 
 
 ### Build JumpPad:
+
+JumpPad builds against a lightly patched `iced_graphics`, pulled from
+`github.com/j1mmie/iced` by a `[patch.crates-io]` entry in the workspace
+`Cargo.toml`. It is the `0.14.0` tag plus one added method,
+`Editor::scroll_by(pixels)`, which is what makes scrolling pixel-granular
+instead of snapping to whole lines. Cargo fetches it for you; the build
+needs network access to GitHub the first time. Every other iced crate comes
+from crates.io as normal.
 
 JumpPad has two binary targets, one for software rendering and one for
 GPU-powered rendering. Note: the GPU rendering binary occupies much more memory

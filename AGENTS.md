@@ -155,46 +155,96 @@ themes, where a wash has almost nothing left to darken. A test in `app.rs`
 asserts the two stay equal across every theme, since they're defined in
 different crates.
 
-### Why scrolling lands on whole lines
+### Pixel-granular scrolling (and the `iced_graphics` patch)
 
-The view always starts a line at its top edge - scroll and the top row is
-never half cut off, the way it is in most modern editors. That is **not** a
-limit of the text control. cosmic-text scrolls by *pixels*
+Scrolling is not quantized to lines. The wheel and the scrollbar thumb both
+move the view by **pixels**, so it comes to rest wherever the input asked -
+the topmost row clipped part-way by the top edge, every row below it a
+whole line further down.
+
+This needs one thing iced doesn't ship, so the workspace root carries a
+`[patch.crates-io]` pointing `iced_graphics` at
+`j1mmie/iced`, branch `jumppad/fractional-scroll`. The branch is the
+`0.14.0` **tag** plus a single additive method:
+
+```rust
+pub fn scroll_by(&mut self, pixels: f32)
+```
+
+Three things about that patch are load-bearing:
+
+- **Branched from the tag, not `master`.** Master is `0.15.0-dev`, and a
+  patch has to keep satisfying the `^0.14` requirements every other iced
+  crate states or Cargo rejects it outright.
+- **Only `iced_graphics` is changed.** Widening `Action::Scroll` to a float
+  instead would drag `iced_widget` into the patch set, and that cannot work
+  here: the `0.14.0` tag has `iced_widget` at 0.14.0 while crates.io ships
+  0.14.2, so the patched version wouldn't satisfy `iced`'s requirement.
+  Keeping `Action::Scroll`'s `i32` alone is what keeps the blast radius to
+  one crate.
+- **`iced_core` and `iced_futures` are patched too, carrying no changes.**
+  `iced_graphics` depends on its workspace siblings by *path*, so patching
+  it alone pulls a second `iced_core` out of the fork while everything else
+  keeps the registry copy - two `iced_core::Font` types that don't unify,
+  and a wall of "expected X, found X". Check with
+  `grep -c '^name = "iced_core"' Cargo.lock`; the answer must be 1.
+
+Inside JumpPad the pixel path is deliberately *separate* from the
+whole-line one, because both are still wanted:
+
+- `Content::scroll_by(pixels)` - the wheel and the thumb, where the user is
+  pointing at a position. Reaches the widget through its own
+  `TextEditor::on_scroll` callback and `EditorMessage::Scroll(f32)`, since
+  `Action` has no variant that can carry a fraction. `on_scroll` is
+  optional; with no handler set the widget falls back to upstream's
+  whole-line behavior, which is what `State::partial_scroll` is still there
+  for.
+- `Action::Scroll { lines }` - the cursor reveal in `shape_and_reveal` and
+  `restore_view`, which count in lines and mean it. Note these *preserve*
+  any sub-line offset rather than re-snapping to a boundary, so a reveal
+  never visibly straightens a view the user left between two lines.
+
+### Why scrolling used to land on whole lines
+
+Kept because it explains what the patch above is buying, and because the
+same reasoning applies to anyone tempted to drop it.
+
+The view used to always start a line at its top edge. That was **never** a
+limit of the text control. cosmic-text scrolls by pixels
 (`cosmic_text::Action::Scroll { pixels: f32 }`), keeps the sub-line
 remainder in `Scroll::vertical`, and subtracts it from every layout run's
-`line_top`, so a partly-hidden top row is a thing it already draws. The
-test `the_buffer_can_sit_between_two_lines` pins that down: shape a view
-that isn't a whole number of rows tall, scroll to the end, and the buffer
-comes to rest half a line down and renders there.
+`line_top`. The test `the_buffer_can_sit_between_two_lines` pins that down
+directly: shape a view that isn't a whole number of rows tall, scroll to the
+end, and the buffer comes to rest half a line down and renders there.
 
-The quantization is entirely in the way in. `iced_core`'s
+The quantization was entirely in the way *in*. `iced_core`'s
 `text::editor::Action::Scroll` carries whole `lines: i32`, and
 `iced_graphics::text::Editor::perform` multiplies that by the line height on
-its way to cosmic-text - so the smallest step iced can express is one line.
-`Editor` exposes `buffer()` immutably and nothing else, so there is no
-public route to `set_scroll` either. This widget already accumulates the
-leftover fraction in `State::partial_scroll` and spends it only once it
-makes a whole line.
+its way to cosmic-text - so the smallest step iced could express was one
+line, and `Editor` exposed `buffer()` immutably and nothing else, leaving no
+public route to `set_scroll` either. `scroll_by` is exactly that missing
+route, and nothing downstream needed changing: the renderer, `scrolled_to`,
+and the scrollbar's `metrics` were all fractional already, which is why the
+thumb was smooth long before the text was.
 
-Getting pixel granularity means getting at a fractional lever, in rough
-order of cost:
+Checked against `iced-rs/iced` master on 2026-08-04 before forking: still
+whole lines there, and `[Unreleased]` was empty. Master's own
+`buffer.set_scroll` calls are the *horizontal* scrolling work and don't help.
+**If a released iced ever grows a fractional lever of its own, drop the
+patch and the fork and use it** - that is the whole reason `scroll_by` was
+written as an additive, upstream-shaped method rather than a local hack.
 
-1. **Patch `iced_graphics`** (`[patch.crates-io]` on a fork, ideally with an
-   upstream PR behind it) to add e.g. `Editor::scroll_by(pixels: f32)`, or to
-   take `lines: f32`. Additive, contained to one crate, and the rest of the
-   stack needs nothing: the renderer, the scrollbar (`metrics` already
-   divides `scroll.vertical` by the line height), and `scrolled_to` are all
-   fractional already. This is the cheap one.
-2. **Offset the draw ourselves** - keep whole-line scroll in the buffer,
-   track the remainder here, and pass `fill_editor` a position shifted up by
-   it, clipped to `text_bounds`. No patched dependency, but the remainder
-   then has to be added back into `Action::Click`/`Drag` positions, the
-   cursor and selection quads, and the scrollbar position, and the buffer has
-   to be laid out a row taller than the view or the bottom edge shows a gap.
-   Strictly more moving parts than (1) for the same result.
+Two things not to reach for if the patch ever has to go away:
 
-Don't reach for a third option of scaling `LineHeight` to fake smaller
-steps: `set_metrics` resets shaping for the whole document.
+- Scaling `LineHeight` to fake smaller steps. `set_metrics` resets shaping
+  for the whole document.
+- Offsetting the draw instead - keeping whole-line scroll in the buffer,
+  tracking the remainder here, and shifting `fill_editor`'s position by it.
+  It works without any dependency change, but the remainder then has to be
+  added back into `Action::Click`/`Drag` positions, the cursor and selection
+  quads, and the scrollbar position, and the buffer has to be laid out a row
+  taller than the view or the bottom edge gaps. Strictly more moving parts
+  than one patched method.
 
 ### Revealing the cursor after a change
 
@@ -1061,11 +1111,16 @@ rather than "×0.5 is normal" - the old speed is `2.0`. The range check
 lives in the widget (`clamp_scroll_sensitivity`), not in
 `jumppad_config`, which keeps this crate free of a `iced` dependency
 the same way `AlphaConfig` does. The multiplier is applied to a *float*
-line count and the leftover fraction is banked in
-`State::partial_scroll`, so a sensitivity below 1.0 scrolls slowly
-rather than not at all; a wheel event that banks to zero whole lines
-publishes nothing, since `Action::Scroll { lines: 0 }` would wake the
-app for a view that hasn't moved.
+line count, which is then turned into pixels and sent through
+`Content::scroll_by` - so a fractional sensitivity means fractional
+*movement*, not a banked remainder waiting to make a whole line. That is
+why the floor of `SCROLL_SENSITIVITY_RANGE` can sit as low as `0.05`
+and still be a usable setting rather than a dead wheel.
+
+Before pixel scrolling this knob could only make the wheel *slower*, not
+smoother: every event still moved the view a whole line or not at all,
+and a low sensitivity just meant more events that moved nothing. Anyone
+reintroducing a whole-line path should expect that complaint back.
 
 `[[languages]]` is the one place a language is described: `name` (for
 the file's readability), an optional `syntax` (the `<syntax>.wasm`

@@ -266,14 +266,15 @@ impl State {
         }
     }
 
-    /// Turns a drag to `position` into whole lines to scroll by, holding onto
-    /// the fraction that didn't fit. `None` when nothing is being dragged, or
-    /// when the movement so far hasn't added up to a line yet.
+    /// Turns a drag to `position` into lines to scroll by - fractional, so
+    /// the thumb tracks the pointer pixel for pixel instead of stepping a
+    /// line at a time. `None` when nothing is being dragged, or when the
+    /// pointer hasn't moved since the last call.
     ///
     /// Idempotent against repeated calls for the same `position` - calling
     /// this again before the document has caught up to a previous call must
     /// not ask for more (see `Drag::requested`).
-    pub fn drag_to(&mut self, position: Point, layout: Layout, now: Instant) -> Option<i32> {
+    pub fn drag_to(&mut self, position: Point, layout: Layout, now: Instant) -> Option<f32> {
         // Only the hold clock: the ramp is already running from the press.
         self.active_at = Some(now);
         let drag = self.drag.as_mut()?;
@@ -288,10 +289,9 @@ impl State {
         };
 
         let wanted = target * layout.metrics.max_position() - drag.requested;
-        let whole = wanted.trunc();
-        drag.requested += whole;
+        drag.requested += wanted;
 
-        (whole != 0.0).then_some(whole as i32)
+        (wanted != 0.0).then_some(wanted)
     }
 }
 
@@ -676,7 +676,7 @@ mod tests {
         assert!(state.press(grab, layout, now));
 
         let lines = state.drag_to(Point::new(grab.x, grab.y + 20.0), layout, now).unwrap();
-        assert!(lines > 0);
+        assert!(lines > 0.0);
 
         state.release(now);
         assert!(!state.is_dragging());
@@ -692,7 +692,7 @@ mod tests {
 
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
         let lines = state.drag_to(Point::new(thumb.center_x(), 10_000.0), layout, now).unwrap();
-        assert_eq!(lines, layout.metrics.max_position() as i32);
+        assert_eq!(lines, layout.metrics.max_position());
     }
 
     #[test]
@@ -716,16 +716,19 @@ mod tests {
 
         let to = Point::new(grab.x, grab.y + 40.0);
         let first = state.drag_to(to, layout, now);
-        assert!(first.is_some_and(|lines| lines > 0));
+        assert!(first.is_some_and(|lines| lines > 0.0));
 
         let second = state.drag_to(to, layout, now);
         assert_eq!(second, None);
     }
 
     #[test]
-    fn a_drag_too_small_to_move_a_line_is_saved_up_rather_than_lost() {
+    fn a_sub_line_drag_moves_the_view_rather_than_waiting_for_a_whole_line() {
         let now = Instant::now();
-        // 100 lines over a ~192px track: each line is well under a pixel.
+        // 100 lines over a ~192px track: each line is well under a pixel of
+        // travel, so every nudge below is a fraction of one. These used to be
+        // banked until they added up to a whole line, which is what made a
+        // slow drag step instead of track the pointer.
         let layout = Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0), TEST_WIDTH);
         let thumb = layout.thumb.unwrap();
         let mut state = State::default();
@@ -733,15 +736,17 @@ mod tests {
         let grab = Point::new(thumb.center_x(), thumb.y);
         state.press(grab, layout, now);
 
-        // Sub-line nudges report nothing...
-        assert_eq!(state.drag_to(Point::new(grab.x, grab.y + 0.4), layout, now), None);
-        // ...but accumulate, so a run of them eventually delivers a line.
-        let mut moved = 0;
-        for step in 1..=10u8 {
+        let first = state.drag_to(Point::new(grab.x, grab.y + 0.4), layout, now).unwrap();
+        assert!(first > 0.0 && first < 1.0, "{first}");
+
+        // And they still accumulate against `requested`, so the run below
+        // reports its own movement rather than re-reporting from the grab.
+        let mut moved = first;
+        for step in 2..=10u8 {
             let to = Point::new(grab.x, grab.y + 0.4 * f32::from(step));
-            moved += state.drag_to(to, layout, now).unwrap_or(0);
+            moved += state.drag_to(to, layout, now).unwrap_or(0.0);
         }
-        assert!(moved > 0);
+        assert!(moved > first, "{moved} should have grown past {first}");
     }
 
     #[test]
