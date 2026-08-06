@@ -250,6 +250,9 @@ pub enum Message {
     /// The user asked for the on-disk version of tab `.0`, from the conflict
     /// dialog or the banner - here are its contents.
     ConflictReloaded(u64, PathBuf, Option<DiskStamp>, Result<Arc<String>, std::io::ErrorKind>),
+    /// "Reload" on the changed-on-disk bar - the dialog's Discard & Reload,
+    /// reachable without a save first.
+    ReloadFromDisk(u64),
     /// "Keep mine" on the changed-on-disk bar: acknowledge the change without
     /// touching the buffer.
     AcknowledgeExternalChange(u64),
@@ -325,6 +328,16 @@ pub enum CloseDecision {
     Save,
     DontSave,
     Cancel,
+}
+
+/// What a save expects to find on disk, and so whether it checks at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SaveExpectation {
+    /// Write regardless - a Save As target, whose dialog asks its own
+    /// overwrite question, or `save_conflict_resolution = "overwrite"`.
+    Unchecked,
+    /// The stamp the tab last saw. `None` means it saw no file at all.
+    Seen(Option<DiskStamp>),
 }
 
 /// The three choices offered when a save would overwrite a file that changed
@@ -491,13 +504,15 @@ impl JumpPadApp {
                             .path
                             .clone()
                             .expect("checked above: entry.path is Some");
-                        app.tabs.push(Tab::restored(
+                        let mut tab = Tab::restored(
                             id,
                             Some(path.clone()),
                             "",
                             false,
                             &app.editor_factory,
-                        ));
+                        );
+                        tab.restamp();
+                        app.tabs.push(tab);
                         reload_tasks.push(Task::perform(reload_from_disk(path), move |result| {
                             Message::SessionFileLoaded(id, result)
                         }));
@@ -517,14 +532,16 @@ impl JumpPadApp {
                 // A file that isn't there is the ordinary state of a tab named
                 // on the command line and never saved - restore it as the empty
                 // buffer it was, rather than reading it and reporting an error.
+                // Stamped before the read is even queued, not just when it
+                // lands: a focus sweep arriving first would otherwise see a
+                // clean, stamp-less tab and reload the file over the empty
+                // buffer this tab starts with.
+                tab.restamp();
                 if path.exists() {
                     let id = entry.id;
                     reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
                         Message::SessionFileLoaded(id, result)
                     }));
-                } else {
-                    // No re-read coming, so nothing else will stamp it.
-                    tab.restamp();
                 }
                 app.tabs.push(tab);
             } else {
@@ -617,6 +634,15 @@ impl JumpPadApp {
         Task::batch(tasks)
     }
 
+    /// The tab with this id, but only while it still holds `path` - an async
+    /// read that landed after a Save As retargeted the tab belongs to a file
+    /// the tab no longer shows.
+    fn tab_index_holding(&self, id: u64, path: &Path) -> Option<usize> {
+        self.tabs
+            .iter()
+            .position(|tab| tab.id == id && tab.document.path.as_deref() == Some(path))
+    }
+
     /// The tab already showing `path`, if one is open.
     fn tab_index_for(&self, path: &Path) -> Option<usize> {
         self.tabs
@@ -688,20 +714,32 @@ impl JumpPadApp {
     /// nothing queued the modal is gone, so keyboard focus goes back to the
     /// editor.
     fn show_next_modal(&mut self) -> Task<Message> {
-        while !self.close_queue.is_empty() {
-            let next_id = self.close_queue.remove(0);
-            if let Some(index) = self.tabs.iter().position(|tab| tab.id == next_id) {
-                return self.request_close(index);
+        let mut tasks = Vec::new();
+        // Keeps draining until something actually puts a dialog up: a queued
+        // tab can have been closed, or gone clean since - and a clean one
+        // `request_close` just closes, which must not strand what's behind it.
+        while self.modal.is_none() {
+            if !self.close_queue.is_empty() {
+                let next_id = self.close_queue.remove(0);
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id == next_id) {
+                    tasks.push(self.request_close(index));
+                }
+                continue;
             }
-            // Already closed some other way while queued.
-        }
-        while !self.conflict_queue.is_empty() {
-            let next_id = self.conflict_queue.remove(0);
-            if self.tabs.iter().any(|tab| tab.id == next_id) {
-                return self.open_conflict_prompt(next_id);
+            if !self.conflict_queue.is_empty() {
+                let next_id = self.conflict_queue.remove(0);
+                if self.tabs.iter().any(|tab| tab.id == next_id) {
+                    tasks.push(self.open_conflict_prompt(next_id));
+                }
+                continue;
             }
+            break;
         }
-        focus_editor()
+        if self.modal.is_none() {
+            // Nothing left to show, so the keyboard goes back to the editor.
+            tasks.push(focus_editor());
+        }
+        Task::batch(tasks)
     }
 
     /// Puts the save-conflict dialog up for `id`, or queues it behind a
@@ -719,7 +757,11 @@ impl JumpPadApp {
         self.modal = Some(Modal::SaveConflict(PendingConflict {
             tab_id: id,
             title: tab.document.display_name(),
-            focused: 0,
+            // Cancel, not Overwrite: both of the other choices destroy
+            // someone's work, and a reflexive Enter shouldn't pick either.
+            // (The close prompt can default to its first choice because
+            // "Save" is the safe one there.)
+            focused: 2,
         }));
         // Blur the editor so modal-navigation keystrokes don't also type
         // into the hidden document.
@@ -736,9 +778,11 @@ impl JumpPadApp {
             return Task::none();
         };
         let text = tab.editor.text();
-        Task::perform(save_to(Some(path), text, false, None), move |result| {
-            Message::FileSaved(id, result)
-        })
+        // No expectation this time - the user has said to overwrite.
+        Task::perform(
+            save_to(Some(path), text, false, SaveExpectation::Unchecked),
+            move |result| Message::FileSaved(id, result),
+        )
     }
 
     /// Throws a tab's unsaved buffer away and takes what's on disk.
@@ -803,7 +847,14 @@ impl JumpPadApp {
     /// the result to its editor for coloring. Called whenever either side
     /// can have moved: the query, the document, or which tab is active.
     fn refresh_find(&mut self) {
-        let Some(tab) = self.tabs.get_mut(self.active) else {
+        self.refresh_find_for(self.active);
+    }
+
+    /// Same, for a tab that isn't the active one - a background tab whose
+    /// buffer was replaced by an external reload still holds ranges into the
+    /// text that just went away.
+    fn refresh_find_for(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
             return;
         };
         let Some(state) = self.find.get_mut(&tab.id) else {
@@ -1171,20 +1222,26 @@ impl JumpPadApp {
             .find(|tab| tab.id == id)
             .expect("checked above: a tab with this id exists");
         let text = tab.editor.text();
-        // Only an in-place overwrite of a known file is checked. A Save As
-        // target is the user picking a file in a dialog that asks its own
-        // overwrite question, and an untitled tab has nothing to compare
-        // against. Read from `self.config` at save time rather than through
-        // `apply_config`, so a reloaded config.toml picks it up for free.
-        let expected = if !shows_dialog && self.config.files.save_conflict_resolution.asks() {
-            tab.disk
-        } else {
-            None
-        };
+        let expected = self.save_expectation(tab, shows_dialog);
         Task::perform(
             save_to(existing_path, text, force_dialog, expected),
             move |result| Message::FileSaved(id, result),
         )
+    }
+
+    /// What an about-to-run save should expect to find on disk. Only an
+    /// in-place write of a known file is checked: a Save As target is the
+    /// user picking a file in a dialog that asks its own overwrite question.
+    ///
+    /// Read from `self.config` here rather than applied through
+    /// `apply_config`, so a reloaded `config.toml` takes effect on the next
+    /// save for free - the one live setting with no `apply_config` arm.
+    fn save_expectation(&self, tab: &Tab, shows_dialog: bool) -> SaveExpectation {
+        if shows_dialog || !self.config.files.save_conflict_resolution.asks() {
+            SaveExpectation::Unchecked
+        } else {
+            SaveExpectation::Seen(tab.disk)
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1285,7 +1342,10 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::FileSaved(id, Err(SaveError::Conflict)) => {
-                self.file_dialog_active = false;
+                // `file_dialog_active` is deliberately left alone: only a
+                // dialog-less save is ever checked (see `save_expectation`),
+                // so clearing it here could dismiss another tab's open dialog.
+                //
                 // A conflict aborts the close, the same way VS Code leaves
                 // the editor open when its save doesn't go through.
                 self.pending_close_after_save.retain(|&pending_id| pending_id != id);
@@ -1480,13 +1540,10 @@ impl JumpPadApp {
                 // Re-validated against the tab as it stands *now*: the read
                 // was async, and the tab may have been closed, saved
                 // elsewhere, or typed into while it was in flight.
-                let Some(tab) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == id && tab.document.path == Some(path.clone()))
-                else {
+                let Some(index) = self.tab_index_holding(id, &path) else {
                     return Task::none();
                 };
+                let tab = &mut self.tabs[index];
                 if tab.dirty {
                     // The user typed while the read was in flight. Applying
                     // it would destroy those edits, which is the one thing
@@ -1494,19 +1551,28 @@ impl JumpPadApp {
                     tab.externally_changed = true;
                     return Task::none();
                 }
-                let Ok(contents) = result else {
-                    // The file vanished between the sweep and the read - the
-                    // delete case, not an error worth a banner.
-                    tab.disk = None;
-                    tab.dirty = true;
-                    tab.draft_generation += 1;
-                    self.sync_session_metadata();
-                    return Task::none();
+                let contents = match result {
+                    Ok(contents) => contents,
+                    // Vanished between the sweep and the read - the delete
+                    // case, not an error worth a banner.
+                    Err(std::io::ErrorKind::NotFound) => {
+                        tab.disk = None;
+                        tab.dirty = true;
+                        tab.draft_generation += 1;
+                        self.sync_session_metadata();
+                        return Task::none();
+                    }
+                    // Anything else (a permission flip, a file replaced with
+                    // something that isn't UTF-8) is a read that failed, not
+                    // a file that went away: leave the tab exactly as it is
+                    // and let the next event try again.
+                    Err(_) => return Task::none(),
                 };
                 tab.editor.reload_text(&contents);
                 tab.disk = stamp;
-                // The document moved under the match list.
-                self.refresh_find();
+                // The document moved under *this* tab's match list, which is
+                // not necessarily the active one's.
+                self.refresh_find_for(index);
                 Task::none()
             }
             Message::DismissError => {
@@ -1618,34 +1684,42 @@ impl JumpPadApp {
                 Task::batch([decision_task, next_task])
             }
             Message::ConflictReloaded(id, path, stamp, Ok(contents)) => {
-                let Some(tab) = self
-                    .tabs
-                    .iter_mut()
-                    .find(|tab| tab.id == id && tab.document.path == Some(path.clone()))
-                else {
+                let Some(index) = self.tab_index_holding(id, &path) else {
                     return Task::none();
                 };
+                let tab = &mut self.tabs[index];
                 // Asked for explicitly, so this one *does* replace a dirty
                 // buffer - the whole point of "discard mine."
                 tab.editor.reload_text(&contents);
                 tab.dirty = false;
                 tab.externally_changed = false;
                 tab.disk = stamp;
-                self.refresh_find();
+                self.refresh_find_for(index);
                 // Now clean - prune the draft file it no longer needs.
                 self.sync_session_metadata();
                 Task::none()
             }
-            Message::ConflictReloaded(id, _path, _stamp, Err(kind)) => {
-                if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
-                    self.error = Some(format!(
-                        "Couldn't reload {}: {kind}",
-                        tab.document.display_name()
-                    ));
+            Message::ConflictReloaded(id, path, _stamp, Err(kind)) => {
+                // Named by the path actually read, not by whatever the tab
+                // shows now - a Save As can have moved it in between.
+                if self.tab_index_holding(id, &path).is_some() {
+                    self.error = Some(format!("Couldn't reload {}: {kind}", path.display()));
                 }
                 Task::none()
             }
+            Message::ReloadFromDisk(id) => {
+                // The bar sits under the modal's scrim, which only swallows
+                // clicks its own widget sees - so, like `Editor` and
+                // `FileDropped`, this has to turn itself away.
+                if self.modal.is_some() {
+                    return Task::none();
+                }
+                self.reload_from_conflict(id)
+            }
             Message::AcknowledgeExternalChange(id) => {
+                if self.modal.is_some() {
+                    return Task::none();
+                }
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
                     tab.externally_changed = false;
                     // Re-stamping is the point: it records "I have seen this
@@ -1798,10 +1872,7 @@ impl JumpPadApp {
                 text("This file has changed on disk.")
                     .size(12)
                     .line_height(FIND_TEXT_LINE_HEIGHT),
-                action("Reload", Message::ConflictResolved(
-                    tab_id,
-                    ConflictDecision::DiscardAndReload,
-                )),
+                action("Reload", Message::ReloadFromDisk(tab_id)),
                 action("Keep mine", Message::AcknowledgeExternalChange(tab_id)),
             ]
             .spacing(8)
@@ -2698,10 +2769,19 @@ async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
 }
 
 /// Whether writing to `path` now would clobber a change made since the tab
-/// last looked. No expectation - a Save As, an untitled tab, or the
-/// `overwrite` conflict setting - never conflicts.
-fn conflicts(path: &Path, expected: Option<DiskStamp>) -> bool {
-    expected.is_some_and(|expected| DiskStamp::of(path) != Some(expected))
+/// last looked.
+///
+/// A missing file is never a conflict: there is nothing to clobber, and the
+/// write recreates it - the delete rule. A file that *appeared* where the
+/// tab saw none is, though, which is why `Seen` carries an `Option` rather
+/// than folding "saw nothing" into `Unchecked`.
+fn conflicts(path: &Path, expected: SaveExpectation) -> bool {
+    match expected {
+        SaveExpectation::Unchecked => false,
+        SaveExpectation::Seen(seen) => {
+            DiskStamp::of(path).is_some_and(|current| Some(current) != seen)
+        }
+    }
 }
 
 /// Writes `text` to the tab's file, and stamps what it wrote. Stamping here
@@ -2716,7 +2796,7 @@ async fn save_to(
     existing_path: Option<PathBuf>,
     text: String,
     force_dialog: bool,
-    expected: Option<DiskStamp>,
+    expected: SaveExpectation,
 ) -> Result<(PathBuf, Option<DiskStamp>), SaveError> {
     let path = match existing_path {
         Some(existing) if !force_dialog => existing,
@@ -4172,16 +4252,51 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         std::fs::write(&file, "as opened").expect("write");
-        let opened = DiskStamp::of(&file);
+        let opened = SaveExpectation::Seen(DiskStamp::of(&file));
 
         assert!(!conflicts(&file, opened), "nothing moved");
         assert!(
-            !conflicts(&file, None),
+            !conflicts(&file, SaveExpectation::Unchecked),
             "a Save As target has nothing to compare against"
         );
 
         std::fs::write(&file, "changed by another program").expect("rewrite");
         assert!(conflicts(&file, opened), "the file moved under the tab");
+        assert!(
+            !conflicts(&file, SaveExpectation::Unchecked),
+            "and Unchecked still writes over it"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_file_that_appeared_where_the_tab_saw_none_is_a_conflict() {
+        // `jumppad newnote.md` on a file that doesn't exist yet, and then
+        // something else creates it. The buffer has never seen those bytes,
+        // so a save would clobber them.
+        let dir = argv_scratch_dir();
+        let file = dir.join("newnote.md");
+        let saw_nothing = SaveExpectation::Seen(None);
+        assert!(!conflicts(&file, saw_nothing), "nothing there yet");
+
+        std::fs::write(&file, "created by another program").expect("write");
+        assert!(conflicts(&file, saw_nothing));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_file_is_not_a_conflict_to_save_over() {
+        // The delete rule: there is nothing to clobber, so the save just
+        // recreates the file - no prompt, whatever the tab last saw.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "as opened").expect("write");
+        let opened = SaveExpectation::Seen(DiskStamp::of(&file));
+
+        std::fs::remove_file(&file).expect("delete");
+        assert!(!conflicts(&file, opened));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4309,7 +4424,7 @@ mod tests {
         assert!(app.tabs[0].dirty, "the edits are still unsaved");
         assert_eq!(app.tabs[0].editor.text(), "my unsaved edits");
         assert!(
-            !conflicts(&file, app.tabs[0].disk),
+            !conflicts(&file, SaveExpectation::Seen(app.tabs[0].disk)),
             "acknowledging records the version seen, so the next save goes through"
         );
 
@@ -4380,15 +4495,19 @@ mod tests {
             0,
             Err(SaveError::Conflict),
         ));
-        assert_eq!(conflict_prompt(&app).unwrap().focused, 0);
+        assert_eq!(
+            conflict_prompt(&app).unwrap().focused,
+            2,
+            "opens on Cancel - the other two both destroy someone's work"
+        );
 
-        let _ = app.update(key_press(Named::ArrowLeft, Modifiers::empty(), key::Code::ArrowLeft));
-        assert_eq!(conflict_prompt(&app).unwrap().focused, 2, "wraps backward");
-        let _ = app.update(key_press(Named::Tab, Modifiers::empty(), key::Code::Tab));
-        assert_eq!(conflict_prompt(&app).unwrap().focused, 0);
+        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        assert_eq!(conflict_prompt(&app).unwrap().focused, 0, "wraps forward");
+        let _ = app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
+        assert_eq!(conflict_prompt(&app).unwrap().focused, 2, "and backward");
 
         // Focus "Discard & Reload" and take it.
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(Named::ArrowLeft, Modifiers::empty(), key::Code::ArrowLeft));
         let _ = app.update(key_press(Named::Enter, Modifiers::empty(), key::Code::Enter));
         assert!(app.modal.is_none());
         let _ = app.update(Message::ConflictReloaded(
@@ -4425,6 +4544,147 @@ mod tests {
     }
 
     #[test]
+    fn the_changed_on_disk_bar_is_inert_while_a_modal_is_up() {
+        // The scrim only swallows clicks the widget tree routes through it,
+        // and the bar sits underneath - so its two messages have to turn
+        // themselves away, the way `Editor` and `FileDropped` do.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        let mut app = app_in_conflict(&dir, &file);
+        let mut other = Tab::untitled(1, &app.editor_factory);
+        other.dirty = true;
+        app.tabs.push(other);
+        let _ = app.request_close(1);
+        let stamp_before = app.tabs[0].disk;
+
+        let _ = app.update(Message::AcknowledgeExternalChange(0));
+        assert!(app.tabs[0].externally_changed, "still flagged");
+        assert_eq!(app.tabs[0].disk, stamp_before, "and not re-stamped");
+
+        let _ = app.update(Message::ReloadFromDisk(0));
+        assert_eq!(app.tabs[0].editor.text(), "my unsaved edits");
+        assert!(close_prompt(&app).is_some(), "the close prompt is still up");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_queued_prompt_that_went_clean_does_not_strand_the_rest() {
+        // `request_close` closes a clean tab outright instead of prompting,
+        // so draining has to keep going rather than assume a dialog opened.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        let mut app = app_in_conflict(&dir, &file);
+        let mut queued = Tab::untitled(1, &app.editor_factory);
+        queued.dirty = true;
+        let mut showing = Tab::untitled(2, &app.editor_factory);
+        showing.dirty = true;
+        app.tabs.push(queued);
+        app.tabs.push(showing);
+        app.next_id = 3;
+
+        let _ = app.request_close(2); // this one gets the prompt
+        let _ = app.request_close(1); // queued behind it
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict))); // queued too
+        assert_eq!(app.close_queue, vec![1]);
+        assert_eq!(app.conflict_queue, vec![0]);
+
+        // Tab 1 goes clean while it waits - closing it must not swallow the
+        // conflict waiting behind it.
+        app.tabs[1].dirty = false;
+        let _ = app.update(Message::CloseConfirmed(2, CloseDecision::Cancel));
+
+        assert!(app.close_queue.is_empty());
+        assert!(app.conflict_queue.is_empty());
+        assert!(!app.tabs.iter().any(|tab| tab.id == 1), "the clean tab closed");
+        assert_eq!(
+            conflict_prompt(&app).expect("the queued conflict still shows").tab_id,
+            0
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unreadable_file_leaves_its_tab_alone() {
+        // Only NotFound means "deleted". A read that failed for any other
+        // reason must not dirty a tab the user never touched.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        let stamp = app.tabs[0].disk;
+
+        let _ = app.update(Message::DocumentReloaded(
+            0,
+            file.clone(),
+            DiskStamp::of(&file),
+            Err(std::io::ErrorKind::InvalidData),
+        ));
+
+        assert!(!app.tabs[0].dirty, "a failed read is not an edit");
+        assert_eq!(app.tabs[0].disk, stamp);
+        assert_eq!(app.tabs[0].editor.text(), "before");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reload_refreshes_the_find_state_of_the_tab_that_moved() {
+        // The reloaded tab's match list holds ranges into text that just
+        // went away - and it isn't necessarily the active tab.
+        let mut app = app_with_text(&["active tab", "background tab"]);
+        let dir = argv_scratch_dir();
+        let file = dir.join("background.txt");
+        std::fs::write(&file, "one two two").expect("write");
+        app.session_dir = dir.clone();
+        app.tabs[1].document.path = Some(file.clone());
+        app.tabs[1].editor.set_text("one two two");
+        app.tabs[1].restamp();
+
+        // A palette open on the background tab, matching twice.
+        let _ = app.update(Message::SelectTab(1));
+        let _ = app.update(Message::OpenFind);
+        let _ = app.update(Message::FindQueryChanged("two".into()));
+        let _ = app.update(Message::SelectTab(0));
+        assert_eq!(app.find[&app.tabs[1].id].matches.len(), 2);
+
+        let _ = app.update(reload_message(app.tabs[1].id, &file, "one"));
+
+        assert_eq!(
+            app.find[&app.tabs[1].id].matches.len(),
+            0,
+            "the background tab's matches were re-searched against the new text"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_restored_tab_is_stamped_before_its_re_read_is_queued() {
+        // Otherwise a focus sweep arriving first sees a clean, stamp-less
+        // tab and reloads the file over the empty buffer it starts with -
+        // one Ctrl+Z away from blanking the document.
+        let dir = argv_scratch_dir();
+        let file = dir.join("restored.txt");
+        std::fs::write(&file, "on disk").expect("write");
+
+        let mut app = test_app(0);
+        app.session_dir = dir.clone();
+        let mut tab = Tab::restored(0, Some(file.clone()), "", false, &app.editor_factory);
+        tab.restamp();
+        app.tabs = vec![tab];
+
+        assert!(
+            app.resolve_disk_changes().is_empty(),
+            "a sweep before the re-read lands must find nothing to do"
+        );
+        assert_eq!(app.tabs[0].editor.text(), "", "the buffer is left for the re-read");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_flagged_tab_says_so_in_its_title() {
         let factory = stub_factory();
         let mut tab = Tab::from_file(0, PathBuf::from("/tmp/notes.txt"), "", &factory);
@@ -4442,12 +4702,26 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
+        let tab = &app.tabs[0];
         assert!(app.config.files.save_conflict_resolution.asks());
+        assert_eq!(
+            app.save_expectation(tab, false),
+            SaveExpectation::Seen(tab.disk),
+            "the default setting checks against what the tab last saw"
+        );
+        assert_eq!(
+            app.save_expectation(tab, true),
+            SaveExpectation::Unchecked,
+            "a Save As dialog asks its own overwrite question"
+        );
 
         app.config.files.save_conflict_resolution =
             jumppad_config::SaveConflictResolution::Overwrite;
-        // With no expectation to compare against, the write always goes ahead.
-        assert!(!conflicts(&file, None));
+        assert_eq!(
+            app.save_expectation(&app.tabs[0], false),
+            SaveExpectation::Unchecked,
+            "saves always win under the overwrite setting"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

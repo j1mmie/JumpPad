@@ -56,7 +56,7 @@ color both of them paint with lives there rather than being copied.
 ## The `TextEditorWidget` boundary
 
 `editor_core::widget::TextEditorWidget` (view / update / text / set_text /
-poll_highlighting / has_pending_highlighting) is the entire contract
+reload_text / poll_highlighting / has_pending_highlighting) is the entire contract
 between the app shell and "the thing that actually renders and edits
 text." `EditorMessage` is a concrete enum, not generic over the widget
 implementation - there's only ever one editor implementation live at a
@@ -1217,6 +1217,13 @@ log line instead of a half-working apply. One `[[languages]]` edit can
 feed two consumers, so `apply_config` diffs its *derived views*: the
 comment-style map applies live, the extension-to-grammar map is baked
 into the registry at startup and logs restart-required.
+
+The one exception is `[files] save_conflict_resolution`, which nothing
+holds a copy of: `save_expectation` reads it out of `self.config` at save
+time, so a reload is picked up with no arm to write (see `## External file
+changes`). A setting only earns that treatment if the code that needs it
+already runs at the moment it's needed - anything cached, pushed to a
+widget, or applied to the window still belongs in `apply_config`.
 
 Reloads go through `try_load`/`try_load_keybinds`, which never write
 default files and never fall back to `Default` - a half-edited file

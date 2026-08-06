@@ -426,6 +426,12 @@ impl TextEditorWidget for TextArea {
     }
 
     fn reload_text(&mut self, text: &str) {
+        // A stamp can move without the bytes moving - `touch`, a checkout
+        // that restores identical content. Recording that would push an undo
+        // step that undoes nothing and, worse, clear the redo stack.
+        if text == self.source.as_str() {
+            return;
+        }
         // Isolated for the same reason a comment toggle is: the reload joins
         // neither the typing burst before it nor the keystroke after it.
         self.history.record_isolated(&self.source, self.cursor_state());
@@ -1092,6 +1098,22 @@ mod tests {
 
         editor.update(EditorMessage::Undo);
         assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn reloading_identical_text_records_nothing() {
+        let mut editor = plain_editor("unchanged");
+        editor.move_cursor_to(0, 4);
+        editor.update(edit(text_editor::Edit::Insert('!')));
+        editor.update(EditorMessage::Undo);
+        assert_eq!(editor.text(), "unchanged");
+
+        // A stamp that moved without the bytes moving must not cost the
+        // redo the user just set up.
+        editor.reload_text("unchanged");
+
+        assert!(editor.update(EditorMessage::Redo), "the redo survived");
+        assert_eq!(editor.text(), "unch!anged");
     }
 
     #[test]
