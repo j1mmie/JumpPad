@@ -22,6 +22,7 @@ pub struct Config {
     pub alpha: AlphaConfig,
     pub window: WindowConfig,
     pub scroll: ScrollConfig,
+    pub files: FilesConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -188,6 +189,31 @@ pub struct ScrollConfig {
 impl Default for ScrollConfig {
     fn default() -> Self {
         Self { sensitivity: 1.0 }
+    }
+}
+
+/// How JumpPad treats the files it has open.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FilesConfig {
+    pub save_conflict_resolution: SaveConflictResolution,
+}
+
+/// What a save does when the file changed on disk since JumpPad last read
+/// it. Mirrors VS Code's `files.saveConflictResolution`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveConflictResolution {
+    /// Prompt before overwriting someone else's changes.
+    #[default]
+    Ask,
+    /// Saves always win, no prompt.
+    Overwrite,
+}
+
+impl SaveConflictResolution {
+    pub fn asks(self) -> bool {
+        matches!(self, Self::Ask)
     }
 }
 

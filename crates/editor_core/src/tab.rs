@@ -120,12 +120,16 @@ impl Tab {
         self.disk = self.document.path.as_deref().and_then(DiskStamp::of);
     }
 
+    /// The tab chip's label: the file name, a bullet while there are unsaved
+    /// changes, and a warning sign while the file has also moved on disk.
     pub fn title(&self) -> String {
-        let name = self.document.display_name();
+        let mut title = self.document.display_name();
         if self.dirty {
-            format!("{name} \u{2022}")
-        } else {
-            name
+            title.push_str(" \u{2022}");
         }
+        if self.externally_changed {
+            title.push_str(" \u{26a0}");
+        }
+        title
     }
 }
