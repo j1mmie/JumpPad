@@ -1920,6 +1920,21 @@ impl JumpPadApp {
             text("No open tabs").into()
         };
 
+        // Composed before the find palette so the palette floats above the
+        // bar rather than under it - the bar's controls sit at its left end,
+        // where the top-right palette doesn't reach.
+        let editor = match self.tabs.get(self.active).filter(|tab| tab.externally_changed) {
+            Some(tab) => stack![
+                editor,
+                container(self.changed_on_disk_bar(tab.id))
+                    .width(Fill)
+                    .height(Fill)
+                    .align_y(Top)
+            ]
+            .into(),
+            None => editor,
+        };
+
         // Floated over the editor rather than the whole window, so it never
         // covers the tab bar. `stack!` is the same overlay the modal uses.
         let editor = match self.active_find().filter(|state| state.open) {
@@ -1931,21 +1946,6 @@ impl JumpPadApp {
                     .align_x(Right)
                     .align_y(Top)
                     .padding(8)
-            ]
-            .into(),
-            None => editor,
-        };
-
-        // Same overlay treatment again - the bar sits over the top of the
-        // editor rather than pushing it down, so nothing reflows when a file
-        // changes underneath a dirty tab.
-        let editor = match self.tabs.get(self.active).filter(|tab| tab.externally_changed) {
-            Some(tab) => stack![
-                editor,
-                container(self.changed_on_disk_bar(tab.id))
-                    .width(Fill)
-                    .height(Fill)
-                    .align_y(Top)
             ]
             .into(),
             None => editor,
