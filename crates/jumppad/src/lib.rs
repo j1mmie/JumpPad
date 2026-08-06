@@ -3,6 +3,7 @@
 // again: #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod docwatch;
 mod find;
 mod hotkey;
 #[cfg(target_os = "macos")]

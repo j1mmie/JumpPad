@@ -18,6 +18,7 @@ use iced::{
     Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task, Theme, Top, keyboard,
 };
 
+use crate::docwatch;
 use crate::find::FindState;
 use crate::hotkey::{self, Hotkey};
 use crate::reload;
@@ -134,6 +135,7 @@ pub struct JumpPadApp {
     /// reloaded `alpha.background` can't cross it - see `apply_config`.
     window_transparent: bool,
     config_watch: reload::ConfigWatch,
+    document_watch: docwatch::DocumentWatch,
 }
 
 /// State for the unsaved-changes modal - `focused` indexes the three
@@ -230,6 +232,19 @@ pub enum Message {
     /// Periodic while a config-reload burst is pending - applies the
     /// debounced reload once the files stop changing.
     ConfigSettleTick,
+    /// The OS file watcher saw activity in a directory holding an open file.
+    DocumentFileEvent,
+    /// Periodic while a document-change burst is pending.
+    DocumentSettleTick,
+    /// A tab's file finished re-reading after an external change. Carries the
+    /// path it was read from - a Save As can retarget the tab mid-read - and
+    /// the stamp the read was taken against.
+    DocumentReloaded(
+        u64,
+        PathBuf,
+        Option<DiskStamp>,
+        Result<Arc<String>, std::io::ErrorKind>,
+    ),
 }
 
 /// The three choices offered by the unsaved-changes prompt (see
@@ -345,6 +360,7 @@ impl JumpPadApp {
             window_transparent: config.alpha.background < 1.0,
             editor_config,
             config_watch: reload::ConfigWatch::new(),
+            document_watch: docwatch::DocumentWatch::new(),
             config,
             keybinds,
         };
@@ -813,6 +829,82 @@ impl JumpPadApp {
         }
     }
 
+    /// Every open file-backed tab's path, sorted and deduped - the watcher's
+    /// identity, so an unstable order would restart it on every tab switch.
+    fn watched_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| tab.document.path.clone())
+            .collect();
+        paths.sort();
+        paths.dedup();
+        paths
+    }
+
+    /// Re-reads whatever the sweep decided had changed underneath a clean tab.
+    fn sweep_documents(&mut self) -> Task<Message> {
+        let reads = self.resolve_disk_changes().into_iter().map(|(id, path, stamp)| {
+            Task::perform(reload_from_disk(path.clone()), move |result| {
+                Message::DocumentReloaded(id, path.clone(), Some(stamp), result)
+            })
+        });
+        Task::batch(reads)
+    }
+
+    /// Stats every file-backed tab and applies the external-change rules:
+    /// a clean tab reloads silently, a dirty one is flagged and left alone,
+    /// and a file that disappeared leaves its tab open and dirty so the next
+    /// save recreates it. Returns the tabs needing a re-read, as
+    /// `(id, path, stamp)`.
+    ///
+    /// Nothing here matches event paths - the sweep re-derives what moved
+    /// from `stat`, so a spurious poke costs one no-op pass.
+    fn resolve_disk_changes(&mut self) -> Vec<(u64, PathBuf, DiskStamp)> {
+        let mut reads = Vec::new();
+        let mut deleted_any = false;
+        // Every tab whose path matches, not just the first: `tab_index_for`
+        // stops the same file being opened twice, but Save As can still
+        // leave two tabs pointing at one path.
+        for tab in &mut self.tabs {
+            let Some(path) = tab.document.path.clone() else {
+                continue;
+            };
+            let current = DiskStamp::of(&path);
+            if current == tab.disk {
+                // Nothing moved. This is also what makes JumpPad's own save
+                // a no-op here: the save task stamped what it wrote.
+                continue;
+            }
+            let Some(current) = current else {
+                // Deleted or renamed away. Keep the tab and its content -
+                // the next save recreates the file - and no prompt, the way
+                // VS Code leaves the editor open.
+                tab.disk = None;
+                tab.dirty = true;
+                tab.draft_generation += 1;
+                deleted_any = true;
+                continue;
+            };
+            if tab.dirty {
+                // Unsaved edits win: the buffer is untouched and the
+                // conflict surfaces at save time. `tab.disk` deliberately
+                // keeps its old value - that's what the save-time check
+                // compares against.
+                tab.externally_changed = true;
+                continue;
+            }
+            // Clean: reload silently. Stamped on arrival, not here, so a
+            // change landing during the read isn't recorded as seen.
+            reads.push((tab.id, path, current));
+        }
+        if deleted_any {
+            // Newly dirty tabs need draft files, so the manifest has to say so.
+            self.sync_session_metadata();
+        }
+        reads
+    }
+
     /// Applies a freshly reloaded `config.toml`, diffing against the one in
     /// effect. The single wiring point for live config: a new reloadable
     /// setting gets its arm here, and a setting that can only apply at
@@ -1183,7 +1275,9 @@ impl JumpPadApp {
             }
             Message::WindowFocused => {
                 self.config_watch.check(Instant::now());
-                Task::none()
+                // A focus gain is already a settled moment - the safety net
+                // for changes the watcher never delivered, no debounce needed.
+                self.sweep_documents()
             }
             Message::ConfigFileEvent(file) => {
                 self.config_watch.note_event(file, Instant::now());
@@ -1191,6 +1285,50 @@ impl JumpPadApp {
             }
             Message::ConfigSettleTick => {
                 self.reload_settled_configs();
+                Task::none()
+            }
+            Message::DocumentFileEvent => {
+                self.document_watch.note_event(Instant::now());
+                Task::none()
+            }
+            Message::DocumentSettleTick => {
+                if self.document_watch.settled(Instant::now()) {
+                    self.sweep_documents()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DocumentReloaded(id, path, stamp, result) => {
+                // Re-validated against the tab as it stands *now*: the read
+                // was async, and the tab may have been closed, saved
+                // elsewhere, or typed into while it was in flight.
+                let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == id && tab.document.path == Some(path.clone()))
+                else {
+                    return Task::none();
+                };
+                if tab.dirty {
+                    // The user typed while the read was in flight. Applying
+                    // it would destroy those edits, which is the one thing
+                    // this feature must never do.
+                    tab.externally_changed = true;
+                    return Task::none();
+                }
+                let Ok(contents) = result else {
+                    // The file vanished between the sweep and the read - the
+                    // delete case, not an error worth a banner.
+                    tab.disk = None;
+                    tab.dirty = true;
+                    tab.draft_generation += 1;
+                    self.sync_session_metadata();
+                    return Task::none();
+                };
+                tab.editor.reload_text(&contents);
+                tab.disk = stamp;
+                // The document moved under the match list.
+                self.refresh_find();
                 Task::none()
             }
             Message::DismissError => {
@@ -1704,6 +1842,7 @@ impl JumpPadApp {
             iced::window::close_requests().map(Message::WindowCloseRequested),
             hotkey::subscription(),
             reload::subscription(),
+            docwatch::subscription(self.watched_paths()),
             iced::window::resize_events().map(|_| Message::WindowResized),
         ];
 
@@ -1746,6 +1885,12 @@ impl JumpPadApp {
         if self.config_watch.pending() {
             subscriptions.push(
                 iced::time::every(reload::SETTLE_TICK).map(|_| Message::ConfigSettleTick),
+            );
+        }
+
+        if self.document_watch.pending() {
+            subscriptions.push(
+                iced::time::every(docwatch::SETTLE_TICK).map(|_| Message::DocumentSettleTick),
             );
         }
 
@@ -2473,6 +2618,7 @@ mod tests {
             editor_config: jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
             window_transparent: false,
             config_watch: reload::ConfigWatch::new(),
+            document_watch: docwatch::DocumentWatch::new(),
         }
     }
 
@@ -3505,6 +3651,219 @@ mod tests {
         assert_eq!(app.tabs.len(), 1);
         assert!(app.tabs[0].document.path.is_none());
         assert!(app.error.is_none());
+    }
+
+    /// An app whose one tab is backed by `path`, holding whatever is on disk
+    /// there and stamped against it - the state every external-change test
+    /// starts from. Its session dir is the scratch dir, so manifest writes
+    /// stay out of the real one.
+    fn app_watching(dir: &Path, path: &Path) -> JumpPadApp {
+        let mut app = test_app(0);
+        app.session_dir = dir.to_path_buf();
+        let contents = std::fs::read_to_string(path).unwrap_or_default();
+        let mut tab = Tab::from_file(0, path.to_path_buf(), &contents, &app.editor_factory);
+        tab.restamp();
+        app.tabs = vec![tab];
+        app.next_id = 1;
+        app
+    }
+
+    fn reload_message(id: u64, path: &Path, contents: &str) -> Message {
+        Message::DocumentReloaded(
+            id,
+            path.to_path_buf(),
+            DiskStamp::of(path),
+            Ok(Arc::new(contents.to_string())),
+        )
+    }
+
+    #[test]
+    fn a_clean_tab_reloads_silently_when_its_file_changes() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        let stamped_at_open = app.tabs[0].disk;
+
+        std::fs::write(&file, "after the change").expect("rewrite");
+        let reads = app.resolve_disk_changes();
+
+        assert_eq!(reads.len(), 1, "the clean tab is queued for a re-read");
+        assert!(!app.tabs[0].dirty, "a reload is not an edit");
+        assert!(!app.tabs[0].externally_changed, "nothing to warn about");
+        assert_eq!(
+            app.tabs[0].disk, stamped_at_open,
+            "stamped when the read lands, not when it's queued"
+        );
+
+        let _ = app.update(reload_message(0, &file, "after the change"));
+        assert_eq!(app.tabs[0].editor.text(), "after the change");
+        assert!(!app.tabs[0].dirty);
+        assert_eq!(app.tabs[0].disk, DiskStamp::of(&file));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dirty_tab_keeps_its_buffer_and_is_flagged_instead() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        app.tabs[0].dirty = true;
+        app.tabs[0].editor.set_text("my unsaved edits");
+        let stamp_before = app.tabs[0].disk;
+
+        std::fs::write(&file, "someone else's version").expect("rewrite");
+        let reads = app.resolve_disk_changes();
+
+        assert!(reads.is_empty(), "unsaved edits are never overwritten");
+        assert_eq!(app.tabs[0].editor.text(), "my unsaved edits");
+        assert!(app.tabs[0].externally_changed);
+        assert_eq!(
+            app.tabs[0].disk, stamp_before,
+            "the old stamp is what the save-time check compares against"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_deleted_file_leaves_the_tab_open_and_dirty() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "still wanted").expect("write");
+        let mut app = app_watching(&dir, &file);
+
+        std::fs::remove_file(&file).expect("delete");
+        let reads = app.resolve_disk_changes();
+
+        assert!(reads.is_empty(), "there's nothing to read");
+        assert_eq!(app.tabs.len(), 1, "the tab stays open");
+        assert_eq!(app.tabs[0].editor.text(), "still wanted", "content preserved");
+        assert!(app.tabs[0].dirty, "so the next save recreates the file");
+        assert_eq!(app.tabs[0].disk, None);
+        assert_eq!(
+            app.tabs[0].document.path.as_deref(),
+            Some(file.as_path()),
+            "still bound to the path it will be written back to"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn our_own_save_does_not_read_as_an_external_change() {
+        // The reload-loop guard: the save task stamps what it wrote, so the
+        // watcher event it causes compares equal and sweeps to nothing.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "original").expect("write");
+        let mut app = app_watching(&dir, &file);
+        app.tabs[0].dirty = true;
+
+        std::fs::write(&file, "saved by jumppad").expect("the save");
+        let _ = app.update(Message::FileSaved(0, Ok((file.clone(), DiskStamp::of(&file)))));
+
+        let reads = app.resolve_disk_changes();
+        assert!(reads.is_empty(), "our own write must not trigger a reload");
+        assert!(!app.tabs[0].dirty);
+        assert!(!app.tabs[0].externally_changed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reload_arriving_after_the_user_typed_is_dropped_and_flags_instead() {
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        std::fs::write(&file, "from another program").expect("rewrite");
+        assert_eq!(app.resolve_disk_changes().len(), 1);
+
+        // The user types while the read is in flight.
+        let _ = app.update(Message::Editor(0, EditorMessage::Undo));
+        assert!(app.tabs[0].dirty);
+
+        let _ = app.update(reload_message(0, &file, "from another program"));
+
+        assert_eq!(
+            app.tabs[0].editor.text(),
+            "before",
+            "the in-flight reload must not clobber what was just typed"
+        );
+        assert!(app.tabs[0].externally_changed);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_reload_for_a_path_the_tab_no_longer_holds_is_dropped() {
+        // Save As can retarget a tab while a read is in flight.
+        let dir = argv_scratch_dir();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        app.tabs[0].document.path = Some(dir.join("saved-as.txt"));
+
+        let _ = app.update(reload_message(0, &file, "content of the old path"));
+
+        assert_eq!(app.tabs[0].editor.text(), "before");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_tabs_on_one_path_both_react() {
+        // `tab_index_for` stops the same file opening twice, but Save As can
+        // still leave two tabs pointing at one path - the sweep visits every
+        // tab, not the first match.
+        let dir = argv_scratch_dir();
+        let file = dir.join("shared.txt");
+        std::fs::write(&file, "before").expect("write");
+        let mut app = app_watching(&dir, &file);
+        let mut second = Tab::from_file(1, file.clone(), "before", &app.editor_factory);
+        second.restamp();
+        second.dirty = true;
+        app.tabs.push(second);
+        app.next_id = 2;
+
+        std::fs::write(&file, "changed by another program").expect("rewrite");
+        let reads = app.resolve_disk_changes();
+
+        assert_eq!(reads.len(), 1, "only the clean tab re-reads");
+        assert_eq!(reads[0].0, 0);
+        assert!(app.tabs[1].externally_changed, "the dirty one is flagged");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_watched_path_list_is_sorted_deduped_and_file_backed_only() {
+        // It's the watcher subscription's identity: an unstable order would
+        // tear the watcher down and rebuild it on every unrelated change.
+        let mut app = test_app(3);
+        app.tabs[0].document.path = Some(PathBuf::from("/tmp/zebra.txt"));
+        app.tabs[1].document.path = Some(PathBuf::from("/tmp/apple.txt"));
+        app.tabs[2].document.path = Some(PathBuf::from("/tmp/zebra.txt"));
+
+        assert_eq!(
+            app.watched_paths(),
+            vec![PathBuf::from("/tmp/apple.txt"), PathBuf::from("/tmp/zebra.txt")]
+        );
+
+        app.tabs[0].document.path = None;
+        app.tabs[2].document.path = None;
+        assert_eq!(app.watched_paths(), vec![PathBuf::from("/tmp/apple.txt")]);
+    }
+
+    #[test]
+    fn an_untitled_tab_is_never_swept() {
+        let mut app = test_app(1);
+        assert!(app.resolve_disk_changes().is_empty());
+        assert!(!app.tabs[0].dirty);
+        assert!(app.watched_paths().is_empty());
     }
 
     #[test]
