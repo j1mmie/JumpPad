@@ -49,6 +49,8 @@ file, saving a note, or drafting a message.
  - Syntax highlighting
  - Transparency
  - Automatic draft saving
+ - Notices files changed by other programs - reloads clean tabs silently,
+   never overwrites unsaved edits without asking
  - Configurable via TOML, with live reload - theme, transparency, scroll
    speed, and keybind changes apply the moment the file is saved
  - Pixel-granular scrolling - the view rests wherever you left it, with the

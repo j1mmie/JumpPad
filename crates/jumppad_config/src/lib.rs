@@ -800,6 +800,31 @@ mod tests {
     }
 
     #[test]
+    fn config_toml_with_no_files_section_asks_before_overwriting() {
+        let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
+        assert_eq!(config.files, FilesConfig::default());
+        assert!(config.files.save_conflict_resolution.asks());
+    }
+
+    #[test]
+    fn config_toml_can_ask_for_saves_that_always_win() {
+        let config: Config = toml::from_str(
+            r#"
+            theme = "Light"
+
+            [files]
+            save_conflict_resolution = "overwrite"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.files.save_conflict_resolution,
+            SaveConflictResolution::Overwrite
+        );
+        assert!(!config.files.save_conflict_resolution.asks());
+    }
+
+    #[test]
     fn config_toml_with_no_alpha_section_falls_back_to_solid() {
         let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
         assert_eq!(config.alpha, AlphaConfig::default());

@@ -1063,6 +1063,68 @@ restore branch in `new()` skips `reload_from_disk` for a path that doesn't
 exist. Undo that skip and you get a spurious "Couldn't reload a restored tab"
 on every launch after someone runs `jumppad newfile.txt` and quits.
 
+## External file changes
+
+JumpPad notices when an open tab's file is changed by something else, and
+copies VS Code's rule: silently reload when it's safe, never clobber unsaved
+edits when it isn't.
+
+| On-disk event | Buffer clean | Buffer dirty |
+| --- | --- | --- |
+| Modified | Reload silently. Scroll position kept, and the reload is undoable - Ctrl+Z restores the pre-reload text and leaves the tab dirty. | Buffer untouched, `externally_changed` set. The conflict surfaces in the tab title, in a bar over the editor, and at save time. |
+| Deleted | Tab stays open with its content, goes dirty, `disk` becomes `None` - the next save recreates the file. No prompt. | Same. |
+
+The conflict dialog offers **Overwrite** / **Discard & Reload** / **Cancel**.
+No Compare: JumpPad has no diff view and shouldn't grow one.
+
+Three signals feed one `DocumentWatch` (`crates/jumppad/src/docwatch.rs`) -
+the same shape `reload.rs` uses for `config.toml`, and for the same reason:
+native `notify` events over the *directories* holding open files, a sweep on
+window focus (the safety net for events the watcher never delivered), and
+JumpPad's own saves. The third needs no suppression list - `save_to` stamps
+the file it just wrote, so the watcher event that write causes compares
+equal and sweeps to nothing. **That stamp is the entire defense against a
+save triggering a reload of itself**; move it back into the `FileSaved` arm
+and you get a reload loop that eats the cursor position on every save.
+
+`JumpPadApp::resolve_disk_changes` is the one decider. It **stats every
+file-backed tab and compares stamps** rather than matching event paths
+against open files. That's what keeps relative paths (`jumppad newnote.md`),
+deleted files (which can't be canonicalized), and atomic-save renames from
+each needing their own case. A spurious event costs N stats for N open tabs.
+Any path-matching added later has to reckon with all three.
+
+The watcher subscription is the one genuinely new mechanic against
+`reload.rs`: documents come and go, so it's `Subscription::run_with(paths,
+..)` rather than `Subscription::run`. The recipe hashes `paths`, so changing
+the set tears the stream down and starts a fresh watcher over the new
+directories - which is the intended mechanism, and why `watched_paths()`
+sorts and dedupes. An unstable order would restart the watcher on every
+unrelated tab switch. `run_with`'s builder is a bare `fn(&D) -> S`, not a
+closure: everything the watcher needs has to arrive through `paths`.
+
+Things that will bite:
+
+- **`config.toml` open as a tab** is watched by both `ConfigWatch` and
+  `DocumentWatch`. That's correct and independent - one reloads settings, the
+  other reloads the buffer. Don't merge them.
+- **A reload is not an edit.** It doesn't route through `Message::Editor` and
+  doesn't set `dirty` on the clean path; doing either would arm draft
+  autosave and write a draft for content already on disk.
+- **`refresh_find()` after every buffer replacement** - the match list holds
+  byte ranges into the old text.
+- **A read is async.** `DocumentReloaded` re-validates against the tab as it
+  stands *now*: gone, retargeted by a Save As, or gone dirty while the read
+  was in flight all drop the result (the last one flags instead). Applying a
+  stale read over edits the user just made is the one thing this must never
+  do.
+- **mtime granularity.** A same-length rewrite inside one filesystem tick can
+  compare equal and be missed, same as `reload.rs` accepts. The focus sweep is
+  the backstop; a content hash on a per-stat path is not the fix.
+- `[files] save_conflict_resolution` is read from `self.config` at save time,
+  **not** through `apply_config` - so a reloaded `config.toml` picks it up for
+  free. It's the one live setting that legitimately has no `apply_config` arm.
+
 ## Drag and drop
 
 No crate needed for this - iced already delivers it. `iced_winit`'s
