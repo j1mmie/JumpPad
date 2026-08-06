@@ -425,6 +425,15 @@ impl TextEditorWidget for TextArea {
         self.resync_source();
     }
 
+    fn reload_text(&mut self, text: &str) {
+        // Isolated for the same reason a comment toggle is: the reload joins
+        // neither the typing burst before it nor the keystroke after it.
+        self.history.record_isolated(&self.source, self.cursor_state());
+        let cursor = self.cursor_position();
+        self.replace_document(text);
+        self.move_cursor_to(cursor.0, cursor.1); // clamps if the file shrank
+    }
+
     fn poll_highlighting(&mut self) {
         if !matches!(self.highlighting, Highlighting::Pending(_)) {
             return;
@@ -1061,6 +1070,38 @@ mod tests {
         assert!(editor.update(EditorMessage::Redo));
         assert_eq!(editor.text(), "hello!");
         assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn reload_text_replaces_the_document_and_is_undoable() {
+        let mut editor = plain_editor("on disk");
+        editor.reload_text("changed underneath");
+        assert_eq!(editor.text(), "changed underneath");
+
+        // An external reload is a change like any other, so Ctrl+Z brings
+        // the pre-reload text back.
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "on disk");
+    }
+
+    #[test]
+    fn reload_text_keeps_the_cached_source_in_sync() {
+        let mut editor = plain_editor("one\ntwo");
+        editor.reload_text("one\ntwo\nthree");
+        assert_source_is_synced(&editor);
+
+        editor.update(EditorMessage::Undo);
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn reload_text_clamps_a_caret_past_the_end_of_a_shortened_file() {
+        let mut editor = plain_editor("first line\nsecond line\nthird line");
+        editor.move_cursor_to(2, 10);
+
+        editor.reload_text("first line");
+
+        assert_eq!(editor.cursor_position(), (0, 10));
     }
 
     /// Selects `hello` in "hello world" as a plain drag-style range, cursor

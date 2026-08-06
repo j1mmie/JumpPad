@@ -182,6 +182,9 @@ mod tests {
         fn set_text(&mut self, text: &str) {
             self.0 = text.to_string();
         }
+        fn reload_text(&mut self, text: &str) {
+            self.0 = text.to_string();
+        }
         fn poll_highlighting(&mut self) {}
         fn cursor_position(&self) -> (usize, usize) {
             (0, 0)

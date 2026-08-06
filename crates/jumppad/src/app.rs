@@ -2300,8 +2300,10 @@ mod tests {
     use iced::keyboard::key::Named;
     use iced::keyboard::{Key, Modifiers};
 
-    /// A minimal `TextEditorWidget` for tests, with no real rendering.
-    struct StubEditor;
+    /// A minimal `TextEditorWidget` for tests, with no real rendering - it
+    /// holds its text so file-backed flows can assert on what landed in the
+    /// buffer.
+    struct StubEditor(String);
 
     impl TextEditorWidget for StubEditor {
         fn view(&self) -> Element<'_, EditorMessage> {
@@ -2311,9 +2313,14 @@ mod tests {
             true // reports every message as an edit
         }
         fn text(&self) -> String {
-            String::new()
+            self.0.clone()
         }
-        fn set_text(&mut self, _text: &str) {}
+        fn set_text(&mut self, text: &str) {
+            self.0 = text.to_string();
+        }
+        fn reload_text(&mut self, text: &str) {
+            self.0 = text.to_string();
+        }
         fn poll_highlighting(&mut self) {}
         fn cursor_position(&self) -> (usize, usize) {
             (0, 0)
@@ -2335,7 +2342,9 @@ mod tests {
     }
 
     fn stub_factory() -> EditorFactory {
-        Box::new(|_text, _extension| Box::new(StubEditor) as Box<dyn TextEditorWidget>)
+        Box::new(|text, _extension| {
+            Box::new(StubEditor(text.to_string())) as Box<dyn TextEditorWidget>
+        })
     }
 
     /// Records every message it's handed, for asserting on what the app
@@ -2354,6 +2363,7 @@ mod tests {
             String::new()
         }
         fn set_text(&mut self, _text: &str) {}
+        fn reload_text(&mut self, _text: &str) {}
         fn poll_highlighting(&mut self) {}
         fn cursor_position(&self) -> (usize, usize) {
             (0, 0)
@@ -2403,6 +2413,7 @@ mod tests {
             String::new()
         }
         fn set_text(&mut self, _text: &str) {}
+        fn reload_text(&mut self, _text: &str) {}
         fn poll_highlighting(&mut self) {}
         fn cursor_position(&self) -> (usize, usize) {
             self.cursor
