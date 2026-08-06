@@ -9,9 +9,9 @@
 //! is the single decider of what reloads, at most once per burst.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
-use editor_core::Debounce;
+use editor_core::{Debounce, DiskStamp};
 use iced::Subscription;
 use notify::Watcher;
 
@@ -59,23 +59,19 @@ fn classify(path: &Path) -> Option<WatchedFile> {
     }
 }
 
-/// On-disk identity cheap enough to stat on demand: which candidate path is
-/// effective, its mtime, and its length. mtime granularity is
-/// filesystem-dependent, so a same-length rewrite within one tick can slip
-/// past a comparison - `note_saved` marks dirty unconditionally to cover
-/// the editor's own saves, and the residual for external ones is accepted.
+/// Which candidate path is effective, plus that file's [`DiskStamp`]. Config
+/// has *candidate* paths and has to notice which one is in force, so the path
+/// is part of the identity here in a way it isn't for a document tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Fingerprint {
     path: PathBuf,
-    mtime: SystemTime,
-    len: u64,
+    stamp: DiskStamp,
 }
 
 fn fingerprint(file: WatchedFile) -> Option<Fingerprint> {
     let path = file.effective_path()?;
-    let metadata = std::fs::metadata(&path).ok()?;
-    let mtime = metadata.modified().ok()?;
-    Some(Fingerprint { path, mtime, len: metadata.len() })
+    let stamp = DiskStamp::of(&path)?;
+    Some(Fingerprint { path, stamp })
 }
 
 struct FileState {
@@ -119,7 +115,7 @@ impl ConfigWatch {
 
     /// The editor saved `path`. A save to the effective config file is
     /// dirty by definition, without consulting the fingerprint (see
-    /// [`Fingerprint`] on why it can miss a rewrite).
+    /// [`DiskStamp`] on why it can miss a rewrite).
     pub fn note_saved(&mut self, path: &Path, now: Instant) {
         let Some(file) = classify(path) else {
             return;
@@ -282,8 +278,10 @@ mod tests {
     fn fingerprint_at(path: &str, mtime_secs: u64, len: u64) -> Option<Fingerprint> {
         Some(Fingerprint {
             path: PathBuf::from(path),
-            mtime: SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs),
-            len,
+            stamp: DiskStamp {
+                mtime: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs),
+                len,
+            },
         })
     }
 

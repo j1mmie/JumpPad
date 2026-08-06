@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use editor_core::{
-    EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN, SavedSelection, SelectionKind, Tab,
-    darkening_wash,
+    DiskStamp, EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN, SavedSelection,
+    SelectionKind, Tab, darkening_wash,
 };
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
@@ -162,7 +162,9 @@ pub enum Message {
     OpenPaths(Vec<PathBuf>),
     SaveFile,
     SaveFileAs,
-    FileSaved(u64, Result<PathBuf, SaveError>),
+    /// A save finished, carrying the path written and the stamp of what was
+    /// written - see `save_to` on why the stamp is taken inside the task.
+    FileSaved(u64, Result<(PathBuf, Option<DiskStamp>), SaveError>),
     SelectTab(usize),
     CloseTab(usize),
     CloseActiveTab,
@@ -365,13 +367,19 @@ impl JumpPadApp {
                 let draft = session::draft_path(&app.session_dir, entry.id);
                 match std::fs::read_to_string(&draft) {
                     Ok(content) => {
-                        app.tabs.push(Tab::restored(
+                        let mut tab = Tab::restored(
                             entry.id,
                             entry.path.clone(),
                             &content,
                             true,
                             &app.editor_factory,
-                        ));
+                        );
+                        // Whatever is on disk now is what this draft's next
+                        // save is measured against - a file that moved while
+                        // JumpPad was closed isn't a conflict to report at
+                        // startup.
+                        tab.restamp();
+                        app.tabs.push(tab);
                     }
                     Err(_) if entry.path.is_some() => {
                         // Draft unreadable - fall back to a clean re-read of the real file.
@@ -396,13 +404,13 @@ impl JumpPadApp {
                     }
                 }
             } else if let Some(path) = &entry.path {
-                app.tabs.push(Tab::restored(
+                let mut tab = Tab::restored(
                     entry.id,
                     Some(path.clone()),
                     "",
                     false,
                     &app.editor_factory,
-                ));
+                );
                 // A file that isn't there is the ordinary state of a tab named
                 // on the command line and never saved - restore it as the empty
                 // buffer it was, rather than reading it and reporting an error.
@@ -411,7 +419,11 @@ impl JumpPadApp {
                     reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
                         Message::SessionFileLoaded(id, result)
                     }));
+                } else {
+                    // No re-read coming, so nothing else will stamp it.
+                    tab.restamp();
                 }
+                app.tabs.push(tab);
             } else {
                 app.tabs.push(Tab::untitled(entry.id, &app.editor_factory));
             }
@@ -519,8 +531,9 @@ impl JumpPadApp {
         if !scratch {
             let id = self.next_id;
             self.next_id += 1;
-            self.tabs
-                .push(Tab::from_file(id, path, contents, &self.editor_factory));
+            let mut tab = Tab::from_file(id, path, contents, &self.editor_factory);
+            tab.restamp();
+            self.tabs.push(tab);
             return self.switch_active(self.tabs.len() - 1);
         }
 
@@ -530,6 +543,7 @@ impl JumpPadApp {
         // manifest and `find` are keyed by it.
         let id = self.tabs[self.active].id;
         self.tabs[self.active] = Tab::from_file(id, path, contents, &self.editor_factory);
+        self.tabs[self.active].restamp();
         // The index didn't move, so `switch_active` would call it a no-op -
         // the same situation `new_tab` handles above.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
@@ -926,8 +940,9 @@ impl JumpPadApp {
                 self.file_dialog_active = false;
                 let id = self.next_id;
                 self.next_id += 1;
-                self.tabs
-                    .push(Tab::from_file(id, path, &contents, &self.editor_factory));
+                let mut tab = Tab::from_file(id, path, &contents, &self.editor_factory);
+                tab.restamp();
+                self.tabs.push(tab);
                 self.switch_active(self.tabs.len() - 1)
             }
             Message::FileOpened(Err(OpenError::DialogClosed)) => {
@@ -976,12 +991,14 @@ impl JumpPadApp {
             Message::OpenPaths(paths) => self.open_paths(paths),
             Message::SaveFile => self.save_active_tab(false),
             Message::SaveFileAs => self.save_active_tab(true),
-            Message::FileSaved(id, Ok(path)) => {
+            Message::FileSaved(id, Ok((path, stamp))) => {
                 self.file_dialog_active = false;
                 self.config_watch.note_saved(&path, Instant::now());
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
                     tab.document.path = Some(path);
                     tab.dirty = false;
+                    tab.disk = stamp;
+                    tab.externally_changed = false;
                 }
                 // Tab just went clean - prune its stale draft file.
                 self.sync_session_metadata();
@@ -1243,6 +1260,9 @@ impl JumpPadApp {
             Message::SessionFileLoaded(id, Ok(contents)) => {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
                     tab.editor.set_text(&contents);
+                    // The boot-time version of an external reload: the tab and
+                    // its file agree again, so this is where the stamp is taken.
+                    tab.restamp();
                 }
                 Task::none()
             }
@@ -2238,11 +2258,15 @@ async fn open_and_read() -> Result<(PathBuf, Arc<String>), OpenError> {
     read_path(handle.path().to_owned()).await
 }
 
+/// Writes `text` to the tab's file, and stamps what it wrote. Stamping here
+/// rather than back in `update` closes the window where the app would record
+/// a file that had already been modified again externally - which is what
+/// keeps a save from reading as an external change and reloading itself.
 async fn save_to(
     existing_path: Option<PathBuf>,
     text: String,
     force_dialog: bool,
-) -> Result<PathBuf, SaveError> {
+) -> Result<(PathBuf, Option<DiskStamp>), SaveError> {
     let path = match existing_path {
         Some(existing) if !force_dialog => existing,
         existing_path => {
@@ -2264,7 +2288,8 @@ async fn save_to(
             path: path.clone(),
             kind: err.kind(),
         })?;
-    Ok(path)
+    let stamp = DiskStamp::of(&path);
+    Ok((path, stamp))
 }
 
 #[cfg(test)]
@@ -3596,7 +3621,7 @@ mod tests {
         assert!(!app.file_dialog_active);
 
         app.file_dialog_active = true;
-        let _ = app.update(Message::FileSaved(id, Ok(PathBuf::from("/tmp/x"))));
+        let _ = app.update(Message::FileSaved(id, Ok((PathBuf::from("/tmp/x"), None))));
         assert!(!app.file_dialog_active);
     }
 
