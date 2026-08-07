@@ -23,6 +23,12 @@ pub trait TextEditorWidget {
     /// Replace the editor's contents wholesale (e.g. after loading a file).
     fn set_text(&mut self, text: &str);
 
+    /// Replaces the document with new on-disk contents, keeping the scroll
+    /// position, clamping the caret, and recording an undo step - a file that
+    /// changed underneath the editor undoes like any other change, unlike
+    /// `set_text`, which is for loading a different file into the tab.
+    fn reload_text(&mut self, text: &str);
+
     /// Advances any in-progress syntax-highlighting grammar load one step.
     /// The app shell calls this periodically, since iced only re-runs app
     /// code in response to a message.

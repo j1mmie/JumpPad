@@ -1,5 +1,6 @@
 use crate::{
-    AlphaConfig, CommentSyntax, Config, LanguageConfig, ScrollConfig, VisorConfig, WindowConfig,
+    AlphaConfig, CommentSyntax, Config, FilesConfig, LanguageConfig, ScrollConfig, VisorConfig,
+    WindowConfig,
 };
 
 fn lang(
@@ -62,6 +63,7 @@ pub(crate) fn config() -> Config {
         alpha: AlphaConfig::default(),
         window: WindowConfig::default(),
         scroll: ScrollConfig::default(),
+        files: FilesConfig::default(),
         languages,
     }
 }

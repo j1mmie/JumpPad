@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::disk::DiskStamp;
 use crate::widget::{EditorFactory, SavedSelection, TextEditorWidget};
 
 /// Everything about a tab that is *not* the live text buffer: where it's
@@ -41,6 +42,14 @@ pub struct Tab {
     /// The `draft_generation` value that was last successfully written to
     /// this tab's draft file.
     pub flushed_generation: u64,
+    /// The file as JumpPad last saw it. `None` for an untitled tab, or one
+    /// whose file isn't on disk (named on the command line and never saved,
+    /// or deleted underneath us).
+    pub disk: Option<DiskStamp>,
+    /// The file changed on disk while this tab had unsaved edits. Drives the
+    /// banner and the save-time conflict prompt; cleared by a reload, a
+    /// successful save, or the user acknowledging it.
+    pub externally_changed: bool,
 }
 
 impl Tab {
@@ -54,6 +63,8 @@ impl Tab {
             last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
+            disk: None,
+            externally_changed: false,
         }
     }
 
@@ -69,6 +80,8 @@ impl Tab {
             last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
+            disk: None,
+            externally_changed: false,
         }
     }
 
@@ -95,15 +108,28 @@ impl Tab {
             last_selection: None,
             draft_generation: 0,
             flushed_generation: 0,
+            disk: None,
+            externally_changed: false,
         }
     }
 
+    /// Re-reads this tab's on-disk identity - what "the file as JumpPad last
+    /// saw it" means after a load, a save, or a reload. Constructors leave it
+    /// `None` so no `Tab` ever does I/O of its own; the app calls this.
+    pub fn restamp(&mut self) {
+        self.disk = self.document.path.as_deref().and_then(DiskStamp::of);
+    }
+
+    /// The tab chip's label: the file name, a bullet while there are unsaved
+    /// changes, and a warning sign while the file has also moved on disk.
     pub fn title(&self) -> String {
-        let name = self.document.display_name();
+        let mut title = self.document.display_name();
         if self.dirty {
-            format!("{name} \u{2022}")
-        } else {
-            name
+            title.push_str(" \u{2022}");
         }
+        if self.externally_changed {
+            title.push_str(" \u{26a0}");
+        }
+        title
     }
 }

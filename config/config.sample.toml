@@ -26,6 +26,12 @@ enabled = false
 # breaking it. Applies live - no restart needed.
 sensitivity = 1.0
 
+[files]
+# What a save does when the file changed on disk after JumpPad read it.
+# "ask" prompts before overwriting someone else's changes; "overwrite"
+# skips the check and always writes. Applies live - no restart needed.
+save_conflict_resolution = "ask"
+
 # Each [[languages]] entry maps file extensions to a syntax (its .wasm
 # grammar) and a toggle-comment style. Replaces the built-in list wholesale.
 
