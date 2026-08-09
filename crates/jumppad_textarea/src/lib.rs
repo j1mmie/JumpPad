@@ -1,5 +1,6 @@
 mod comment;
 mod history;
+mod lines;
 mod scrollbar;
 pub mod text_editor;
 
@@ -36,6 +37,11 @@ pub enum EditorCommand {
     Undo,
     Redo,
     ToggleComment,
+    DeleteLine,
+    MoveLineUp,
+    MoveLineDown,
+    CopyLineUp,
+    CopyLineDown,
 }
 
 /// The canonical `keybinds.toml` override name for each [`EditorCommand`].
@@ -49,6 +55,11 @@ pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
     ("undo", EditorCommand::Undo),
     ("redo", EditorCommand::Redo),
     ("toggle_comment", EditorCommand::ToggleComment),
+    ("delete_line", EditorCommand::DeleteLine),
+    ("move_line_up", EditorCommand::MoveLineUp),
+    ("move_line_down", EditorCommand::MoveLineDown),
+    ("copy_line_up", EditorCommand::CopyLineUp),
+    ("copy_line_down", EditorCommand::CopyLineDown),
 ];
 
 /// A user override's resolved chord, keyed by physical key (layout-
@@ -288,25 +299,60 @@ impl TextArea {
         self.settings.comment_styles().get(extension).cloned()
     }
 
-    /// The document with lines `first..first + replacements.len()` swapped
-    /// out, joined exactly as `Content::text()` joins so the rest round-trips.
-    fn text_with_lines_replaced(&self, first: usize, replacements: &[String]) -> String {
-        let mut text = String::with_capacity(self.source.len());
-        let mut lines = self.content.lines().enumerate().peekable();
-        while let Some((index, line)) = lines.next() {
-            match index.checked_sub(first).and_then(|i| replacements.get(i)) {
-                Some(replacement) => text.push_str(replacement),
-                None => text.push_str(&line.text),
-            }
-            if lines.peek().is_some() {
-                text.push_str(if line.ending == text_editor::LineEnding::None {
-                    text_editor::LineEnding::default().as_str()
-                } else {
-                    line.ending.as_str()
-                });
-            }
+    /// The ending this document separates lines with - the stand-in wherever
+    /// a spliced-in line needs one and the line it displaced had none. Only
+    /// a single-line document has no separator to copy.
+    fn document_line_ending(&self) -> text_editor::LineEnding {
+        match self.content.line_ending() {
+            Some(text_editor::LineEnding::None) | None => text_editor::LineEnding::default(),
+            Some(ending) => ending,
         }
-        text
+    }
+
+    /// The document with the lines in `replaced` swapped out for
+    /// `replacements` - any number of them, not just a 1:1 substitution -
+    /// joined exactly as `Content::text()` joins so the rest round-trips.
+    /// Each replacement inherits the ending of the line it stands in for,
+    /// which is what keeps a line promoted into the last position (or copied
+    /// past it) from converting a CRLF document to LF.
+    fn text_with_lines_spliced(&self, replaced: Range<usize>, replacements: &[String]) -> String {
+        let line_count = self.content.line_count();
+        let start = replaced.start.min(line_count);
+        let end = replaced.end.clamp(start, line_count);
+
+        let mut joiner = LineJoiner {
+            text: String::with_capacity(self.source.len()),
+            written: 0,
+            total: line_count - (end - start) + replacements.len(),
+            fallback: self.document_line_ending(),
+        };
+        let mut displaced: Vec<text_editor::LineEnding> = Vec::new();
+        let mut spliced_in = false;
+        let splice = |joiner: &mut LineJoiner, displaced: &[text_editor::LineEnding]| {
+            for (offset, replacement) in replacements.iter().enumerate() {
+                let inherited = displaced.get(offset).copied();
+                joiner.push(replacement, inherited.unwrap_or(text_editor::LineEnding::None));
+            }
+        };
+
+        for (index, line) in self.content.lines().enumerate() {
+            if (start..end).contains(&index) {
+                displaced.push(line.ending);
+                continue;
+            }
+            // Every displaced ending is known by the time the walk leaves the
+            // replaced block, and the block is contiguous, so this is the one
+            // spot in the output the replacements can go.
+            if index >= end && !spliced_in {
+                splice(&mut joiner, &displaced);
+                spliced_in = true;
+            }
+            joiner.push(&line.text, line.ending);
+        }
+        if !spliced_in {
+            splice(&mut joiner, &displaced);
+        }
+        joiner.text
     }
 
     /// Comments or uncomments the covered lines with the file type's
@@ -317,10 +363,8 @@ impl TextArea {
         };
         let cursor = self.cursor_position();
         let selection = self.selection();
-        let (first, last) = comment::covered_lines(cursor, selection);
-        let covered: Vec<String> = (first..=last)
-            .filter_map(|index| self.content.line(index).map(|line| line.text.into_owned()))
-            .collect();
+        let (first, last) = lines::covered_lines(cursor, selection);
+        let covered = self.covered_text((first, last));
         let covered: Vec<&str> = covered.iter().map(String::as_str).collect();
         let Some(toggled) = comment::toggle_comment(&covered, &style) else {
             return false;
@@ -329,7 +373,7 @@ impl TextArea {
         // Its own undo step - a toggle shouldn't fold into a typing burst -
         // recorded only now that an edit is certain to happen.
         self.history.record_isolated(&self.source, self.cursor_state());
-        let new_text = self.text_with_lines_replaced(first, &toggled.lines);
+        let new_text = self.text_with_lines_spliced(first..last + 1, &toggled.lines);
         self.replace_document(&new_text);
 
         let shift = |pos| comment::shift_position(pos, first, &toggled.edits);
@@ -344,6 +388,90 @@ impl TextArea {
             }
         }
         true
+    }
+
+    /// The covered lines' text, endings dropped - what the line transforms take.
+    fn covered_text(&self, (first, last): (usize, usize)) -> Vec<String> {
+        (first..=last)
+            .filter_map(|index| self.content.line(index).map(|line| line.text.into_owned()))
+            .collect()
+    }
+
+    /// The inclusive line range the caret or selection covers right now.
+    fn covered(&self) -> (usize, usize) {
+        lines::covered_lines(self.cursor_position(), self.selection())
+    }
+
+    /// Writes a line command out: one isolated undo step - a line command
+    /// joins neither the typing burst before it nor the keystroke after -
+    /// then the document rebuilt and the caret put where the command left it.
+    /// Callers bail before here when there is nothing to do.
+    fn apply_line_splice(&mut self, splice: lines::LineSplice) -> bool {
+        let before = self.cursor_state();
+        self.history.record_isolated(&self.source, before);
+        let new_text = self.text_with_lines_spliced(splice.replaced, &splice.lines);
+        // The rebuilt `Content` starts its caret at the top, so even a zero
+        // row shift has real work to do here.
+        self.replace_document(&new_text);
+
+        match splice.caret {
+            lines::Caret::Collapsed(line) => self.move_cursor_to(line, before.position.1),
+            lines::Caret::Shifted(rows) => {
+                let shift = |(line, column): (usize, usize)| {
+                    (line.saturating_add_signed(rows), column)
+                };
+                match before.selection {
+                    Some(saved) => self.restore_selection(
+                        SavedSelection { anchor: shift(saved.anchor), ..saved },
+                        shift(before.position),
+                    ),
+                    None => {
+                        let (line, column) = shift(before.position);
+                        self.move_cursor_to(line, column);
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    /// Removes the covered lines. Only an already-empty document has nothing
+    /// to remove - dropping any line elsewhere always drops bytes.
+    fn delete_line(&mut self) -> bool {
+        if self.source.is_empty() {
+            return false;
+        }
+        self.apply_line_splice(lines::delete(self.covered()))
+    }
+
+    /// Swaps the covered lines with the line above them; a clean no-op at the
+    /// top of the document, where there is nothing to swap with.
+    fn move_line_up(&mut self) -> bool {
+        let covered = self.covered();
+        let Some(above) = covered.0.checked_sub(1).and_then(|index| self.line_text(index)) else {
+            return false;
+        };
+        self.apply_line_splice(lines::move_up(covered, above, self.covered_text(covered)))
+    }
+
+    /// Mirror of [`Self::move_line_up`], no-op at the end of the document.
+    fn move_line_down(&mut self) -> bool {
+        let covered = self.covered();
+        let Some(below) = self.line_text(covered.1 + 1) else {
+            return false;
+        };
+        self.apply_line_splice(lines::move_down(covered, below, self.covered_text(covered)))
+    }
+
+    /// Duplicates the covered lines. Always an edit - a copy adds at least a
+    /// line separator - so there is no no-op case to guard.
+    fn copy_line(&mut self, downward: bool) -> bool {
+        let covered = self.covered();
+        self.apply_line_splice(lines::copy(covered, self.covered_text(covered), downward))
+    }
+
+    fn line_text(&self, index: usize) -> Option<String> {
+        self.content.line(index).map(|line| line.text.into_owned())
     }
 
     /// The [`HighlighterSettings`] describing this editor's current state.
@@ -413,6 +541,11 @@ impl TextEditorWidget for TextArea {
             EditorMessage::Undo => self.apply_history(History::undo),
             EditorMessage::Redo => self.apply_history(History::redo),
             EditorMessage::ToggleComment => self.toggle_comment(),
+            EditorMessage::DeleteLine => self.delete_line(),
+            EditorMessage::MoveLineUp => self.move_line_up(),
+            EditorMessage::MoveLineDown => self.move_line_down(),
+            EditorMessage::CopyLineUp => self.copy_line(false),
+            EditorMessage::CopyLineDown => self.copy_line(true),
         }
     }
 
@@ -529,6 +662,31 @@ impl TextEditorWidget for TextArea {
                 self.content.move_to(Cursor { position: anchor, selection: None });
                 self.content.perform(text_editor::Action::SelectLine);
             }
+        }
+    }
+}
+
+/// Joins lines the way `Content::text()` does - each one followed by its own
+/// ending, except the last, which never carries one. `total` has to be known
+/// up front: a splice changes the line count, so "is this the last line" can
+/// no longer be read off the document being walked.
+struct LineJoiner {
+    text: String,
+    written: usize,
+    total: usize,
+    fallback: text_editor::LineEnding,
+}
+
+impl LineJoiner {
+    fn push(&mut self, line: &str, ending: text_editor::LineEnding) {
+        self.text.push_str(line);
+        self.written += 1;
+        if self.written < self.total {
+            let ending = match ending {
+                text_editor::LineEnding::None => self.fallback,
+                ending => ending,
+            };
+            self.text.push_str(ending.as_str());
         }
     }
 }
@@ -779,6 +937,11 @@ fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
         EditorCommand::Undo => Binding::Custom(EditorMessage::Undo),
         EditorCommand::Redo => Binding::Custom(EditorMessage::Redo),
         EditorCommand::ToggleComment => Binding::Custom(EditorMessage::ToggleComment),
+        EditorCommand::DeleteLine => Binding::Custom(EditorMessage::DeleteLine),
+        EditorCommand::MoveLineUp => Binding::Custom(EditorMessage::MoveLineUp),
+        EditorCommand::MoveLineDown => Binding::Custom(EditorMessage::MoveLineDown),
+        EditorCommand::CopyLineUp => Binding::Custom(EditorMessage::CopyLineUp),
+        EditorCommand::CopyLineDown => Binding::Custom(EditorMessage::CopyLineDown),
     }
 }
 
@@ -835,6 +998,30 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
         }
     }
 
+    // Alt+Up/Down (Option on macOS): move the covered lines; with Shift held,
+    // duplicate them in that direction instead. Alt on every platform, not
+    // `jump()` - that is Ctrl off macOS, where Ctrl+Up already means document
+    // start. Matched exactly so Cmd/Ctrl+Alt+Up still falls through to it.
+    if press.modifiers == keyboard::Modifiers::ALT
+        || press.modifiers == (keyboard::Modifiers::ALT | keyboard::Modifiers::SHIFT)
+    {
+        let duplicate = press.modifiers.shift();
+        let command = match press.modified_key.as_ref() {
+            keyboard::Key::Named(key::Named::ArrowUp) if duplicate => {
+                Some(EditorCommand::CopyLineUp)
+            }
+            keyboard::Key::Named(key::Named::ArrowUp) => Some(EditorCommand::MoveLineUp),
+            keyboard::Key::Named(key::Named::ArrowDown) if duplicate => {
+                Some(EditorCommand::CopyLineDown)
+            }
+            keyboard::Key::Named(key::Named::ArrowDown) => Some(EditorCommand::MoveLineDown),
+            _ => None,
+        };
+        if let Some(command) = command {
+            return Some(binding_for(command));
+        }
+    }
+
     // Cmd+Z / Ctrl+Z: undo. Cmd+Shift+Z or Cmd+Y (Ctrl+Shift+Z / Ctrl+Y
     // elsewhere): redo. iced has no undo history of its own, so these route
     // to this crate's own `History` via `EditorMessage::Undo`/`Redo`.
@@ -846,6 +1033,7 @@ fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<E
                 }
                 'z' => return Some(binding_for(EditorCommand::Undo)),
                 'y' => return Some(binding_for(EditorCommand::Redo)),
+                'd' => return Some(binding_for(EditorCommand::DeleteLine)),
                 // Never fires on layouts where `/` needs a modifier (German:
                 // Shift+7); a keybinds.toml override matches by physical key.
                 '/' => return Some(binding_for(EditorCommand::ToggleComment)),
@@ -1351,6 +1539,281 @@ mod tests {
         assert_source_is_synced(&editor);
     }
 
+    /// Selects `anchor` through `cursor` as a plain range, the shape a
+    /// shift+arrow or a mouse drag leaves behind.
+    fn select_range(editor: &mut TextArea, anchor: (usize, usize), cursor: (usize, usize)) {
+        editor.restore_selection(
+            SavedSelection { anchor, kind: SelectionKind::Range },
+            cursor,
+        );
+    }
+
+    #[test]
+    fn a_no_op_splice_reproduces_the_document() {
+        // The splice helper's contract, over the same line-ending shapes
+        // `a_new_editor_starts_with_a_synced_source` covers: swapping lines
+        // for copies of themselves has to be byte-identical.
+        for doc in ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"] {
+            let editor = plain_editor(doc);
+            let count = editor.content.line_count();
+            let same = editor.covered_text((0, count - 1));
+            assert_eq!(editor.text_with_lines_spliced(0..count, &same), editor.text(), "{doc:?}");
+        }
+    }
+
+    #[test]
+    fn a_spliced_in_last_line_borrows_the_documents_ending() {
+        // The last line carries no ending of its own, so a copy landing past
+        // it has nothing to inherit - without the fallback this splices a
+        // lone LF into a CRLF document.
+        let editor = plain_editor("aaa\r\nbbb");
+        let doubled = vec!["bbb".to_string(), "bbb".to_string()];
+        assert_eq!(editor.text_with_lines_spliced(1..2, &doubled), "aaa\r\nbbb\r\nbbb");
+    }
+
+    #[test]
+    fn delete_line_removes_the_caret_line_and_keeps_the_column() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        editor.move_cursor_to(1, 2);
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert_eq!(editor.text(), "aaa\nccc");
+        assert_eq!(editor.cursor_position(), (1, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn delete_line_at_the_end_clamps_the_caret_into_the_document() {
+        let mut editor = plain_editor("aaa\nbbbb");
+        editor.move_cursor_to(1, 4);
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert_eq!(editor.text(), "aaa");
+        assert_eq!(editor.cursor_position(), (0, 3));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn delete_line_covers_a_multi_line_selection_and_collapses_it() {
+        let mut editor = plain_editor("aaa\nbbb\nccc\nddd");
+        select_range(&mut editor, (1, 1), (2, 2));
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert_eq!(editor.text(), "aaa\nddd");
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.cursor_position(), (1, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn delete_line_can_empty_the_document() {
+        let mut editor = plain_editor("only");
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert_eq!(editor.text(), "");
+        assert_eq!(editor.cursor_position(), (0, 0));
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "only");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn delete_line_on_an_empty_document_records_nothing() {
+        let mut editor = plain_editor("");
+        assert!(!editor.update(EditorMessage::DeleteLine));
+        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+    }
+
+    #[test]
+    fn crlf_survives_a_delete_line() {
+        let mut editor = plain_editor("aaa\r\nbbb\r\nccc");
+        editor.move_cursor_to(1, 0);
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert_eq!(editor.text(), "aaa\r\nccc");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn move_line_up_swaps_with_the_line_above_and_carries_the_caret() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        editor.move_cursor_to(1, 2);
+        assert!(editor.update(EditorMessage::MoveLineUp));
+        assert_eq!(editor.text(), "bbb\naaa\nccc");
+        assert_eq!(editor.cursor_position(), (0, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn move_line_down_swaps_with_the_line_below_and_carries_the_caret() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        editor.move_cursor_to(1, 2);
+        assert!(editor.update(EditorMessage::MoveLineDown));
+        assert_eq!(editor.text(), "aaa\nccc\nbbb");
+        assert_eq!(editor.cursor_position(), (2, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn move_line_up_at_the_top_is_a_clean_no_op() {
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(0, 1);
+        assert!(!editor.update(EditorMessage::MoveLineUp));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+    }
+
+    #[test]
+    fn move_line_down_at_the_bottom_is_a_clean_no_op() {
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(1, 1);
+        assert!(!editor.update(EditorMessage::MoveLineDown));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+    }
+
+    #[test]
+    fn an_edge_no_op_leaves_the_redo_stack_alone() {
+        // `record_isolated` clears redo unconditionally, so a no-op that
+        // recorded anyway would silently throw away a redo.
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(0, 1);
+        assert!(editor.update(EditorMessage::DeleteLine));
+        assert!(editor.update(EditorMessage::Undo));
+        assert!(!editor.update(EditorMessage::MoveLineUp));
+        assert!(editor.update(EditorMessage::Redo));
+        assert_eq!(editor.text(), "bbb");
+    }
+
+    #[test]
+    fn move_line_up_keeps_a_multi_line_selection_on_the_moved_block() {
+        let mut editor = plain_editor("aaa\nbbb\nccc\nddd");
+        select_range(&mut editor, (1, 1), (2, 2));
+        assert!(editor.update(EditorMessage::MoveLineUp));
+        assert_eq!(editor.text(), "bbb\nccc\naaa\nddd");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (1, 2));
+        assert_eq!(editor.content.selection().as_deref(), Some("bb\ncc"));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn moving_the_last_line_up_keeps_the_crlf_endings() {
+        // The last line carries no ending; moving it up promotes it to a
+        // separator position, where it has to borrow the document's.
+        let mut editor = plain_editor("aaa\r\nbbb");
+        editor.move_cursor_to(1, 0);
+        assert!(editor.update(EditorMessage::MoveLineUp));
+        assert_eq!(editor.text(), "bbb\r\naaa");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn move_line_down_swaps_with_a_trailing_empty_line() {
+        // "a\nb\n" is three lines, the last one empty - it swaps like any other.
+        let mut editor = plain_editor("aaa\nbbb\n");
+        editor.move_cursor_to(1, 0);
+        assert!(editor.update(EditorMessage::MoveLineDown));
+        assert_eq!(editor.text(), "aaa\n\nbbb");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn move_line_up_then_down_round_trips() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        editor.move_cursor_to(1, 1);
+        assert!(editor.update(EditorMessage::MoveLineUp));
+        assert!(editor.update(EditorMessage::MoveLineDown));
+        assert_eq!(editor.text(), "aaa\nbbb\nccc");
+        assert_eq!(editor.cursor_position(), (1, 1));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn undo_of_a_move_restores_the_text_and_the_selection() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        select_range(&mut editor, (1, 0), (1, 3));
+        assert!(editor.update(EditorMessage::MoveLineDown));
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaa\nbbb\nccc");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (1, 0), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (1, 3));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn copy_line_down_duplicates_the_line_and_lands_on_the_copy() {
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(0, 2);
+        assert!(editor.update(EditorMessage::CopyLineDown));
+        assert_eq!(editor.text(), "aaa\naaa\nbbb");
+        assert_eq!(editor.cursor_position(), (1, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn copy_line_up_writes_the_same_text_but_stays_on_the_upper_copy() {
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(0, 2);
+        assert!(editor.update(EditorMessage::CopyLineUp));
+        assert_eq!(editor.text(), "aaa\naaa\nbbb");
+        assert_eq!(editor.cursor_position(), (0, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn copy_line_down_shifts_a_selection_by_the_block_height() {
+        let mut editor = plain_editor("aaa\nbbb\nccc");
+        select_range(&mut editor, (0, 1), (1, 2));
+        assert!(editor.update(EditorMessage::CopyLineDown));
+        assert_eq!(editor.text(), "aaa\nbbb\naaa\nbbb\nccc");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection { anchor: (2, 1), kind: SelectionKind::Range })
+        );
+        assert_eq!(editor.cursor_position(), (3, 2));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn duplicating_the_last_line_keeps_the_crlf_endings() {
+        let mut editor = plain_editor("aaa\r\nbbb");
+        editor.move_cursor_to(1, 0);
+        assert!(editor.update(EditorMessage::CopyLineDown));
+        assert_eq!(editor.text(), "aaa\r\nbbb\r\nbbb");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn copy_line_down_on_a_single_line_document() {
+        let mut editor = plain_editor("only");
+        assert!(editor.update(EditorMessage::CopyLineDown));
+        assert_eq!(editor.text(), "only\nonly");
+        assert_eq!(editor.cursor_position(), (1, 0));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_line_command_stays_its_own_undo_step() {
+        // Same rule as toggle-comment: it neither joins the typing burst
+        // before it nor absorbs the keystroke after.
+        let mut editor = plain_editor("aaa\nbbb");
+        editor.move_cursor_to(0, 3);
+        assert!(editor.update(edit(text_editor::Edit::Insert('x'))));
+        assert!(editor.update(EditorMessage::MoveLineDown));
+        assert!(editor.update(edit(text_editor::Edit::Insert('y'))));
+        assert_eq!(editor.text(), "bbb\naaaxy");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "bbb\naaax");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaax\nbbb");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert_source_is_synced(&editor);
+    }
+
     #[test]
     fn undo_of_a_cut_reselects_the_cut_text() {
         // The reported bug. A cut publishes exactly one `Edit::Delete`, so
@@ -1599,6 +2062,99 @@ mod tests {
         assert!(matches!(
             binding_for(EditorCommand::ToggleComment),
             Binding::Custom(EditorMessage::ToggleComment)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::DeleteLine),
+            Binding::Custom(EditorMessage::DeleteLine)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::MoveLineUp),
+            Binding::Custom(EditorMessage::MoveLineUp)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::MoveLineDown),
+            Binding::Custom(EditorMessage::MoveLineDown)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::CopyLineUp),
+            Binding::Custom(EditorMessage::CopyLineUp)
+        ));
+        assert!(matches!(
+            binding_for(EditorCommand::CopyLineDown),
+            Binding::Custom(EditorMessage::CopyLineDown)
+        ));
+    }
+
+    #[test]
+    fn command_d_binds_delete_line_by_default() {
+        // CTRL stands in for `Modifiers::command()` on non-mac test runners,
+        // same as the undo/redo chord tests.
+        let event = press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyD,
+            keyboard::Key::Character("d".into()),
+        );
+        assert!(matches!(
+            key_binding(event, &EditorOverrides::new()),
+            Some(Binding::Custom(EditorMessage::DeleteLine))
+        ));
+    }
+
+    #[test]
+    fn alt_arrows_bind_the_line_commands_by_default() {
+        // Alt on every platform, so unlike the `command()` chord tests this
+        // one asserts the real default rather than a stand-in.
+        let alt = keyboard::Modifiers::ALT;
+        let alt_shift = alt | keyboard::Modifiers::SHIFT;
+        for (modifiers, code, named) in [
+            (alt, key::Code::ArrowUp, key::Named::ArrowUp),
+            (alt, key::Code::ArrowDown, key::Named::ArrowDown),
+            (alt_shift, key::Code::ArrowUp, key::Named::ArrowUp),
+            (alt_shift, key::Code::ArrowDown, key::Named::ArrowDown),
+        ] {
+            let event = press(modifiers, code, keyboard::Key::Named(named));
+            let binding = key_binding(event, &EditorOverrides::new());
+            let expected = match (named, modifiers == alt_shift) {
+                (key::Named::ArrowUp, false) => EditorMessage::MoveLineUp,
+                (key::Named::ArrowDown, false) => EditorMessage::MoveLineDown,
+                (key::Named::ArrowUp, true) => EditorMessage::CopyLineUp,
+                _ => EditorMessage::CopyLineDown,
+            };
+            assert!(
+                matches!(binding, Some(Binding::Custom(ref message)) if
+                    std::mem::discriminant(message) == std::mem::discriminant(&expected)),
+                "{modifiers:?} + {named:?} should bind {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_alt_arrow_with_another_modifier_is_not_a_line_command() {
+        // Ctrl+Alt+Up is the document-start chord off macOS; the exact
+        // modifier match is what keeps the new Alt block from eating it.
+        let event = press(
+            keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT,
+            key::Code::ArrowUp,
+            keyboard::Key::Named(key::Named::ArrowUp),
+        );
+        assert!(!matches!(
+            key_binding(event, &EditorOverrides::new()),
+            Some(Binding::Custom(EditorMessage::MoveLineUp))
+        ));
+    }
+
+    #[test]
+    fn an_override_on_alt_up_wins_over_move_line_up() {
+        let mut overrides = EditorOverrides::new();
+        overrides.insert((keyboard::Modifiers::ALT, key::Code::ArrowUp), EditorCommand::Undo);
+        let event = press(
+            keyboard::Modifiers::ALT,
+            key::Code::ArrowUp,
+            keyboard::Key::Named(key::Named::ArrowUp),
+        );
+        assert!(matches!(
+            key_binding(event, &overrides),
+            Some(Binding::Custom(EditorMessage::Undo))
         ));
     }
 

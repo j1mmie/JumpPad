@@ -107,6 +107,17 @@ pub enum EditorMessage {
     /// Like `Undo`, not a `text_editor::Action` - the transformation is the
     /// widget's own logic.
     ToggleComment,
+    /// Remove the cursor's line / the selection's lines outright. Like
+    /// `ToggleComment`, whole-line surgery the widget does itself.
+    DeleteLine,
+    /// Swap the covered lines with the line above them.
+    MoveLineUp,
+    /// Swap the covered lines with the line below them.
+    MoveLineDown,
+    /// Duplicate the covered lines, leaving the cursor on the upper copy.
+    CopyLineUp,
+    /// Duplicate the covered lines, leaving the cursor on the lower copy.
+    CopyLineDown,
     /// Scroll the view by a number of *pixels*, which is what the wheel and
     /// the scrollbar thumb actually ask for. Not a `text_editor::Action`:
     /// `Action::Scroll` counts in whole lines and would snap the view to a

@@ -1,8 +1,6 @@
 //! The toggle-comment transformation: pure functions over line texts,
 //! glued to the document by `TextArea::toggle_comment`.
 
-use editor_core::{SavedSelection, SelectionKind};
-
 /// A file type's comment syntax - this crate's own mirror of the config
 /// type, so it doesn't depend on `jumppad_config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,35 +238,6 @@ fn multi_uncomment(
     toggled
 }
 
-/// The inclusive `(first, last)` line range the command covers.
-pub fn covered_lines(
-    cursor: (usize, usize),
-    selection: Option<SavedSelection>,
-) -> (usize, usize) {
-    let Some(selection) = selection else {
-        return (cursor.0, cursor.0);
-    };
-    match selection.kind {
-        // Word and Line selections report anchor == cursor and never span
-        // lines - the real bounds live in the kind.
-        SelectionKind::Word | SelectionKind::Line => (selection.anchor.0, selection.anchor.0),
-        SelectionKind::Range => {
-            let (top, bottom) = if selection.anchor <= cursor {
-                (selection.anchor, cursor)
-            } else {
-                (cursor, selection.anchor)
-            };
-            // A selection whose bottom edge sits at column 0 merely starts
-            // that line - it shouldn't get commented.
-            if bottom.0 > top.0 && bottom.1 == 0 {
-                (top.0, bottom.0 - 1)
-            } else {
-                (top.0, bottom.0)
-            }
-        }
-    }
-}
-
 /// Shifts a saved `(line, byte column)` across a line's edits: inserts at
 /// or before it push it right, removals pull it left, and a caret inside a
 /// removed span pins to where the span started.
@@ -503,37 +472,6 @@ mod tests {
         // The eat stops at the left removal's edge instead of overlapping it.
         let hollow = toggle_comment(&["<!-- -->"], &style).unwrap();
         assert_eq!(hollow.lines, vec![""]);
-    }
-
-    fn range(anchor: (usize, usize)) -> Option<SavedSelection> {
-        Some(SavedSelection { anchor, kind: SelectionKind::Range })
-    }
-
-    #[test]
-    fn covered_lines_without_a_selection_is_the_cursor_line() {
-        assert_eq!(covered_lines((3, 7), None), (3, 3));
-    }
-
-    #[test]
-    fn covered_lines_orders_a_reversed_range() {
-        assert_eq!(covered_lines((1, 2), range((4, 0))), (1, 3));
-        assert_eq!(covered_lines((4, 5), range((1, 2))), (1, 4));
-    }
-
-    #[test]
-    fn a_bottom_edge_at_column_zero_excludes_that_line() {
-        // Shift+Down from line 1 stops at (2, 0): line 2 is merely started.
-        assert_eq!(covered_lines((2, 0), range((1, 0))), (1, 1));
-        // ...but a single-line selection ending at column 0 keeps its line.
-        assert_eq!(covered_lines((1, 0), range((1, 4))), (1, 1));
-    }
-
-    #[test]
-    fn word_and_line_selections_cover_the_anchor_line_only() {
-        for kind in [SelectionKind::Word, SelectionKind::Line] {
-            let selection = Some(SavedSelection { anchor: (2, 5), kind });
-            assert_eq!(covered_lines((2, 5), selection), (2, 2));
-        }
     }
 
     #[test]

@@ -358,13 +358,26 @@ no selection to record.
 of an edit already on screen would still jump the document around. See the
 reveal section above for what `layout` then does with it.
 
-**Toggle-comment rides the same replacement path.** The line transform is
-pure functions in `comment.rs` (testable without a window); `TextArea`
-applies it through `replace_document` - the `Content::with_text` +
-`restore_view` tail shared with undo/redo, never SelectAll+Paste (see the
-quadratic warning above). Each toggle records via `History::record_isolated`,
-which resets the coalescing burst on both sides so it neither joins the
-typing burst before it nor absorbs the keystroke after.
+**Toggle-comment and the line commands ride the same replacement path.** The
+transforms are pure functions in `comment.rs` and `lines.rs` (testable without
+a window); `TextArea` applies them through `text_with_lines_spliced` +
+`replace_document` - the `Content::with_text` + `restore_view` tail shared
+with undo/redo, never SelectAll+Paste (see the quadratic warning above). Each
+records via `History::record_isolated`, which resets the coalescing burst on
+both sides so it neither joins the typing burst before it nor absorbs the
+keystroke after. A command that turns out to be a no-op (move-line at the top
+of the document, delete-line on an empty one) must return `false` *before*
+recording: `record_isolated` clears the redo stack unconditionally, so a
+phantom entry would silently throw a redo away.
+
+**A spliced-in line inherits the ending of the line it displaces.** Only the
+last line carries `LineEnding::None`, and `Content::text()` drops it - so a
+line promoted into the last position, or a copy landing past it, has nothing
+to inherit and borrows `document_line_ending()` instead. Without that, moving
+or duplicating the last line of a CRLF file quietly splices in a lone LF.
+`text_with_lines_spliced` also can't ask `lines.peek()` whether it's on the
+last line the way `Content::text()` does - the output line count differs from
+the input's - which is what `LineJoiner`'s up-front `total` is for.
 
 **Redo's caret is the state at undo time, not at edit time.** VS Code records an
 `afterCursorState` when the edit happens; JumpPad reuses whatever is live when
