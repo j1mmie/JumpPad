@@ -3642,6 +3642,39 @@ mod tests {
     }
 
     #[test]
+    fn build_editor_overrides_resolves_the_line_command_names() {
+        // The one check that the new snake_case names survive the
+        // `global_hotkey` -> iced conversion, arrow codes included.
+        let keybinds: jumppad_config::KeybindsConfig = toml::from_str(
+            r#"
+            toggle = "control+Backquote"
+
+            [overrides]
+            delete_line = "control+alt+k"
+            move_line_up = "control+alt+ArrowUp"
+            copy_line_down = "control+shift+alt+ArrowDown"
+            "#,
+        )
+        .unwrap();
+        let overrides = build_editor_overrides(&keybinds);
+        assert_eq!(
+            overrides.get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::KeyK)),
+            Some(&jumppad_textarea::EditorCommand::DeleteLine)
+        );
+        assert_eq!(
+            overrides.get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::ArrowUp)),
+            Some(&jumppad_textarea::EditorCommand::MoveLineUp)
+        );
+        assert_eq!(
+            overrides.get(&(
+                Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT,
+                key::Code::ArrowDown
+            )),
+            Some(&jumppad_textarea::EditorCommand::CopyLineDown)
+        );
+    }
+
+    #[test]
     fn apply_keybinds_swaps_both_override_tables_live() {
         let mut app = test_app(1);
         let keybinds: jumppad_config::KeybindsConfig = toml::from_str(

@@ -59,6 +59,9 @@ file, saving a note, or drafting a message.
    `1.0` is the default speed, `2.0` twice as fast, `0.5` half)
  - Toggle comments with Cmd+/ (macOS) or Ctrl+/ - single-line prefixes
    or multi-line delimiters, per language, configurable in TOML
+ - Whole-line editing: delete with Cmd+D (macOS) or Ctrl+D, move with
+   Alt+Up/Down, duplicate with Alt+Shift+Up/Down - all covering the
+   selection's lines when there is one
  - More to come...
 
 Drag and drop works on macOS, Windows, and Linux/X11. On a native Wayland
