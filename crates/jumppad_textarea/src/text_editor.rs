@@ -125,13 +125,18 @@ enum PendingView {
 /// Where a [`Content`] had its view and its cursor, read off before a rebuild
 /// replaces it and handed to the [`Content`] that takes its place.
 ///
-/// The cursor's row travels with the scroll because a reveal needs to know
-/// which way the cursor is *going*, not just where it ended up: a line moved
-/// up has no business scrolling the view down to chase it off the bottom
-/// margin.
+/// The view is the buffer's own `Scroll` - a logical line and the pixels into
+/// it - rather than the single number [`Content::scrolled_to`] reports. That
+/// number adds the two together, which is fine for the scrollbar but cannot be
+/// scrolled *back* to: see `restore_pixels`.
+///
+/// The cursor's row travels with them because a reveal needs to know which way
+/// the cursor is *going*, not just where it ended up: a line moved up has no
+/// business scrolling the view down to chase it off the bottom margin.
 #[derive(Debug, Clone, Copy)]
 pub struct CapturedView {
-    scrolled_to: f32,
+    scroll_line: usize,
+    scroll_vertical: f32,
     cursor_row: f32,
 }
 
@@ -208,8 +213,7 @@ fn shape_and_reveal(
     // left half a line down owes them that half line back. `Action::Scroll`
     // carries whole `lines: i32` and would round it away, snapping a bottom
     // row they left cut off flush against the edge.
-    let scroll_exactly = |editor: &mut graphics::text::Editor, lines: f32| {
-        let pixels = lines * editor.buffer().metrics().line_height;
+    let scroll_exactly = |editor: &mut graphics::text::Editor, pixels: f32| {
         // The correction is absolute, so dropping a sub-pixel remainder
         // neither drifts nor compounds - it just saves a shape.
         if pixels.abs() >= 0.5 {
@@ -229,16 +233,56 @@ fn shape_and_reveal(
             // The shape above revealed the cursor from the top of the
             // document, which is the one place the view was never at. Undoing
             // that is what makes the cursor's position mean anything.
-            let Some(now) = scrolled_to(editor) else {
-                return;
-            };
-            scroll_exactly(editor, before.scrolled_to - now);
+            scroll_exactly(editor, restore_pixels(editor, before));
 
             if let Some(lines) = restore_scroll(editor, before, text_bounds) {
                 scroll(editor, lines);
             }
         }
     }
+}
+
+/// The pixels from where the view sits now back to where `before` had it.
+///
+/// A pixel scroll moves in *visual* rows; a buffer scroll names a *logical*
+/// line. The two come apart the moment a line wraps - which the widget does by
+/// default (`Wrapping::default()` is `Word`, and nothing overrides it) - so
+/// subtracting one `scrolled_to` from another and calling the difference
+/// pixels lands the view somewhere it was never asked to go. That is what used
+/// to yank the view on every line command in a document with a long line in
+/// it: the restore missed, which left the cursor below the bottom margin, and
+/// the reveal below then "corrected" it onto the margin row.
+///
+/// So the gap is measured in rows that have actually been laid out. It spans
+/// the handful of lines between a fresh buffer's reveal and the view it is
+/// going back to, all of them in or beside the view and so already shaped.
+/// This is *not* the whole-document row count the scrollbar deliberately
+/// avoids (see its section in AGENTS.md): it is bounded, local, and runs once
+/// per rebuild rather than every frame. A line cosmic-text has not shaped
+/// falls back to counting logical lines, which is exact for a document that
+/// does not wrap and only reachable when the cursor moved further than a
+/// viewport - where the reveal is about to take over anyway.
+fn restore_pixels(
+    editor: &graphics::text::Editor,
+    before: CapturedView,
+) -> f32 {
+    let buffer = editor.buffer();
+    let now = buffer.scroll();
+
+    let rows = (now.line.min(before.scroll_line)
+        ..now.line.max(before.scroll_line))
+        .try_fold(0.0f32, |rows, line| {
+            Some(rows + buffer.lines.get(line)?.layout_opt()?.len() as f32)
+        });
+
+    let lines = match rows {
+        Some(rows) if before.scroll_line >= now.line => rows,
+        Some(rows) => -rows,
+        None => before.scroll_line as f32 - now.line as f32,
+    };
+
+    lines * buffer.metrics().line_height + before.scroll_vertical
+        - now.vertical
 }
 
 /// The scroll an edit still owes the view, in lines, measured against where
@@ -823,9 +867,11 @@ where
         if !internal.shaped {
             return None;
         }
+        let scroll = internal.editor.buffer().scroll();
 
         Some(CapturedView {
-            scrolled_to: scrolled_to(&internal.editor)?,
+            scroll_line: scroll.line,
+            scroll_vertical: scroll.vertical,
             cursor_row: cursor_row(&internal.editor)?,
         })
     }
@@ -2136,14 +2182,7 @@ mod tests {
         line: usize,
         text: &str,
     ) -> graphics::text::Editor {
-        let pending = scrolled_to(editor).zip(cursor_row(editor)).map(
-            |(scrolled_to, cursor_row)| {
-                PendingView::Rebuilt(CapturedView {
-                    scrolled_to,
-                    cursor_row,
-                })
-            },
-        );
+        let pending = captured(editor).map(PendingView::Rebuilt);
 
         let mut rebuilt = graphics::text::Editor::with_text(text);
         rebuilt.move_to(Cursor {
@@ -2155,6 +2194,18 @@ mod tests {
         });
 
         rebuilt
+    }
+
+    /// What `Content::capture_view` reads off a `Content` about to be
+    /// replaced, straight from the editor the harness drives by hand.
+    fn captured(editor: &graphics::text::Editor) -> Option<CapturedView> {
+        let scroll = editor.buffer().scroll();
+
+        Some(CapturedView {
+            scroll_line: scroll.line,
+            scroll_vertical: scroll.vertical,
+            cursor_row: cursor_row(editor)?,
+        })
     }
 
     /// Puts the cursor on `line`, then scrolls the view `lines` away from it.
@@ -2704,6 +2755,114 @@ mod tests {
         // No end of the range to clamp `NaN` to, so it takes the default.
         assert_eq!(clamp_scroll_sensitivity(f32::NAN), 1.0);
     }
+    /// Every line long enough to wrap at the harness width, so visual rows
+    /// and buffer lines come apart - which is what the widget actually runs
+    /// (`Wrapping::default()` is `Word`, and nothing overrides it).
+    fn wrapped_text() -> String {
+        (0..DOCUMENT_LINES)
+            .map(|line| format!("line {line} {}", "word ".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn shape_wrapped(editor: &mut graphics::text::Editor, bounds: Size) {
+        editor.update(
+            bounds,
+            iced_core::Font::MONOSPACE,
+            Pixels(14.0),
+            LineHeight::Absolute(Pixels(LINE_HEIGHT)),
+            Wrapping::Word,
+            &mut highlighter::PlainText::new(&()),
+        );
+    }
+
+    /// A wrapped document with the cursor on line 100 and the view scrolled
+    /// `lines` back over it, then that line moved down one - the way a line
+    /// command rebuilds. Returns the view and cursor row either side.
+    #[allow(clippy::type_complexity)]
+    fn wrapped_line_move(
+        lines: i32,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+        shape_wrapped(&mut editor, bounds);
+        editor.move_to(Cursor {
+            position: Position { line: 100, column: 0 },
+            selection: None,
+        });
+        shape_wrapped(&mut editor, bounds);
+        editor.perform(Action::Scroll { lines });
+        shape_wrapped(&mut editor, bounds);
+
+        let before = editor.buffer().scroll();
+        let before_row = visible_row(&editor);
+        let pending = captured(&editor).map(PendingView::Rebuilt);
+
+        let mut rebuilt = graphics::text::Editor::with_text(&wrapped_text());
+        rebuilt.move_to(Cursor {
+            position: Position { line: 101, column: 0 },
+            selection: None,
+        });
+        shape_and_reveal(&mut rebuilt, pending, bounds, |editor| {
+            shape_wrapped(editor, bounds);
+        });
+
+        let after = rebuilt.buffer().scroll();
+        (
+            (before.line, before.vertical),
+            before_row,
+            (after.line, after.vertical),
+            visible_row(&rebuilt),
+        )
+    }
+
+    #[test]
+    fn a_wrapped_documents_lines_really_do_wrap() {
+        // Guards every case below: the moment this text stops wrapping they
+        // all pass for the wrong reason, which is exactly how the bug they
+        // cover got in.
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+        shape_wrapped(&mut editor, bounds);
+
+        let rows = editor.buffer().lines[100]
+            .layout_opt()
+            .map(|layout| layout.len());
+        assert!(rows > Some(1), "line 100 should wrap, laid out as {rows:?}");
+    }
+
+    #[test]
+    fn a_line_moved_down_a_wrapped_document_leaves_the_view_alone() {
+        // The report: cursor anywhere clear of the margins, move the line,
+        // and the view has no business moving. `scrolled_to` mixes a logical
+        // line with a visual offset, so restoring by its difference used to
+        // miss - and the miss dropped the cursor past the bottom margin,
+        // where the reveal slammed it onto the margin row every time.
+        for lines in [8, 10, 11, 12, 14] {
+            let (view, row, moved_view, moved_row) = wrapped_line_move(lines);
+
+            assert_eq!(moved_view, view, "scroll({lines}) moved the view");
+            assert!(
+                moved_row > row,
+                "scroll({lines}): the caret should walk down the screen, \
+                 {row} -> {moved_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_line_moved_into_the_bottom_margin_still_reveals() {
+        // The margin has to keep working under wrapping, or the fix above is
+        // just the reveal switched off.
+        let (view, _, moved_view, moved_row) = wrapped_line_move(4);
+
+        assert_ne!(moved_view, view, "the view should follow the caret down");
+        assert!(
+            moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
+            "the caret should land inside the bottom margin, at {moved_row}"
+        );
+    }
+
     /// The reference for any future pixel-granular scrolling: the buffer
     /// underneath already *holds and renders* a sub-line offset. Only the
     /// way in is quantized - `iced_core`'s `Action::Scroll` carries whole

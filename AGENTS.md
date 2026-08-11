@@ -209,6 +209,29 @@ whole-line one, because both are still wanted:
   bottom row the user left cut off flush against the edge, on every undo and
   every line command.
 
+**A pixel scroll moves in visual rows; `scrolled_to` counts logical lines.**
+Restoring a view is the one place that difference bites, and it is why
+`CapturedView` holds the buffer's own `Scroll` - a logical line plus the
+pixels into it - rather than the single `scrolled_to` number. Subtracting one
+`scrolled_to` from another and spending the difference as pixels is only
+correct while nothing wraps; the widget wraps by default (`Wrapping::default()`
+is `Word`, and nothing overrides it), so in a document with a long line in it
+the restore missed, dropped the cursor below the bottom margin, and the reveal
+then "corrected" it onto the margin row - the view lurching on every single
+line command. `restore_pixels` measures the gap in rows that have actually
+been laid out instead. That is bounded and local - the handful of lines
+between a fresh buffer's reveal and the view it is returning to, all of them
+in or beside the view - and runs once per rebuild, so it is *not* the
+whole-document row count the scrollbar section rejects. A line cosmic-text has
+not shaped falls back to counting logical lines.
+
+**Test the wrapped layout, not just the flat one.** Two bugs shipped because
+every reveal test shaped with `Wrapping::None` while the widget runs
+`Wrapping::Word`, so visual rows and logical lines coincided in the tests and
+came apart in the app. `wrapped_text`/`shape_wrapped` are the harness for it,
+and `a_wrapped_documents_lines_really_do_wrap` guards the guard - the moment
+that text stops wrapping the cases around it pass for the wrong reason.
+
 ### Why scrolling used to land on whole lines
 
 Kept because it explains what the patch above is buying, and because the
