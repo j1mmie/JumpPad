@@ -199,10 +199,15 @@ whole-line one, because both are still wanted:
   optional; with no handler set the widget falls back to upstream's
   whole-line behavior, which is what `State::partial_scroll` is still there
   for.
-- `Action::Scroll { lines }` - the cursor reveal in `shape_and_reveal` and
-  `restore_view`, which count in lines and mean it. Note these *preserve*
-  any sub-line offset rather than re-snapping to a boundary, so a reveal
-  never visibly straightens a view the user left between two lines.
+- `Action::Scroll { lines }` - the cursor reveals in `shape_and_reveal`,
+  which count in lines and mean it. Note these *preserve* any sub-line offset
+  rather than re-snapping to a boundary, so a reveal never visibly
+  straightens a view the user left between two lines.
+- `scroll_by` again, also in `shape_and_reveal`: putting a rebuilt
+  `Content`'s view back where the replaced one had it. That one is a
+  position, not a count. Rounding it to whole lines is what used to snap a
+  bottom row the user left cut off flush against the edge, on every undo and
+  every line command.
 
 ### Why scrolling used to land on whole lines
 
@@ -254,17 +259,22 @@ the thumb, then typed into) brings the cursor back into view with
 the sixth visible line, from the top or the bottom depending on which way the
 view had to move. Typing with the cursor already visible doesn't scroll at all.
 A change that rebuilds the document - undo, redo, the line commands - treats
-that margin as a *band* instead, and scrolls whenever the cursor is inside it,
-not only once the cursor has left the view.
+that margin as a *band* instead: it scrolls once the cursor is inside the
+margin and still heading for that edge, rather than waiting for it to leave
+the view. **Heading for it** is half the rule. A cursor sitting in the bottom
+margin that just moved *up* is walking away from the edge and gets nothing;
+scrolling down to "reveal" it would drag the view the opposite way to the line
+the user is moving.
 
 Everything happens in `shape_and_reveal`, on the next `layout`, because that
 is where the shape happens: cosmic-text reveals a moved cursor lazily, inside
 the shape, long after `Content::perform` returned, and a rebuilt `Content` has
 no line metrics to scroll by until it has been shaped once either. So the
 change records where the view sat (`Internal::pending_view`) and `layout` acts
-on it after shaping. Every correction goes through `Action::Scroll` - the only
-lever `iced_graphics::text::Editor` exposes - and each needs a shape of its own
-to settle before the frame draws.
+on it after shaping. Corrections that count lines go through `Action::Scroll`
+and the one that restores a position goes through `scroll_by` (see the patch
+section above); either way each needs a shape of its own to settle before the
+frame draws.
 
 The two variants of `PendingView` come at the same result from opposite ends:
 
@@ -279,13 +289,25 @@ The two variants of `PendingView` come at the same result from opposite ends:
   going to chase it a second time.
 
   Because it places the cursor outright, this path can hold the margin as a
-  band: `restore_offset` scrolls whenever the cursor is nearer an edge than
-  `REVEAL_MARGIN_LINES` and holds still between the two. Firing only once the
-  cursor was fully off screen is what made a held line command stutter - the
-  caret crept onto the last visible row with nothing under it, the view sat
-  there, and then it jumped a whole margin at once when the caret finally
-  crossed. The scroll needs no clamping of its own; `Action::Scroll` already
-  stops at both ends of the document.
+  band: `restore_offset` scrolls once the cursor is nearer an edge than
+  `REVEAL_MARGIN_LINES` *and* moved that way, and holds still otherwise.
+  Firing only once the cursor was fully off screen is what made a held line
+  command stutter - the caret crept onto the last visible row with nothing
+  under it, the view sat there, and then it jumped a whole margin at once when
+  the caret finally crossed. The scroll needs no clamping of its own;
+  `Action::Scroll` already stops at both ends of the document.
+
+  Which way the cursor moved is why `PendingView::Rebuilt` carries a whole
+  `CapturedView` - the replaced `Content`'s scroll *and* its cursor row - and
+  why `Content::capture_view` is the counterpart to `restore_view`. The
+  margins say the cursor is running out of context; the row it came from says
+  which side that context is on. A cursor already off screen is placed
+  whichever way it went, having none either side.
+
+  `capture_view` returns `None` until `layout` has shaped the `Content` once
+  (`Internal::shaped`). The cursor's row comes from `editor.selection()`,
+  which panics on a line cosmic-text has not cached a layout for - and a
+  `Content` nobody has laid out has no view worth carrying across anyway.
 
 **A view that moved is not proof the cursor was chased.** Deleting lines under
 a view anchored at the end of the document clamps the scroll upwards on its

@@ -117,8 +117,22 @@ const REVEAL_MARGIN_LINES: i32 = 5;
 enum PendingView {
     /// An `Action` that edited the document in place.
     Edited { scrolled_to: f32 },
-    /// A `Content` rebuilt under the same document, by undo or redo.
-    Rebuilt { scrolled_to: f32 },
+    /// A `Content` rebuilt under the same document, by undo, redo or a line
+    /// command, carrying what the `Content` it replaces had.
+    Rebuilt(CapturedView),
+}
+
+/// Where a [`Content`] had its view and its cursor, read off before a rebuild
+/// replaces it and handed to the [`Content`] that takes its place.
+///
+/// The cursor's row travels with the scroll because a reveal needs to know
+/// which way the cursor is *going*, not just where it ended up: a line moved
+/// up has no business scrolling the view down to chase it off the bottom
+/// margin.
+#[derive(Debug, Clone, Copy)]
+pub struct CapturedView {
+    scrolled_to: f32,
+    cursor_row: f32,
 }
 
 /// Where the view sits, in lines from the top of the document, or `None` if it
@@ -189,6 +203,21 @@ fn shape_and_reveal(
         }
     };
 
+    // The restore is the one scroll that has to land between two lines: it is
+    // putting a view back, not counting lines onto it, and a view the user
+    // left half a line down owes them that half line back. `Action::Scroll`
+    // carries whole `lines: i32` and would round it away, snapping a bottom
+    // row they left cut off flush against the edge.
+    let scroll_exactly = |editor: &mut graphics::text::Editor, lines: f32| {
+        let pixels = lines * editor.buffer().metrics().line_height;
+        // The correction is absolute, so dropping a sub-pixel remainder
+        // neither drifts nor compounds - it just saves a shape.
+        if pixels.abs() >= 0.5 {
+            editor.scroll_by(pixels);
+            shape(editor);
+        }
+    };
+
     match pending {
         None => {}
         Some(PendingView::Edited { scrolled_to: before }) => {
@@ -196,16 +225,16 @@ fn shape_and_reveal(
                 scroll(editor, lines);
             }
         }
-        Some(PendingView::Rebuilt { scrolled_to: back_to }) => {
+        Some(PendingView::Rebuilt(before)) => {
             // The shape above revealed the cursor from the top of the
             // document, which is the one place the view was never at. Undoing
             // that is what makes the cursor's position mean anything.
             let Some(now) = scrolled_to(editor) else {
                 return;
             };
-            scroll(editor, (back_to - now).round() as i32);
+            scroll_exactly(editor, before.scrolled_to - now);
 
-            if let Some(lines) = restore_scroll(editor, text_bounds) {
+            if let Some(lines) = restore_scroll(editor, before, text_bounds) {
                 scroll(editor, lines);
             }
         }
@@ -266,31 +295,51 @@ fn reveal_offset(
 /// edge cosmic-text already chased it to.
 fn restore_scroll(
     editor: &graphics::text::Editor,
+    before: CapturedView,
     text_bounds: Size,
 ) -> Option<i32> {
     let line_height = editor.buffer().metrics().line_height;
+    let cursor_row = cursor_row(editor)?;
 
-    restore_offset(cursor_row(editor)?, text_bounds.height / line_height)
+    restore_offset(
+        cursor_row,
+        cursor_row - before.cursor_row,
+        text_bounds.height / line_height,
+    )
 }
 
-/// How far to scroll to bring the cursor a rebuilt view left near an edge
-/// `REVEAL_MARGIN_LINES` inside that edge, or `None` while it is already in
-/// the band between the two - a partly cut last row counting as outside.
+/// How far to scroll to put the cursor a rebuilt view left near an edge
+/// `REVEAL_MARGIN_LINES` inside that edge, or `None` to leave the view alone.
+/// `moved_by` is the rows the cursor travelled, positive downwards.
 ///
-/// Waiting for the cursor to leave the view entirely is what made a held line
-/// command stutter: the caret crept onto the last visible row with nothing
-/// beneath it, the view sat still, and then it jumped a whole margin at once
-/// when the caret finally crossed. Acting across the band keeps the same
-/// context on screen a line at a time.
-fn restore_offset(cursor_row: f32, viewport_rows: f32) -> Option<i32> {
+/// A cursor still on screen only gets a scroll in the direction it is *going*.
+/// Chasing it off whichever margin it happens to be sitting in is what made a
+/// line moved up scroll the view down, and the two rules answer different
+/// questions: the margins say the cursor is running out of context ahead of
+/// it, `moved_by` says which way "ahead" is. A cursor already off screen has
+/// no context either way and is placed whichever way it went.
+///
+/// Waiting for the cursor to leave the view entirely was the other half of
+/// that: the caret crept onto the last visible row with nothing beneath it,
+/// the view sat still, and then it jumped a whole margin at once when the
+/// caret finally crossed.
+fn restore_offset(
+    cursor_row: f32,
+    moved_by: f32,
+    viewport_rows: f32,
+) -> Option<i32> {
     let margin = affordable_margin(viewport_rows).max(0) as f32;
     let last_row = viewport_rows.floor() - 1.0;
     // Never inverts: `affordable_margin` caps at the viewport's middle.
     let bottom = (last_row - margin).max(0.0);
 
-    let target = if cursor_row < margin {
+    let target = if cursor_row < 0.0 {
         margin
-    } else if cursor_row > bottom {
+    } else if cursor_row > last_row {
+        bottom
+    } else if cursor_row < margin && moved_by < 0.0 {
+        margin
+    } else if cursor_row > bottom && moved_by > 0.0 {
         bottom
     } else {
         return None;
@@ -628,6 +677,11 @@ where
     /// chance to record where the view sat when the change was made - `layout`
     /// acts on it and takes it back to `None`.
     pending_view: Option<PendingView>,
+    /// Whether `layout` has shaped this editor even once. Nothing that reads a
+    /// laid-out position may be asked before that - cosmic-text panics on a
+    /// line whose layout it has not cached yet - which rules out the cursor's
+    /// row, and so [`Content::capture_view`].
+    shaped: bool,
 }
 
 impl<R> Content<R>
@@ -644,6 +698,7 @@ where
         Self(RefCell::new(Internal {
             editor: R::Editor::with_text(text),
             pending_view: None,
+            shaped: false,
         }))
     }
 
@@ -759,16 +814,31 @@ where
         scrolled_to(&self.0.borrow().editor)
     }
 
+    /// Where the view and the cursor sit, to hand to the [`Content`] that
+    /// replaces this one. `None` until the first layout, which is what gives
+    /// them a shaped line to measure against - and there is nothing to carry
+    /// across before then anyway, since the view has never been anywhere.
+    pub fn capture_view(&self) -> Option<CapturedView> {
+        let internal = self.0.borrow();
+        if !internal.shaped {
+            return None;
+        }
+
+        Some(CapturedView {
+            scrolled_to: scrolled_to(&internal.editor)?,
+            cursor_row: cursor_row(&internal.editor)?,
+        })
+    }
+
     /// Puts the view back where the [`Content`] this one replaces had it, then
-    /// reveals the cursor from there if the change left it off screen.
+    /// reveals the cursor from there if the change left it short of context.
     ///
-    /// For undo and redo, which rebuild the whole [`Content`] rather than edit
-    /// the document in place: a rebuilt one starts at the top of the document
-    /// with no line metrics to scroll by, so neither can happen before the
-    /// next layout has shaped it once.
-    pub fn restore_view(&mut self, scrolled_to: Option<f32>) {
-        self.0.get_mut().pending_view =
-            scrolled_to.map(|scrolled_to| PendingView::Rebuilt { scrolled_to });
+    /// For undo, redo and the line commands, which rebuild the whole
+    /// [`Content`] rather than edit the document in place: a rebuilt one
+    /// starts at the top of the document with no line metrics to scroll by,
+    /// so neither can happen before the next layout has shaped it once.
+    pub fn restore_view(&mut self, before: Option<CapturedView>) {
+        self.0.get_mut().pending_view = before.map(PendingView::Rebuilt);
     }
 }
 
@@ -991,6 +1061,7 @@ where
 
         let pending_view = internal.pending_view.take();
         shape_and_reveal(&mut internal.editor, pending_view, text_bounds, shape);
+        internal.shaped = true;
 
         match self.height {
             Length::Fill | Length::FillPortion(_) | Length::Fixed(_) => {
@@ -2065,8 +2136,14 @@ mod tests {
         line: usize,
         text: &str,
     ) -> graphics::text::Editor {
-        let pending = scrolled_to(editor)
-            .map(|scrolled_to| PendingView::Rebuilt { scrolled_to });
+        let pending = scrolled_to(editor).zip(cursor_row(editor)).map(
+            |(scrolled_to, cursor_row)| {
+                PendingView::Rebuilt(CapturedView {
+                    scrolled_to,
+                    cursor_row,
+                })
+            },
+        );
 
         let mut rebuilt = graphics::text::Editor::with_text(text);
         rebuilt.move_to(Cursor {
@@ -2250,7 +2327,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuild_with_the_cursor_on_the_last_row_scrolls_context_under_it() {
+    fn a_line_moved_down_at_the_bottom_edge_scrolls_context_under_it() {
         // What a held line command used to do: each rebuild left the cursor
         // on the last visible row with nothing beneath it, the view sitting
         // still until the cursor finally crossed the edge and it jumped.
@@ -2258,14 +2335,85 @@ mod tests {
         scroll_away(&mut editor, bounds, 100, 0);
         assert_eq!(visible_row(&editor), VIEW_ROWS as f32 - 1.0);
 
-        let view = scrolled_to(&editor).expect("a shaped view scrolls");
-        let rebuilt = rebuild(&editor, bounds, 100);
+        let rebuilt = rebuild(&editor, bounds, 101);
 
         assert_eq!(
             visible_row(&rebuilt),
             VIEW_ROWS as f32 - 1.0 - REVEALED_ROW
         );
-        assert_eq!(scrolled_to(&rebuilt), Some(view + REVEALED_ROW));
+    }
+
+    #[test]
+    fn a_line_moved_up_from_the_bottom_margin_leaves_the_view_alone() {
+        // The cursor sits in the bottom margin, but it is walking away from
+        // that edge - scrolling down to "reveal" it would drag the view the
+        // opposite way to the line the user is moving.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 2);
+        assert_eq!(visible_row(&editor), VIEW_ROWS as f32 - 3.0);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let rebuilt = rebuild(&editor, bounds, 99);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view));
+        assert_eq!(visible_row(&rebuilt), VIEW_ROWS as f32 - 4.0);
+    }
+
+    #[test]
+    fn a_line_moved_down_from_the_top_margin_leaves_the_view_alone() {
+        // The same, at the other edge.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 17);
+        assert_eq!(visible_row(&editor), 2.0);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let rebuilt = rebuild(&editor, bounds, 101);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view));
+        assert_eq!(visible_row(&rebuilt), 3.0);
+    }
+
+    #[test]
+    fn a_rebuild_keeps_a_view_that_sits_between_two_lines() {
+        let (mut editor, bounds) = document();
+        // Cursor comfortably mid-view, then half a line further down, so the
+        // bottom row is cut in half and nothing is near enough an edge to
+        // want a reveal.
+        scroll_away(&mut editor, bounds, 100, 10);
+        editor.scroll_by(LINE_HEIGHT / 2.0);
+        shape(&mut editor, bounds);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        assert_eq!(view.fract(), 0.5, "half a line in");
+
+        let rebuilt = rebuild(&editor, bounds, 100);
+
+        assert_eq!(
+            scrolled_to(&rebuilt),
+            Some(view),
+            "the restored view owes the user the exact offset, cut row and all"
+        );
+    }
+
+    #[test]
+    fn a_line_moved_up_under_a_cut_off_bottom_row_changes_nothing() {
+        // The whole report in one case: scrolled half a line down, so the
+        // bottom row is cut off, with the caret seven rows up from it -
+        // counting the cut one. Alt+Up moves the caret and nothing else.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 5);
+        editor.scroll_by(LINE_HEIGHT / 2.0);
+        shape(&mut editor, bounds);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let row = visible_row(&editor);
+        assert_eq!(view.fract(), 0.5, "the bottom row is cut in half");
+        assert_eq!(row, VIEW_ROWS as f32 - REVEALED_ROW - 1.5, "seven up");
+
+        let rebuilt = rebuild(&editor, bounds, 99);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view), "the view must hold");
+        assert_eq!(visible_row(&rebuilt), row - 1.0, "only the caret moves");
     }
 
     #[test]
@@ -2339,41 +2487,67 @@ mod tests {
         assert_eq!(reveal_offset(100.0, 140.0, 0.0, 0.0), None);
     }
 
-    #[test]
-    fn a_restored_view_places_a_cursor_it_left_off_screen() {
-        // Twenty rows of view: six from the top is row five, six from the
-        // bottom is row fourteen.
-        assert_eq!(restore_offset(-8.0, 20.0), Some(-13));
-        assert_eq!(restore_offset(25.0, 20.0), Some(11));
+    /// A view 20 rows tall - six from the top is row five, six from the
+    /// bottom is row fourteen - with the cursor come to rest on `cursor_row`
+    /// after travelling `moved_by` rows, positive downwards.
+    fn restored(cursor_row: f32, moved_by: f32) -> Option<i32> {
+        restore_offset(cursor_row, moved_by, 20.0)
     }
 
     #[test]
-    fn a_restored_view_only_stays_put_inside_the_margin_band() {
-        // Between the two margins the view has context to spare, so it holds
-        // still - it is the edges it owes the cursor a scroll.
-        assert_eq!(restore_offset(10.0, 20.0), None);
-        assert_eq!(restore_offset(0.0, 20.0), Some(-5));
-        assert_eq!(restore_offset(19.0, 20.0), Some(5));
+    fn a_restored_view_places_a_cursor_it_left_off_screen() {
+        // Off screen is off screen: there is no context to preserve either
+        // side of it, so it comes back whichever way it went.
+        assert_eq!(restored(-8.0, -30.0), Some(-13));
+        assert_eq!(restored(25.0, 30.0), Some(11));
+        assert_eq!(restored(-8.0, 30.0), Some(-13));
+        assert_eq!(restored(25.0, -30.0), Some(11));
+    }
+
+    #[test]
+    fn a_restored_view_only_scrolls_the_way_the_cursor_went() {
+        // A line moved *up* used to scroll the view *down*, purely because
+        // the cursor was sitting in the bottom margin at the time.
+        assert_eq!(restored(19.0, -1.0), None);
+        assert_eq!(restored(0.0, 1.0), None);
+        // Heading for the edge it is near, though, and the view follows.
+        assert_eq!(restored(19.0, 1.0), Some(5));
+        assert_eq!(restored(0.0, -1.0), Some(-5));
+    }
+
+    #[test]
+    fn a_restored_view_stays_put_inside_the_margin_band() {
+        // Mid-view there is context to spare, whichever way the cursor went.
+        assert_eq!(restored(10.0, 1.0), None);
+        assert_eq!(restored(10.0, -1.0), None);
         // A last row the view only half shows counts as outside.
-        assert_eq!(restore_offset(20.0, 20.4), Some(6));
+        assert_eq!(restore_offset(20.0, 1.0, 20.4), Some(6));
+    }
+
+    #[test]
+    fn a_cursor_that_did_not_move_leaves_the_view_alone() {
+        // Deleting the line under the cursor keeps the caret on its row, so
+        // there is nothing to reveal even sitting inside a margin.
+        assert_eq!(restored(17.0, 0.0), None);
+        assert_eq!(restored(2.0, 0.0), None);
     }
 
     #[test]
     fn a_cursor_just_inside_an_edge_is_pushed_into_the_band() {
         // The band itself is where the cursor is allowed to rest: one row
         // further out and the view follows it by exactly that row.
-        assert_eq!(restore_offset(5.0, 20.0), None);
-        assert_eq!(restore_offset(14.0, 20.0), None);
-        assert_eq!(restore_offset(4.0, 20.0), Some(-1));
-        assert_eq!(restore_offset(15.0, 20.0), Some(1));
+        assert_eq!(restored(5.0, -1.0), None);
+        assert_eq!(restored(14.0, 1.0), None);
+        assert_eq!(restored(4.0, -1.0), Some(-1));
+        assert_eq!(restored(15.0, 1.0), Some(1));
     }
 
     #[test]
     fn a_restored_view_too_short_for_the_margin_lands_the_cursor_inside_it() {
         // Five rows of view: the cursor comes to rest two rows in, from
         // whichever edge it was past.
-        assert_eq!(restore_offset(9.0, 5.0), Some(7));
-        assert_eq!(restore_offset(-9.0, 5.0), Some(-11));
+        assert_eq!(restore_offset(9.0, 1.0, 5.0), Some(7));
+        assert_eq!(restore_offset(-9.0, -1.0, 5.0), Some(-11));
     }
 
     #[test]

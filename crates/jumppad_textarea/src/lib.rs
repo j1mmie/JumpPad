@@ -287,9 +287,9 @@ impl TextArea {
     /// Replaces the whole document, carrying the view across - a rebuilt
     /// `Content` starts at the top. Never SelectAll+Paste (see AGENTS.md).
     fn replace_document(&mut self, text: &str) {
-        let view = self.content.scrolled_to();
+        let before = self.content.capture_view();
         self.content = Content::with_text(text);
-        self.content.restore_view(view);
+        self.content.restore_view(before);
         self.resync_source();
     }
 
