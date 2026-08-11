@@ -252,8 +252,10 @@ A change made while the cursor is off screen (scrolled away with the wheel or
 the thumb, then typed into) brings the cursor back into view with
 `REVEAL_MARGIN_LINES` of context past the edge it came in from - it lands on
 the sixth visible line, from the top or the bottom depending on which way the
-view had to move. A change that leaves the cursor visible doesn't scroll at
-all. This covers undo and redo as well as edits.
+view had to move. Typing with the cursor already visible doesn't scroll at all.
+A change that rebuilds the document - undo, redo, the line commands - treats
+that margin as a *band* instead, and scrolls whenever the cursor is inside it,
+not only once the cursor has left the view.
 
 Everything happens in `shape_and_reveal`, on the next `layout`, because that
 is where the shape happens: cosmic-text reveals a moved cursor lazily, inside
@@ -269,12 +271,21 @@ The two variants of `PendingView` come at the same result from opposite ends:
 - `Edited` - an `Action` that edited in place. cosmic-text has already chased
   the cursor, but by the bare minimum, leaving it hard against the edge, so
   `reveal_offset` only adds the margin.
-- `Rebuilt` - undo/redo, which replace `Content` wholesale (see the undo
-  history section). The fresh buffer starts at the top of the document, so the
-  first shape reveals the cursor from *there* - a view the user was never at.
-  `layout` scrolls back to where the old `Content` had it and then places the
-  cursor itself with `restore_offset`, since nothing is going to chase it a
-  second time.
+- `Rebuilt` - undo/redo and the line commands, which replace `Content`
+  wholesale (see the undo history section). The fresh buffer starts at the top
+  of the document, so the first shape reveals the cursor from *there* - a view
+  the user was never at. `layout` scrolls back to where the old `Content` had
+  it and then places the cursor itself with `restore_offset`, since nothing is
+  going to chase it a second time.
+
+  Because it places the cursor outright, this path can hold the margin as a
+  band: `restore_offset` scrolls whenever the cursor is nearer an edge than
+  `REVEAL_MARGIN_LINES` and holds still between the two. Firing only once the
+  cursor was fully off screen is what made a held line command stutter - the
+  caret crept onto the last visible row with nothing under it, the view sat
+  there, and then it jumped a whole margin at once when the caret finally
+  crossed. The scroll needs no clamping of its own; `Action::Scroll` already
+  stops at both ends of the document.
 
 **A view that moved is not proof the cursor was chased.** Deleting lines under
 a view anchored at the end of the document clamps the scroll upwards on its
