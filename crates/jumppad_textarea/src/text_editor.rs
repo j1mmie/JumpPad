@@ -273,17 +273,25 @@ fn restore_scroll(
     restore_offset(cursor_row(editor)?, text_bounds.height / line_height)
 }
 
-/// How far to scroll to bring a cursor that a rebuilt view left off screen
-/// `REVEAL_MARGIN_LINES` inside the edge it is past, or `None` while it is on
-/// screen - a partly cut last row counting as off screen.
+/// How far to scroll to bring the cursor a rebuilt view left near an edge
+/// `REVEAL_MARGIN_LINES` inside that edge, or `None` while it is already in
+/// the band between the two - a partly cut last row counting as outside.
+///
+/// Waiting for the cursor to leave the view entirely is what made a held line
+/// command stutter: the caret crept onto the last visible row with nothing
+/// beneath it, the view sat still, and then it jumped a whole margin at once
+/// when the caret finally crossed. Acting across the band keeps the same
+/// context on screen a line at a time.
 fn restore_offset(cursor_row: f32, viewport_rows: f32) -> Option<i32> {
     let margin = affordable_margin(viewport_rows).max(0) as f32;
     let last_row = viewport_rows.floor() - 1.0;
+    // Never inverts: `affordable_margin` caps at the viewport's middle.
+    let bottom = (last_row - margin).max(0.0);
 
-    let target = if cursor_row < 0.0 {
+    let target = if cursor_row < margin {
         margin
-    } else if cursor_row > last_row {
-        (last_row - margin).max(0.0)
+    } else if cursor_row > bottom {
+        bottom
     } else {
         return None;
     };
@@ -2242,6 +2250,25 @@ mod tests {
     }
 
     #[test]
+    fn a_rebuild_with_the_cursor_on_the_last_row_scrolls_context_under_it() {
+        // What a held line command used to do: each rebuild left the cursor
+        // on the last visible row with nothing beneath it, the view sitting
+        // still until the cursor finally crossed the edge and it jumped.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 0);
+        assert_eq!(visible_row(&editor), VIEW_ROWS as f32 - 1.0);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let rebuilt = rebuild(&editor, bounds, 100);
+
+        assert_eq!(
+            visible_row(&rebuilt),
+            VIEW_ROWS as f32 - 1.0 - REVEALED_ROW
+        );
+        assert_eq!(scrolled_to(&rebuilt), Some(view + REVEALED_ROW));
+    }
+
+    #[test]
     fn an_undo_that_shortens_the_document_past_the_view_still_shows_the_cursor()
     {
         let (mut editor, bounds) = document();
@@ -2321,12 +2348,24 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_view_with_the_cursor_on_screen_stays_put() {
-        assert_eq!(restore_offset(0.0, 20.0), None);
+    fn a_restored_view_only_stays_put_inside_the_margin_band() {
+        // Between the two margins the view has context to spare, so it holds
+        // still - it is the edges it owes the cursor a scroll.
         assert_eq!(restore_offset(10.0, 20.0), None);
-        assert_eq!(restore_offset(19.0, 20.0), None);
-        // A last row the view only half shows counts as off screen.
+        assert_eq!(restore_offset(0.0, 20.0), Some(-5));
+        assert_eq!(restore_offset(19.0, 20.0), Some(5));
+        // A last row the view only half shows counts as outside.
         assert_eq!(restore_offset(20.0, 20.4), Some(6));
+    }
+
+    #[test]
+    fn a_cursor_just_inside_an_edge_is_pushed_into_the_band() {
+        // The band itself is where the cursor is allowed to rest: one row
+        // further out and the view follows it by exactly that row.
+        assert_eq!(restore_offset(5.0, 20.0), None);
+        assert_eq!(restore_offset(14.0, 20.0), None);
+        assert_eq!(restore_offset(4.0, 20.0), Some(-1));
+        assert_eq!(restore_offset(15.0, 20.0), Some(1));
     }
 
     #[test]
