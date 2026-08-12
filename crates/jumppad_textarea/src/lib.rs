@@ -18,54 +18,24 @@ use editor_core::{
 use history::{CursorState, History};
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
-use iced::keyboard::{self, key};
+use jumppad_actions::Action;
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
-use text_editor::{Binding, Content, Cursor, KeyPress, Motion, Position, Status, text_editor};
+use text_editor::{Binding, Content, Cursor, Motion, Position, Status, text_editor};
 
-/// A named editor-level action a `keybinds.toml` override can target - a
-/// small, closed set: the commands this crate has custom logic for beyond
-/// iced's own stock `text_editor` defaults.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EditorCommand {
-    WordDeleteBackward,
-    WordDeleteForward,
-    DocumentStart,
-    SelectDocumentStart,
-    DocumentEnd,
-    SelectDocumentEnd,
-    Undo,
-    Redo,
-    ToggleComment,
-    DeleteLine,
-    MoveLineUp,
-    MoveLineDown,
-    CopyLineUp,
-    CopyLineDown,
-}
+/// Re-exported so the app can write the [`KeyResolver`] it hands down without
+/// naming the widget module.
+pub use text_editor::KeyPress;
 
-/// The canonical `keybinds.toml` override name for each [`EditorCommand`].
-pub const EDITOR_COMMAND_NAMES: &[(&str, EditorCommand)] = &[
-    ("word_delete_backward", EditorCommand::WordDeleteBackward),
-    ("word_delete_forward", EditorCommand::WordDeleteForward),
-    ("document_start", EditorCommand::DocumentStart),
-    ("select_document_start", EditorCommand::SelectDocumentStart),
-    ("document_end", EditorCommand::DocumentEnd),
-    ("select_document_end", EditorCommand::SelectDocumentEnd),
-    ("undo", EditorCommand::Undo),
-    ("redo", EditorCommand::Redo),
-    ("toggle_comment", EditorCommand::ToggleComment),
-    ("delete_line", EditorCommand::DeleteLine),
-    ("move_line_up", EditorCommand::MoveLineUp),
-    ("move_line_down", EditorCommand::MoveLineDown),
-    ("copy_line_up", EditorCommand::CopyLineUp),
-    ("copy_line_down", EditorCommand::CopyLineDown),
-];
-
-/// A user override's resolved chord, keyed by physical key (layout-
-/// independent) - unlike this crate's pre-existing hardcoded bindings
-/// below, which stay logical-key based.
-pub type EditorOverrides = HashMap<(keyboard::Modifiers, key::Code), EditorCommand>;
+/// Turns a key press into the [`Action`] it asks for, if any.
+///
+/// Supplied by the app rather than built here: resolving a press means
+/// knowing both the default chords (`jumppad_keybinds`) and the user's
+/// `keybinds.toml` overrides (`jumppad_config`), and this crate depends on
+/// neither - the same reason `build_editor_overrides` already lived in the
+/// app. Handing down a resolver keeps that boundary and puts
+/// override-beats-default precedence in one place instead of two.
+pub type KeyResolver = dyn Fn(&KeyPress) -> Option<Action> + Send + Sync;
 
 /// Editor settings the app can change after construction: a config reload
 /// writes here, and every open [`TextArea`] reads through a shared handle
@@ -78,19 +48,20 @@ pub struct SharedEditorConfig {
     /// `scroll_sensitivity` builder, not here.
     scroll_sensitivity: AtomicU32,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
-    /// not the whole map.
-    overrides: RwLock<Arc<EditorOverrides>>,
+    /// not the whole resolver. Swappable because a `keybinds.toml` reload
+    /// has to reach tabs that already exist.
+    resolver: RwLock<Arc<KeyResolver>>,
     /// Extension -> comment style, flattened from the config by the app.
     /// Keys are lowercase; look up lowercased.
     comment_styles: RwLock<Arc<HashMap<String, CommentStyle>>>,
 }
 
 impl SharedEditorConfig {
-    pub fn new(background_alpha: f32, overrides: EditorOverrides) -> Arc<Self> {
+    pub fn new(background_alpha: f32, resolver: Arc<KeyResolver>) -> Arc<Self> {
         Arc::new(Self {
             background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
             scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
-            overrides: RwLock::new(Arc::new(overrides)),
+            resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
         })
     }
@@ -99,8 +70,8 @@ impl SharedEditorConfig {
         f32::from_bits(self.background_alpha.load(Ordering::Relaxed))
     }
 
-    pub fn overrides(&self) -> Arc<EditorOverrides> {
-        self.overrides.read().unwrap().clone()
+    pub fn resolver(&self) -> Arc<KeyResolver> {
+        self.resolver.read().unwrap().clone()
     }
 
     pub fn set_background_alpha(&self, alpha: f32) {
@@ -126,8 +97,8 @@ impl SharedEditorConfig {
         FOREGROUND_ALPHA.store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
-    pub fn set_overrides(&self, overrides: EditorOverrides) {
-        *self.overrides.write().unwrap() = Arc::new(overrides);
+    pub fn set_resolver(&self, resolver: Arc<KeyResolver>) {
+        *self.resolver.write().unwrap() = resolver;
     }
 
     pub fn comment_styles(&self) -> Arc<HashMap<String, CommentStyle>> {
@@ -560,7 +531,7 @@ impl TextArea {
 impl TextEditorWidget for TextArea {
     fn view(&self) -> Element<'_, EditorMessage> {
         let settings = self.highlighter_settings();
-        let overrides = self.settings.overrides();
+        let resolve = self.settings.resolver();
         let background_alpha = self.settings.background_alpha();
         let foreground_alpha = foreground_alpha();
         text_editor(&self.content)
@@ -571,7 +542,7 @@ impl TextEditorWidget for TextArea {
             .scroll_sensitivity(self.settings.scroll_sensitivity())
             .style(move |theme, status| editor_style(theme, status, background_alpha, foreground_alpha))
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
-            .key_binding(move |press| key_binding(press, &overrides))
+            .key_binding(move |press| key_binding(press, resolve.as_ref()))
             .on_action(EditorMessage::Action)
             .on_scroll(EditorMessage::Scroll)
             .into()
@@ -991,125 +962,56 @@ fn word_delete_forward() -> Binding<EditorMessage> {
     Binding::Sequence(vec![Binding::Select(Motion::Right.widen()), Binding::Delete])
 }
 
-/// Constructs the `Binding` for a named [`EditorCommand`] - shared by both
-/// the user-override and hardcoded-default paths in `key_binding`.
-fn binding_for(command: EditorCommand) -> Binding<EditorMessage> {
-    match command {
-        EditorCommand::WordDeleteBackward => word_delete_backward(),
-        EditorCommand::WordDeleteForward => word_delete_forward(),
-        EditorCommand::DocumentStart => Binding::Move(Motion::DocumentStart),
-        EditorCommand::SelectDocumentStart => Binding::Select(Motion::DocumentStart),
-        EditorCommand::DocumentEnd => Binding::Move(Motion::DocumentEnd),
-        EditorCommand::SelectDocumentEnd => Binding::Select(Motion::DocumentEnd),
-        EditorCommand::Undo => Binding::Custom(EditorMessage::Undo),
-        EditorCommand::Redo => Binding::Custom(EditorMessage::Redo),
-        EditorCommand::ToggleComment => Binding::Custom(EditorMessage::ToggleComment),
-        EditorCommand::DeleteLine => Binding::Custom(EditorMessage::DeleteLine),
-        EditorCommand::MoveLineUp => Binding::Custom(EditorMessage::MoveLineUp),
-        EditorCommand::MoveLineDown => Binding::Custom(EditorMessage::MoveLineDown),
-        EditorCommand::CopyLineUp => Binding::Custom(EditorMessage::CopyLineUp),
-        EditorCommand::CopyLineDown => Binding::Custom(EditorMessage::CopyLineDown),
+/// How this crate performs an [`Action`], or `None` for one it doesn't own -
+/// every `Action::App`, which the shell handles instead.
+///
+/// `jumppad`'s wiring test asserts every action is claimed by exactly one of
+/// this and its own `message_for`, so an action added to the registry and
+/// forgotten here fails the build rather than going quiet.
+pub fn binding_for(action: Action) -> Option<Binding<EditorMessage>> {
+    let custom = |message| Some(Binding::Custom(message));
+    match action {
+        Action::WordDeleteBackward => Some(word_delete_backward()),
+        Action::WordDeleteForward => Some(word_delete_forward()),
+        Action::DocumentStart => Some(Binding::Move(Motion::DocumentStart)),
+        Action::SelectDocumentStart => {
+            Some(Binding::Select(Motion::DocumentStart))
+        }
+        Action::DocumentEnd => Some(Binding::Move(Motion::DocumentEnd)),
+        Action::SelectDocumentEnd => Some(Binding::Select(Motion::DocumentEnd)),
+        Action::Undo => custom(EditorMessage::Undo),
+        Action::Redo => custom(EditorMessage::Redo),
+        Action::ToggleComment => custom(EditorMessage::ToggleComment),
+        Action::DeleteLine => custom(EditorMessage::DeleteLine),
+        Action::MoveLineUp => custom(EditorMessage::MoveLineUp),
+        Action::MoveLineDown => custom(EditorMessage::MoveLineDown),
+        Action::CopyLineUp => custom(EditorMessage::CopyLineUp),
+        Action::CopyLineDown => custom(EditorMessage::CopyLineDown),
+        _ => None,
     }
 }
 
-/// Extends iced's default `text_editor` key bindings with the OS-standard
-/// behaviors it doesn't already cover, then falls back to
-/// [`Binding::from_key_press`] for everything else.
+/// Turns a key press into a binding.
 ///
-/// Three tiers, checked in order, first match wins:
-/// 1. `overrides` - a user's `keybinds.toml` remap, matched by physical key.
-/// 2. This crate's own hardcoded extras (word-delete, undo/redo, document start/end).
-/// 3. iced's own stock default dispatch.
-fn key_binding(press: KeyPress, overrides: &EditorOverrides) -> Option<Binding<EditorMessage>> {
+/// Two tiers, first match wins:
+/// 1. `resolve` - the app's key -> [`Action`] map, which already merges the
+///    user's `keybinds.toml` overrides over the default chords. An action
+///    this crate doesn't perform falls through rather than swallowing the
+///    press, so the shell still sees its own shortcuts.
+/// 2. iced's own stock default dispatch.
+fn key_binding(
+    press: KeyPress,
+    resolve: &KeyResolver,
+) -> Option<Binding<EditorMessage>> {
     if !matches!(press.status, Status::Focused { .. }) {
         return None;
     }
 
-    // Tier 1: user override.
-    if let key::Physical::Code(code) = press.physical_key {
-        if let Some(&command) = overrides.get(&(press.modifiers, code)) {
-            return Some(binding_for(command));
-        }
+    if let Some(binding) = resolve(&press).and_then(binding_for) {
+        return Some(binding);
     }
 
-    // Tier 2: hardcoded extras.
-    //
-    // Option+Backspace (macOS) / Ctrl+Backspace (elsewhere): delete the
-    // previous word. Option+Delete / Ctrl+Delete: delete the next word.
-    if press.modifiers.jump() {
-        match press.modified_key.as_ref() {
-            keyboard::Key::Named(key::Named::Backspace) => {
-                return Some(word_delete_backward());
-            }
-            keyboard::Key::Named(key::Named::Delete) => {
-                return Some(word_delete_forward());
-            }
-            _ => {}
-        }
-    }
-
-    // Cmd+Up/Down (Ctrl+Up/Down elsewhere): jump to document start/end;
-    // with Shift held, select instead of just moving.
-    if press.modifiers.command() {
-        let motion = match press.modified_key.as_ref() {
-            keyboard::Key::Named(key::Named::ArrowUp) => Some(Motion::DocumentStart),
-            keyboard::Key::Named(key::Named::ArrowDown) => Some(Motion::DocumentEnd),
-            _ => None,
-        };
-        if let Some(motion) = motion {
-            return Some(if press.modifiers.shift() {
-                Binding::Select(motion)
-            } else {
-                Binding::Move(motion)
-            });
-        }
-    }
-
-    // Alt+Up/Down (Option on macOS): move the covered lines; with Shift held,
-    // duplicate them in that direction instead. Alt on every platform, not
-    // `jump()` - that is Ctrl off macOS, where Ctrl+Up already means document
-    // start. Matched exactly so Cmd/Ctrl+Alt+Up still falls through to it.
-    if press.modifiers == keyboard::Modifiers::ALT
-        || press.modifiers == (keyboard::Modifiers::ALT | keyboard::Modifiers::SHIFT)
-    {
-        let duplicate = press.modifiers.shift();
-        let command = match press.modified_key.as_ref() {
-            keyboard::Key::Named(key::Named::ArrowUp) if duplicate => {
-                Some(EditorCommand::CopyLineUp)
-            }
-            keyboard::Key::Named(key::Named::ArrowUp) => Some(EditorCommand::MoveLineUp),
-            keyboard::Key::Named(key::Named::ArrowDown) if duplicate => {
-                Some(EditorCommand::CopyLineDown)
-            }
-            keyboard::Key::Named(key::Named::ArrowDown) => Some(EditorCommand::MoveLineDown),
-            _ => None,
-        };
-        if let Some(command) = command {
-            return Some(binding_for(command));
-        }
-    }
-
-    // Cmd+Z / Ctrl+Z: undo. Cmd+Shift+Z or Cmd+Y (Ctrl+Shift+Z / Ctrl+Y
-    // elsewhere): redo. iced has no undo history of its own, so these route
-    // to this crate's own `History` via `EditorMessage::Undo`/`Redo`.
-    if press.modifiers.command() {
-        if let Some(c) = press.key.to_latin(press.physical_key) {
-            match c {
-                'z' if press.modifiers.shift() => {
-                    return Some(binding_for(EditorCommand::Redo));
-                }
-                'z' => return Some(binding_for(EditorCommand::Undo)),
-                'y' => return Some(binding_for(EditorCommand::Redo)),
-                'd' => return Some(binding_for(EditorCommand::DeleteLine)),
-                // Never fires on layouts where `/` needs a modifier (German:
-                // Shift+7); a keybinds.toml override matches by physical key.
-                '/' => return Some(binding_for(EditorCommand::ToggleComment)),
-                _ => {}
-            }
-        }
-    }
-
-    // Tier 3: iced's own stock dispatch - with one correction. On macOS,
+    // Tier 2: iced's own stock dispatch - with one correction. On macOS,
     // holding Cmd doesn't suppress character production, so an
     // unrecognized Cmd+<letter> would otherwise get typed into the
     // document *and* mark the event captured, hiding it from app-level
@@ -1166,6 +1068,8 @@ pub fn scrollbar_thumb_style(theme: &Theme) -> Color {
 
 #[cfg(test)]
 mod tests {
+    use iced::keyboard::{self, key};
+
     use super::*;
 
     fn press(modifiers: keyboard::Modifiers, physical: key::Code, key: keyboard::Key) -> KeyPress {
@@ -1195,7 +1099,7 @@ mod tests {
             text,
             &registry,
             None,
-            SharedEditorConfig::new(1.0, EditorOverrides::new()),
+            SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None)),
         )
     }
 
@@ -1399,7 +1303,7 @@ mod tests {
 
     fn editor_with_style(text: &str, extension: &str, style: CommentStyle) -> TextArea {
         let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-        let settings = SharedEditorConfig::new(1.0, EditorOverrides::new());
+        let settings = SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
         settings.set_comment_styles([(extension.to_string(), style)].into());
         TextArea::new(text, &registry, Some(extension), settings)
     }
@@ -2111,226 +2015,111 @@ mod tests {
     }
 
     #[test]
-    fn binding_for_covers_every_command() {
-        assert!(matches!(
-            binding_for(EditorCommand::WordDeleteBackward),
-            Binding::Sequence(_)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::DocumentStart),
-            Binding::Move(Motion::DocumentStart)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::SelectDocumentEnd),
-            Binding::Select(Motion::DocumentEnd)
-        ));
-        assert!(matches!(binding_for(EditorCommand::Undo), Binding::Custom(EditorMessage::Undo)));
-        assert!(matches!(binding_for(EditorCommand::Redo), Binding::Custom(EditorMessage::Redo)));
-        assert!(matches!(
-            binding_for(EditorCommand::ToggleComment),
-            Binding::Custom(EditorMessage::ToggleComment)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::DeleteLine),
-            Binding::Custom(EditorMessage::DeleteLine)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::MoveLineUp),
-            Binding::Custom(EditorMessage::MoveLineUp)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::MoveLineDown),
-            Binding::Custom(EditorMessage::MoveLineDown)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::CopyLineUp),
-            Binding::Custom(EditorMessage::CopyLineUp)
-        ));
-        assert!(matches!(
-            binding_for(EditorCommand::CopyLineDown),
-            Binding::Custom(EditorMessage::CopyLineDown)
-        ));
-    }
+    fn binding_for_covers_every_editor_action() {
+        use jumppad_actions::Category;
 
-    #[test]
-    fn command_d_binds_delete_line_by_default() {
-        // CTRL stands in for `Modifiers::command()` on non-mac test runners,
-        // same as the undo/redo chord tests.
-        let event = press(
-            keyboard::Modifiers::CTRL,
-            key::Code::KeyD,
-            keyboard::Key::Character("d".into()),
-        );
-        assert!(matches!(
-            key_binding(event, &EditorOverrides::new()),
-            Some(Binding::Custom(EditorMessage::DeleteLine))
-        ));
-    }
-
-    #[test]
-    fn alt_arrows_bind_the_line_commands_by_default() {
-        // Alt on every platform, so unlike the `command()` chord tests this
-        // one asserts the real default rather than a stand-in.
-        let alt = keyboard::Modifiers::ALT;
-        let alt_shift = alt | keyboard::Modifiers::SHIFT;
-        for (modifiers, code, named) in [
-            (alt, key::Code::ArrowUp, key::Named::ArrowUp),
-            (alt, key::Code::ArrowDown, key::Named::ArrowDown),
-            (alt_shift, key::Code::ArrowUp, key::Named::ArrowUp),
-            (alt_shift, key::Code::ArrowDown, key::Named::ArrowDown),
-        ] {
-            let event = press(modifiers, code, keyboard::Key::Named(named));
-            let binding = key_binding(event, &EditorOverrides::new());
-            let expected = match (named, modifiers == alt_shift) {
-                (key::Named::ArrowUp, false) => EditorMessage::MoveLineUp,
-                (key::Named::ArrowDown, false) => EditorMessage::MoveLineDown,
-                (key::Named::ArrowUp, true) => EditorMessage::CopyLineUp,
-                _ => EditorMessage::CopyLineDown,
-            };
+        for action in Action::in_category(Category::Editor) {
             assert!(
-                matches!(binding, Some(Binding::Custom(ref message)) if
-                    std::mem::discriminant(message) == std::mem::discriminant(&expected)),
-                "{modifiers:?} + {named:?} should bind {expected:?}"
+                binding_for(action).is_some(),
+                "{action} is an editor action with no binding"
             );
         }
-    }
+        // And nothing else: an app action must fall through to the shell
+        // rather than be swallowed here.
+        for action in Action::in_category(Category::App) {
+            assert!(binding_for(action).is_none(), "{action} is not ours");
+        }
 
-    #[test]
-    fn an_alt_arrow_with_another_modifier_is_not_a_line_command() {
-        // Ctrl+Alt+Up is the document-start chord off macOS; the exact
-        // modifier match is what keeps the new Alt block from eating it.
-        let event = press(
-            keyboard::Modifiers::CTRL | keyboard::Modifiers::ALT,
-            key::Code::ArrowUp,
-            keyboard::Key::Named(key::Named::ArrowUp),
-        );
-        assert!(!matches!(
-            key_binding(event, &EditorOverrides::new()),
+        assert!(matches!(
+            binding_for(Action::WordDeleteBackward),
+            Some(Binding::Sequence(_))
+        ));
+        assert!(matches!(
+            binding_for(Action::DocumentStart),
+            Some(Binding::Move(Motion::DocumentStart))
+        ));
+        assert!(matches!(
+            binding_for(Action::SelectDocumentEnd),
+            Some(Binding::Select(Motion::DocumentEnd))
+        ));
+        assert!(matches!(
+            binding_for(Action::MoveLineUp),
             Some(Binding::Custom(EditorMessage::MoveLineUp))
         ));
     }
 
+    /// Stands in for the resolver the app supplies. Which *chords* map to
+    /// which actions is `jumppad_keybinds`' business and is tested there;
+    /// what this crate owns is turning a resolved action into a binding, so
+    /// these hand the answer over directly.
+    fn resolving(action: Option<Action>) -> impl Fn(&KeyPress) -> Option<Action> {
+        move |_| action
+    }
+
     #[test]
-    fn an_override_on_alt_up_wins_over_move_line_up() {
-        let mut overrides = EditorOverrides::new();
-        overrides.insert((keyboard::Modifiers::ALT, key::Code::ArrowUp), EditorCommand::Undo);
+    fn a_resolved_editor_action_becomes_its_binding() {
         let event = press(
             keyboard::Modifiers::ALT,
             key::Code::ArrowUp,
             keyboard::Key::Named(key::Named::ArrowUp),
         );
         assert!(matches!(
-            key_binding(event, &overrides),
-            Some(Binding::Custom(EditorMessage::Undo))
+            key_binding(event, &resolving(Some(Action::MoveLineUp))),
+            Some(Binding::Custom(EditorMessage::MoveLineUp))
         ));
     }
 
     #[test]
-    fn command_slash_binds_toggle_comment_by_default() {
-        // CTRL stands in for `Modifiers::command()` on non-mac test runners,
-        // same as the undo/redo chord tests.
+    fn a_resolved_app_action_falls_through_instead_of_being_swallowed() {
+        // `binding_for` returns `None` for an action the shell owns, and the
+        // press has to stay unclaimed so the shell still sees it.
         let event = press(
-            keyboard::Modifiers::CTRL,
-            key::Code::Slash,
-            keyboard::Key::Character("/".into()),
-        );
-        assert!(matches!(
-            key_binding(event, &EditorOverrides::new()),
-            Some(Binding::Custom(EditorMessage::ToggleComment))
-        ));
-    }
-
-    #[test]
-    fn an_override_on_command_slash_wins_over_toggle_comment() {
-        let mut overrides = EditorOverrides::new();
-        overrides.insert((keyboard::Modifiers::CTRL, key::Code::Slash), EditorCommand::Undo);
-        let event = press(
-            keyboard::Modifiers::CTRL,
-            key::Code::Slash,
-            keyboard::Key::Character("/".into()),
-        );
-        assert!(matches!(
-            key_binding(event, &overrides),
-            Some(Binding::Custom(EditorMessage::Undo))
-        ));
-    }
-
-    #[test]
-    fn override_wins_over_a_conflicting_hardcoded_default() {
-        // Ctrl+Z would otherwise hit the hardcoded default's Undo binding -
-        // override it onto Redo instead, and confirm the override wins.
-        let mut overrides = EditorOverrides::new();
-        overrides.insert(
-            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
-            EditorCommand::Redo,
-        );
-        let event = press(
-            keyboard::Modifiers::CTRL,
-            key::Code::KeyZ,
-            keyboard::Key::Character("z".into()),
-        );
-        assert!(matches!(
-            key_binding(event, &overrides),
-            Some(Binding::Custom(EditorMessage::Redo))
-        ));
-    }
-
-    #[test]
-    fn hardcoded_default_still_fires_with_no_overrides() {
-        let overrides = EditorOverrides::new();
-        let event = press(
-            keyboard::Modifiers::CTRL,
-            key::Code::KeyZ,
-            keyboard::Key::Character("z".into()),
-        );
-        assert!(matches!(
-            key_binding(event, &overrides),
-            Some(Binding::Custom(EditorMessage::Undo))
-        ));
-    }
-
-    #[test]
-    fn command_held_unrecognized_character_does_not_fall_through_to_insert() {
-        // `Modifiers::CTRL` stands in for `command()`, which resolves per-OS
-        // at compile time - same convention the Undo/Redo tests use.
-        let overrides = EditorOverrides::new();
-        let event = press_with_text(
             keyboard::Modifiers::CTRL,
             key::Code::KeyN,
             keyboard::Key::Character("n".into()),
-            Some("n"),
         );
-        assert!(key_binding(event, &overrides).is_none());
+        assert!(matches!(
+            key_binding(event, &resolving(Some(Action::NewTab))),
+            None | Some(Binding::Unfocus)
+        ));
     }
 
     #[test]
-    fn plain_character_without_command_still_inserts_normally() {
-        // Regression guard for the fix above: ordinary typing (no command
-        // modifier held) must still work.
-        let overrides = EditorOverrides::new();
+    fn an_unresolved_press_reaches_iceds_own_dispatch() {
         let event = press_with_text(
             keyboard::Modifiers::empty(),
             key::Code::KeyN,
             keyboard::Key::Character("n".into()),
             Some("n"),
         );
-        assert!(matches!(key_binding(event, &overrides), Some(Binding::Insert('n'))));
+        assert!(matches!(
+            key_binding(event, &resolving(None)),
+            Some(Binding::Insert('n'))
+        ));
     }
 
     #[test]
-    fn unfocused_status_returns_none_regardless_of_overrides() {
-        let mut overrides = EditorOverrides::new();
-        overrides.insert(
-            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
-            EditorCommand::Redo,
+    fn command_held_unrecognized_character_does_not_fall_through_to_insert() {
+        // `Modifiers::CTRL` stands in for `command()`, which resolves per-OS
+        // at compile time.
+        let event = press_with_text(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyN,
+            keyboard::Key::Character("n".into()),
+            Some("n"),
         );
+        assert!(key_binding(event, &resolving(None)).is_none());
+    }
+
+    #[test]
+    fn unfocused_status_returns_none_even_for_a_resolved_action() {
         let mut event = press(
             keyboard::Modifiers::CTRL,
             key::Code::KeyZ,
             keyboard::Key::Character("z".into()),
         );
         event.status = Status::Active;
-        assert!(key_binding(event, &overrides).is_none());
+        assert!(key_binding(event, &resolving(Some(Action::Redo))).is_none());
     }
 
     #[test]
@@ -2373,7 +2162,7 @@ mod tests {
     fn set_foreground_alpha_reaches_color_for() {
         // The only test that writes the global, restored at the end so the
         // parallel test threads never see a scaled alpha.
-        let settings = SharedEditorConfig::new(1.0, EditorOverrides::new());
+        let settings = SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
         settings.set_foreground_alpha(0.25);
         let keyword = Highlighted::Syntax(HighlightCategory::Keyword);
         let color = color_for(keyword);
@@ -2386,7 +2175,7 @@ mod tests {
 
     #[test]
     fn shared_editor_config_round_trips_its_settings() {
-        let settings = SharedEditorConfig::new(0.8, EditorOverrides::new());
+        let settings = SharedEditorConfig::new(0.8, Arc::new(|_: &KeyPress| None));
         assert_eq!(settings.background_alpha(), 0.8);
         settings.set_background_alpha(0.4);
         assert_eq!(settings.background_alpha(), 0.4);
@@ -2394,17 +2183,19 @@ mod tests {
         settings.set_background_alpha(2.0);
         assert_eq!(settings.background_alpha(), 1.0);
 
-        assert!(settings.overrides().is_empty());
-        let mut overrides = EditorOverrides::new();
-        overrides.insert(
-            (keyboard::Modifiers::CTRL, key::Code::KeyZ),
-            EditorCommand::Undo,
-        );
-        settings.set_overrides(overrides);
-        assert_eq!(
-            settings.overrides().get(&(keyboard::Modifiers::CTRL, key::Code::KeyZ)),
-            Some(&EditorCommand::Undo)
-        );
+        // The resolver is swappable so a `keybinds.toml` reload reaches tabs
+        // that already exist.
+        assert_eq!((settings.resolver())(&press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyZ,
+            keyboard::Key::Character("z".into()),
+        )), None);
+        settings.set_resolver(Arc::new(|_: &KeyPress| Some(Action::Undo)));
+        assert_eq!((settings.resolver())(&press(
+            keyboard::Modifiers::CTRL,
+            key::Code::KeyZ,
+            keyboard::Key::Character("z".into()),
+        )), Some(Action::Undo));
     }
 
     /// Builds a highlighter over `source` with `matches` already applied.

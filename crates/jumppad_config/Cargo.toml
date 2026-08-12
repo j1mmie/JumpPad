@@ -8,3 +8,4 @@ serde.workspace = true
 toml.workspace = true
 global-hotkey.workspace = true
 iced_core.workspace = true
+jumppad_actions.workspace = true

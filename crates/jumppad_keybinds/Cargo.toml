@@ -1,0 +1,11 @@
+[package]
+name = "jumppad_keybinds"
+version.workspace = true
+edition.workspace = true
+
+# One direction only: this crate knows about actions, `jumppad_actions` does
+# not know about keys. A mouse or gesture binding would be a sibling crate
+# here, not a layer on top of this one.
+[dependencies]
+jumppad_actions.workspace = true
+iced_core.workspace = true

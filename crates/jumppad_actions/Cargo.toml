@@ -1,0 +1,10 @@
+[package]
+name = "jumppad_actions"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately empty, and worth keeping that way. This crate names what the
+# product can *do*; the moment it gains a dependency on an input library,
+# actions stop being independent of how they are triggered and the split
+# between this crate and `jumppad_keybinds` stops paying for itself.
+[dependencies]

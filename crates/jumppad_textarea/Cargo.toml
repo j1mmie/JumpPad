@@ -10,4 +10,5 @@ iced = { workspace = true, features = ["advanced"] }
 # `iced`, so the types stay identical to the ones the rest of the app sees.
 iced_core.workspace = true
 editor_core.workspace = true
+jumppad_actions.workspace = true
 syntax_registry.workspace = true
