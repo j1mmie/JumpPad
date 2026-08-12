@@ -2098,7 +2098,9 @@ dependencies = [
  "env_logger",
  "global-hotkey",
  "iced",
+ "jumppad_actions",
  "jumppad_config",
+ "jumppad_keybinds",
  "jumppad_textarea",
  "log",
  "notify",
@@ -2112,13 +2114,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "jumppad_actions"
+version = "0.1.0"
+
+[[package]]
 name = "jumppad_config"
 version = "0.1.0"
 dependencies = [
  "global-hotkey",
  "iced_core",
+ "jumppad_actions",
  "serde",
  "toml",
+]
+
+[[package]]
+name = "jumppad_keybinds"
+version = "0.1.0"
+dependencies = [
+ "iced_core",
+ "jumppad_actions",
 ]
 
 [[package]]
@@ -2128,6 +2143,7 @@ dependencies = [
  "editor_core",
  "iced",
  "iced_core",
+ "jumppad_actions",
  "syntax_registry",
 ]
 

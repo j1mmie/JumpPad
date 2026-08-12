@@ -18,6 +18,8 @@ use iced::{
     Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task, Theme, Top, keyboard,
 };
 
+use jumppad_actions::{Action, Context};
+
 use crate::docwatch;
 use crate::find::FindState;
 use crate::hotkey::{self, Hotkey};
@@ -108,7 +110,7 @@ pub struct JumpPadApp {
     animation: Option<Animation>,
     visor_enabled: bool,
     previous_active_id: Option<u64>,
-    keybind_overrides: Arc<HashMap<(keyboard::Modifiers, key::Code), Message>>,
+    keybind_overrides: Arc<KeyOverrides>,
     /// The modal dialog currently being shown, if any. One field rather than
     /// one per dialog: five places gate on "is a modal up", and they must
     /// never disagree about the answer.
@@ -390,12 +392,12 @@ impl JumpPadApp {
         // No push-based wake-up needed (unlike egui's `ctx.request_repaint()`) -
         // the highlighting-poll subscription below re-checks periodically instead.
         let keybinds = jumppad_config::load_keybinds();
-        let keybind_overrides = Arc::new(build_app_overrides(&keybinds));
+        let keybind_overrides = Arc::new(build_key_overrides(&keybinds));
         warn_unrecognized_overrides(&keybinds.overrides);
 
         let editor_config = jumppad_textarea::SharedEditorConfig::new(
             config.alpha.background,
-            build_editor_overrides(&keybinds),
+            build_key_resolver(keybind_overrides.clone()),
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
@@ -1181,8 +1183,9 @@ impl JumpPadApp {
     /// rebuilt wholesale - they're small - so added, changed, and removed
     /// binds all land in one pass.
     fn apply_keybinds(&mut self, new: jumppad_config::KeybindsConfig) {
-        self.keybind_overrides = Arc::new(build_app_overrides(&new));
-        self.editor_config.set_overrides(build_editor_overrides(&new));
+        self.keybind_overrides = Arc::new(build_key_overrides(&new));
+        self.editor_config
+            .set_resolver(build_key_resolver(self.keybind_overrides.clone()));
         warn_unrecognized_overrides(&new.overrides);
 
         // Re-registered only on an actual change: dropping the old
@@ -2242,60 +2245,81 @@ impl JumpPadApp {
 }
 
 /// App-level command names a `keybinds.toml` override may target.
-pub const APP_COMMAND_NAMES: &[&str] = &[
-    "new_tab",
-    "open_file",
-    "save_file",
-    "save_file_as",
-    "close_active_tab",
-    "select_previous_tab",
-    "select_next_tab",
-    "select_previous_active_tab",
-    "find",
-    "find_next",
-    "find_previous",
-];
+/// A user's `keybinds.toml` remaps, resolved to physical key + modifiers.
+///
+/// Physical rather than logical so a remap lands on the same *place* on every
+/// layout, which is what lets a German-layout user reach a chord their layout
+/// cannot type directly.
+pub type KeyOverrides = HashMap<(keyboard::Modifiers, key::Code), Action>;
 
-/// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical
-/// key + modifiers, matching what `handle_hotkey` checks incoming presses against.
-fn build_app_overrides(
-    keybinds: &jumppad_config::KeybindsConfig,
-) -> HashMap<(keyboard::Modifiers, key::Code), Message> {
-    let resolved = keybinds.resolved_overrides();
+/// Resolves `keybinds.toml`'s overrides into a lookup keyed by physical key +
+/// modifiers. One table for both layers now that both speak `Action` - it
+/// used to be two, `build_app_overrides` and `build_editor_overrides`, each
+/// carrying its own copy of the command-name list.
+fn build_key_overrides(keybinds: &jumppad_config::KeybindsConfig) -> KeyOverrides {
     let mut map = HashMap::new();
-    for (name, message) in [
-        ("new_tab", Message::NewTab),
-        ("open_file", Message::OpenFile),
-        ("save_file", Message::SaveFile),
-        ("save_file_as", Message::SaveFileAs),
-        ("close_active_tab", Message::CloseActiveTab),
-        ("select_previous_tab", Message::SelectPreviousTab),
-        ("select_next_tab", Message::SelectNextTab),
-        ("select_previous_active_tab", Message::SelectPreviousActiveTab),
-        ("find", Message::OpenFind),
-        ("find_next", Message::FindNext),
-        ("find_previous", Message::FindPrevious),
-    ] {
-        if let Some(resolved) = resolved.get(name) {
-            map.insert((resolved.modifiers, resolved.code), message);
+    for (name, resolved) in keybinds.resolved_overrides() {
+        if let Some(action) = Action::from_name(&name) {
+            map.insert((resolved.modifiers, resolved.code), action);
         }
     }
     map
 }
 
-/// Mirror of `build_app_overrides` for editor-level commands - built here so
-/// `jumppad_textarea` doesn't need to depend on `jumppad_config`/`global_hotkey`.
-fn build_editor_overrides(
-    keybinds: &jumppad_config::KeybindsConfig,
-) -> HashMap<(keyboard::Modifiers, key::Code), jumppad_textarea::EditorCommand> {
-    let resolved = keybinds.resolved_overrides();
-    let mut map = HashMap::new();
-    for (name, command) in jumppad_textarea::EDITOR_COMMAND_NAMES {
-        if let Some(resolved) = resolved.get(*name) {
-            map.insert((resolved.modifiers, resolved.code), *command);
+/// How the shell performs an [`Action`], or `None` for one it doesn't own -
+/// every `Action::Editor`, which the text widget handles instead.
+///
+/// The other half of `jumppad_textarea::binding_for`; between them they must
+/// cover every action, which `every_action_is_wired_to_something` checks.
+fn message_for(action: Action) -> Option<Message> {
+    match action {
+        Action::NewTab => Some(Message::NewTab),
+        Action::OpenFile => Some(Message::OpenFile),
+        Action::SaveFile => Some(Message::SaveFile),
+        Action::SaveFileAs => Some(Message::SaveFileAs),
+        Action::CloseActiveTab => Some(Message::CloseActiveTab),
+        Action::SelectPreviousTab => Some(Message::SelectPreviousTab),
+        Action::SelectNextTab => Some(Message::SelectNextTab),
+        Action::SelectPreviousActiveTab => Some(Message::SelectPreviousActiveTab),
+        Action::Find => Some(Message::OpenFind),
+        Action::FindNext => Some(Message::FindNext),
+        Action::FindPrevious => Some(Message::FindPrevious),
+        _ => None,
+    }
+}
+
+/// The action a press asks for: a user override first, then the shipped
+/// default chords. Shared by the shell and the editor widget, so the two can
+/// no longer disagree about which wins.
+fn resolve_action(
+    key: &keyboard::Key,
+    physical_key: key::Physical,
+    modifiers: keyboard::Modifiers,
+    context: Context,
+    overrides: &KeyOverrides,
+) -> Option<Action> {
+    if let key::Physical::Code(code) = physical_key {
+        if let Some(&action) = overrides.get(&(modifiers, code)) {
+            if action.context() == Context::Always || action.context() == context {
+                return Some(action);
+            }
         }
     }
-    map
+    jumppad_keybinds::action_for(key, physical_key, modifiers, context)
+}
+
+/// The resolver handed to every `TextArea`, closing over the overrides of the
+/// moment. Rebuilt and re-injected on a `keybinds.toml` reload.
+fn build_key_resolver(overrides: Arc<KeyOverrides>) -> Arc<jumppad_textarea::KeyResolver> {
+    Arc::new(move |press: &jumppad_textarea::KeyPress| {
+        resolve_action(
+            &press.key,
+            press.physical_key,
+            press.modifiers,
+            Context::EditorFocused,
+            &overrides,
+        )
+    })
 }
 
 /// Logs (doesn't fail) any `keybinds.toml` override whose command name
@@ -2303,11 +2327,7 @@ fn build_editor_overrides(
 /// validation framework.
 fn warn_unrecognized_overrides(overrides: &HashMap<String, global_hotkey::hotkey::HotKey>) {
     for name in overrides.keys() {
-        let known = APP_COMMAND_NAMES.contains(&name.as_str())
-            || jumppad_textarea::EDITOR_COMMAND_NAMES
-                .iter()
-                .any(|(known_name, _)| known_name == name);
-        if !known {
+        if Action::from_name(name).is_none() {
             eprintln!(
                 "jumppad_config: keybinds.toml overrides an unrecognized command {name:?}, ignoring"
             );
@@ -2319,44 +2339,20 @@ fn handle_hotkey(
     key: keyboard::Key,
     modifiers: keyboard::Modifiers,
     physical_key: key::Physical,
-    overrides: &HashMap<(keyboard::Modifiers, key::Code), Message>,
+    overrides: &KeyOverrides,
 ) -> Option<Message> {
-    // Tier 1: user override, matched by physical key (layout-independent).
-    if let key::Physical::Code(code) = physical_key {
-        if let Some(message) = overrides.get(&(modifiers, code)) {
-            return Some(message.clone());
-        }
-    }
+    // `Context::Always`: the shell's own shortcuts, which do not require the
+    // editor to hold focus. An editor action resolved here returns `None`
+    // from `message_for` and falls through to the widget, as it always has.
+    let action = resolve_action(
+        &key,
+        physical_key,
+        modifiers,
+        Context::Always,
+        overrides,
+    )?;
 
-    // Tier 2: hardcoded shortcuts.
-    //
-    // Ctrl+Tab is the same on every OS, so this bypasses the `command()`
-    // gate below (which resolves to Cmd on macOS).
-    if modifiers.control()
-        && !modifiers.shift()
-        && !modifiers.alt()
-        && !modifiers.logo()
-        && matches!(key, keyboard::Key::Named(keyboard::key::Named::Tab))
-    {
-        return Some(Message::SelectPreviousActiveTab);
-    }
-
-    if !modifiers.command() {
-        return None;
-    }
-    match key.as_ref() {
-        keyboard::Key::Character("n") => Some(Message::NewTab),
-        keyboard::Key::Character("o") => Some(Message::OpenFile),
-        keyboard::Key::Character("s") if modifiers.shift() => Some(Message::SaveFileAs),
-        keyboard::Key::Character("s") => Some(Message::SaveFile),
-        keyboard::Key::Character("w") => Some(Message::CloseActiveTab),
-        keyboard::Key::Character("f") => Some(Message::OpenFind),
-        keyboard::Key::Character("g") if modifiers.shift() => Some(Message::FindPrevious),
-        keyboard::Key::Character("g") => Some(Message::FindNext),
-        keyboard::Key::Character("[") if modifiers.shift() => Some(Message::SelectPreviousTab),
-        keyboard::Key::Character("]") if modifiers.shift() => Some(Message::SelectNextTab),
-        _ => None,
-    }
+    message_for(action)
 }
 
 /// Line heights for the tab bar's text, absolute so the strip's height - and
@@ -3023,7 +3019,7 @@ mod tests {
             modifiers: Modifiers::default(),
             config: jumppad_config::Config::default(),
             keybinds: jumppad_config::KeybindsConfig::default(),
-            editor_config: jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
+            editor_config: jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
             window_transparent: false,
             config_watch: reload::ConfigWatch::new(),
             document_watch: docwatch::DocumentWatch::new(),
@@ -3042,7 +3038,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
+                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
             ))
         });
         let mut app = test_app(0);
@@ -3097,7 +3093,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
+                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
             ))
         });
         let mut app = test_app(0);
@@ -3132,7 +3128,7 @@ mod tests {
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, HashMap::new()),
+                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
             ))
         });
         let mut app = test_app(0);
@@ -3564,7 +3560,7 @@ mod tests {
         assert_eq!(app.active, 0);
     }
 
-    fn no_overrides() -> HashMap<(Modifiers, key::Code), Message> {
+    fn no_overrides() -> KeyOverrides {
         HashMap::new()
     }
 
@@ -3613,10 +3609,45 @@ mod tests {
     }
 
     #[test]
+    fn every_action_is_wired_to_exactly_one_layer() {
+        // The composition root is the only place that can see both mappers,
+        // so this is the only place the question can be asked. An action
+        // added to the registry and wired to nothing fails here rather than
+        // going quiet at runtime.
+        for action in jumppad_actions::Action::ALL {
+            let shell = message_for(*action).is_some();
+            let editor = jumppad_textarea::binding_for(*action).is_some();
+            assert!(
+                shell != editor,
+                "{action} is handled by {}",
+                match (shell, editor) {
+                    (true, true) => "both layers",
+                    _ => "neither layer",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_category_matches_the_layer_that_performs_it() {
+        use jumppad_actions::Category;
+
+        for action in jumppad_actions::Action::ALL {
+            let expected = match action.category() {
+                Category::App => message_for(*action).is_some(),
+                Category::Editor => {
+                    jumppad_textarea::binding_for(*action).is_some()
+                }
+            };
+            assert!(expected, "{action} is filed under the wrong category");
+        }
+    }
+
+    #[test]
     fn override_wins_over_a_conflicting_hardcoded_default() {
         // Ctrl+N normally binds NewTab (tier 2) - override it to OpenFile.
         let mut overrides = HashMap::new();
-        overrides.insert((Modifiers::CTRL, key::Code::KeyN), Message::OpenFile);
+        overrides.insert((Modifiers::CTRL, key::Code::KeyN), Action::OpenFile);
         assert!(matches!(
             handle_hotkey(
                 Key::Character("n".into()),
@@ -3629,7 +3660,7 @@ mod tests {
     }
 
     #[test]
-    fn build_app_overrides_ignores_unrecognized_command_name() {
+    fn build_key_overrides_ignores_unrecognized_command_name() {
         let mut keybinds = jumppad_config::KeybindsConfig::default();
         keybinds.overrides.insert(
             "frobnicate".to_string(),
@@ -3638,11 +3669,11 @@ mod tests {
                 global_hotkey::hotkey::Code::KeyN,
             ),
         );
-        assert!(build_app_overrides(&keybinds).is_empty());
+        assert!(build_key_overrides(&keybinds).is_empty());
     }
 
     #[test]
-    fn build_editor_overrides_resolves_the_line_command_names() {
+    fn build_key_overrides_resolves_the_line_command_names() {
         // The one check that the new snake_case names survive the
         // `global_hotkey` -> iced conversion, arrow codes included.
         let keybinds: jumppad_config::KeybindsConfig = toml::from_str(
@@ -3656,21 +3687,21 @@ mod tests {
             "#,
         )
         .unwrap();
-        let overrides = build_editor_overrides(&keybinds);
+        let overrides = build_key_overrides(&keybinds);
         assert_eq!(
             overrides.get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::KeyK)),
-            Some(&jumppad_textarea::EditorCommand::DeleteLine)
+            Some(&Action::DeleteLine)
         );
         assert_eq!(
             overrides.get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::ArrowUp)),
-            Some(&jumppad_textarea::EditorCommand::MoveLineUp)
+            Some(&Action::MoveLineUp)
         );
         assert_eq!(
             overrides.get(&(
                 Modifiers::CTRL | Modifiers::SHIFT | Modifiers::ALT,
                 key::Code::ArrowDown
             )),
-            Some(&jumppad_textarea::EditorCommand::CopyLineDown)
+            Some(&Action::CopyLineDown)
         );
     }
 
@@ -3699,18 +3730,41 @@ mod tests {
             ),
             Some(Message::NewTab)
         ));
-        // Editor level: the shared handle every open tab reads was updated.
+        // Editor level: the resolver every open tab reads was replaced.
+        let resolved = |app: &JumpPadApp, modifiers, code, key| {
+            (app.editor_config.resolver())(&jumppad_textarea::KeyPress {
+                key,
+                modified_key: Key::Character("z".into()),
+                physical_key: key::Physical::Code(code),
+                modifiers,
+                text: None,
+                status: jumppad_textarea::text_editor::Status::Focused {
+                    is_hovered: false,
+                },
+            })
+        };
         assert_eq!(
-            app.editor_config
-                .overrides()
-                .get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::KeyZ)),
-            Some(&jumppad_textarea::EditorCommand::Undo)
+            resolved(
+                &app,
+                Modifiers::CTRL | Modifiers::ALT,
+                key::Code::KeyZ,
+                Key::Character("z".into())
+            ),
+            Some(Action::Undo)
         );
 
         // A revert to defaults removes the binds just as live.
         app.apply_keybinds(jumppad_config::KeybindsConfig::default());
         assert!(app.keybind_overrides.is_empty());
-        assert!(app.editor_config.overrides().is_empty());
+        assert_eq!(
+            resolved(
+                &app,
+                Modifiers::CTRL | Modifiers::ALT,
+                key::Code::KeyZ,
+                Key::Character("z".into())
+            ),
+            None
+        );
     }
 
     #[test]

@@ -37,12 +37,15 @@ crates/
   jumppad_textarea/  the one TextEditorWidget impl today; owns a fork of iced's text_editor
   syntax_registry/   loads/caches/refcounts tree-sitter WASM grammars; no iced dependency
   jumppad_config/    config.toml loading + defaults; no iced dependency
+  jumppad_actions/   every action the product can perform; NO dependencies at all
+  jumppad_keybinds/  default key chords, mapping presses onto actions
 syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
 ```
 
 Dependency direction is one-way: `jumppad` depends on everything;
-`editor_core`, `syntax_registry`, and `jumppad_config` depend on nothing
-inside this workspace. `jumppad_textarea` depends on `editor_core` (to
+`editor_core`, `syntax_registry`, and `jumppad_actions` depend on nothing
+inside this workspace (`jumppad_config` depends only on `jumppad_actions`,
+to validate override names). `jumppad_textarea` depends on `editor_core` (to
 implement its trait) and `syntax_registry` (to drive highlighting), but
 not on `jumppad`. This is deliberate - see `editor_core::widget::TextEditorWidget`'s
 doc comment: a future non-iced editor widget should be a new crate
@@ -52,6 +55,62 @@ implementing that trait, not a rewrite of `jumppad`.
 `darkening_wash` and `FLOATING_SURFACE_DARKEN` (see the transparent-windows
 section). It's the only crate `jumppad` and `jumppad_textarea` share, so a
 color both of them paint with lives there rather than being copied.
+
+## Actions and keybindings
+
+**An action is what the product can do; a key is one way to ask for it.**
+Those are two crates, and the arrow between them points one way:
+
+```
+jumppad_actions      no dependencies at all - not even iced
+        ^
+jumppad_keybinds     + iced_core
+        ^
+     jumppad         the only consumer of jumppad_keybinds
+```
+
+`jumppad_keybinds` knows about actions; `jumppad_actions` must never learn
+about keys. That is what lets a mouse or gesture binding arrive later as a
+sibling crate rather than a rewrite - it would map its own input onto the same
+`Action`. The day `jumppad_actions` gains an input dependency, that stops
+being true.
+
+**Adding an action is one row in `actions!`, plus one arm wherever it is
+performed.** The macro generates the `Action` enum, the `ACTIONS` table and
+`Action::ALL` from a single list, so they cannot drift. Then:
+
+- a default chord in `DEFAULT_KEYS` (`jumppad_keybinds`), if it wants one -
+  an action with no default is still bindable in `keybinds.toml`;
+- an arm in `jumppad_textarea::binding_for` *or* `jumppad`'s `message_for`,
+  never both. `every_action_is_wired_to_exactly_one_layer` fails the build
+  otherwise, and `sample_keybinds_document_every_action` fails until the name
+  is documented in `config/keybinds.sample.toml`.
+
+**`jumppad_textarea` depends on `jumppad_actions` only, never on
+`jumppad_keybinds`.** Resolving a press needs both the default chords and the
+user's overrides, and the widget crate has no business seeing either - the
+same reason `build_editor_overrides` always lived in the app. So the app
+builds a `KeyResolver` closure and injects it through `SharedEditorConfig`,
+the rail a `keybinds.toml` reload already used. Override-beats-default
+precedence therefore exists in exactly one place, `resolve_action`; it used
+to be written out twice, once per layer, which is the kind of duplication
+that eventually disagrees with itself.
+
+**Default chords match the character your layout produces; overrides match
+the physical key.** Deliberate, and the reason `keybinds.sample.toml` tells
+German-layout users to override `toggle_comment` - their layout cannot type
+an unshifted `/`, but the physical key is still there. `Trigger::Latin` goes
+through `Key::to_latin`, which falls back to the physical key for letters and
+digits, so Cmd+Z survives a Cyrillic layout; punctuation has no such fallback.
+
+**Modifier matching is exact.** `Mods::matches` accounts for every modifier,
+held or not. The `if` chains this replaced tested only what they cared about,
+so Cmd+Alt+N opened a tab as readily as Cmd+N, and rows had to be ordered -
+`Character("s") if shift` above plain `Character("s")`. Exactness makes
+`DEFAULT_KEYS` order-independent. `command` and `jump` in a `Mods` are
+platform *roles* (Cmd/Ctrl and Option/Ctrl); `control` is literal Ctrl, which
+is what Ctrl+Tab needs and why it used to have to dodge the `command()` gate
+by hand.
 
 ## The `TextEditorWidget` boundary
 
