@@ -45,7 +45,10 @@ impl Mods {
     pub const CONTROL: Self = Self { control: true, ..Self::new() };
     pub const JUMP: Self = Self { jump: true, ..Self::new() };
     pub const ALT: Self = Self { alt: true, ..Self::new() };
-    pub const ALT_SHIFT: Self = Self { alt: true, shift: true, ..Self::new() };
+    /// Cmd+Opt on macOS, Ctrl+Alt elsewhere - `command` is the platform
+    /// accelerator, `alt` is the literal Option/Alt key on both.
+    pub const COMMAND_ALT: Self =
+        Self { command: true, alt: true, ..Self::new() };
 
     /// The concrete modifier mask this spec means on the platform in hand.
     pub fn mask(self) -> Modifiers {
@@ -196,11 +199,11 @@ pub const DEFAULT_KEYS: &[(Action, &[Chord])] = &[
     ),
     (
         Action::CopyLineUp,
-        &[named(Mods::ALT_SHIFT, key::Named::ArrowUp)],
+        &[named(Mods::COMMAND_ALT, key::Named::ArrowUp)],
     ),
     (
         Action::CopyLineDown,
-        &[named(Mods::ALT_SHIFT, key::Named::ArrowDown)],
+        &[named(Mods::COMMAND_ALT, key::Named::ArrowDown)],
     ),
 ];
 
@@ -291,7 +294,8 @@ mod tests {
     #[test]
     fn the_line_commands_keep_their_chords() {
         let alt = Modifiers::ALT;
-        let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
+        // Cmd+Opt on macOS, Ctrl+Alt elsewhere.
+        let copy = Mods::COMMAND_ALT.mask();
         let up = Key::Named(key::Named::ArrowUp);
         let down = Key::Named(key::Named::ArrowDown);
 
@@ -304,11 +308,11 @@ mod tests {
             Some(Action::MoveLineDown)
         );
         assert_eq!(
-            press(up, key::Code::ArrowUp, alt_shift),
+            press(up, key::Code::ArrowUp, copy),
             Some(Action::CopyLineUp)
         );
         assert_eq!(
-            press(down, key::Code::ArrowDown, alt_shift),
+            press(down, key::Code::ArrowDown, copy),
             Some(Action::CopyLineDown)
         );
     }
@@ -484,16 +488,33 @@ mod tests {
     }
 
     #[test]
-    fn an_alt_arrow_with_another_modifier_is_not_a_line_command() {
-        // Ctrl+Alt+Up is the document-start chord off macOS; exact modifier
-        // matching is what keeps the line commands from eating it.
-        assert_ne!(
+    fn a_bare_alt_arrow_and_a_copy_arrow_stay_apart() {
+        // Move and duplicate differ only by the accelerator, so exact
+        // modifier matching is the whole of what keeps them apart.
+        assert_eq!(
             press(
                 Key::Named(key::Named::ArrowUp),
                 key::Code::ArrowUp,
-                Modifiers::CTRL | Modifiers::ALT
+                Modifiers::ALT
             ),
             Some(Action::MoveLineUp)
+        );
+        assert_eq!(
+            press(
+                Key::Named(key::Named::ArrowUp),
+                key::Code::ArrowUp,
+                Mods::COMMAND_ALT.mask()
+            ),
+            Some(Action::CopyLineUp)
+        );
+        // And the old chord is now unbound rather than quietly still working.
+        assert_eq!(
+            press(
+                Key::Named(key::Named::ArrowUp),
+                key::Code::ArrowUp,
+                Modifiers::ALT | Modifiers::SHIFT
+            ),
+            None
         );
     }
 
