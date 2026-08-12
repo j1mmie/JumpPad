@@ -117,9 +117,37 @@ const REVEAL_MARGIN_LINES: i32 = 5;
 enum PendingView {
     /// An `Action` that edited the document in place.
     Edited { scrolled_to: f32 },
-    /// A `Content` rebuilt under the same document, by undo or redo.
-    Rebuilt { scrolled_to: f32 },
+    /// A line command, spliced in place. The buffer keeps its own scroll, so
+    /// unlike `Rebuilt` there is no view to put back - only the margin to
+    /// honour. All it carries is the *logical* line the caret started on:
+    /// the margins are measured against the caret's row as the next shape
+    /// finds it, and the only thing the past is needed for is which way the
+    /// caret went. Lines answer that exactly, where rows would not - a
+    /// wrapped line moves the caret three rows for one line of travel.
+    Spliced { caret_line: usize },
+    /// A `Content` rebuilt under the same document, by undo, redo or a line
+    /// command, carrying what the `Content` it replaces had.
+    Rebuilt(CapturedView),
 }
+
+/// Where a [`Content`] had its view and its cursor, read off before a rebuild
+/// replaces it and handed to the [`Content`] that takes its place.
+///
+/// The view is the buffer's own `Scroll` - a logical line and the pixels into
+/// it - rather than the single number [`Content::scrolled_to`] reports. That
+/// number adds the two together, which is fine for the scrollbar but cannot be
+/// scrolled *back* to: see `restore_pixels`.
+///
+/// The cursor's row travels with them because a reveal needs to know which way
+/// the cursor is *going*, not just where it ended up: a line moved up has no
+/// business scrolling the view down to chase it off the bottom margin.
+#[derive(Debug, Clone, Copy)]
+pub struct CapturedView {
+    scroll_line: usize,
+    scroll_vertical: f32,
+    cursor_row: f32,
+}
+
 
 /// Where the view sits, in lines from the top of the document, or `None` if it
 /// has no line height to measure against yet. Fractional: `scroll.vertical` is
@@ -189,6 +217,20 @@ fn shape_and_reveal(
         }
     };
 
+    // The restore is the one scroll that has to land between two lines: it is
+    // putting a view back, not counting lines onto it, and a view the user
+    // left half a line down owes them that half line back. `Action::Scroll`
+    // carries whole `lines: i32` and would round it away, snapping a bottom
+    // row they left cut off flush against the edge.
+    let scroll_exactly = |editor: &mut graphics::text::Editor, pixels: f32| {
+        // The correction is absolute, so dropping a sub-pixel remainder
+        // neither drifts nor compounds - it just saves a shape.
+        if pixels.abs() >= 0.5 {
+            editor.scroll_by(pixels);
+            shape(editor);
+        }
+    };
+
     match pending {
         None => {}
         Some(PendingView::Edited { scrolled_to: before }) => {
@@ -196,20 +238,77 @@ fn shape_and_reveal(
                 scroll(editor, lines);
             }
         }
-        Some(PendingView::Rebuilt { scrolled_to: back_to }) => {
+        Some(PendingView::Spliced { caret_line }) => {
+            // Nothing to put back: the splice never threw the view away. The
+            // caret may have walked into a margin, though, and cosmic-text
+            // only ever chases it as far as the bare edge.
+            let Some(row) = cursor_row(editor) else {
+                return;
+            };
+            let moved_by =
+                editor.cursor().position.line as f32 - caret_line as f32;
+            let line_height = editor.buffer().metrics().line_height;
+
+            if let Some(lines) =
+                restore_offset(row, moved_by, text_bounds.height / line_height)
+            {
+                scroll(editor, lines);
+            }
+        }
+        Some(PendingView::Rebuilt(before)) => {
             // The shape above revealed the cursor from the top of the
             // document, which is the one place the view was never at. Undoing
             // that is what makes the cursor's position mean anything.
-            let Some(now) = scrolled_to(editor) else {
-                return;
-            };
-            scroll(editor, (back_to - now).round() as i32);
+            scroll_exactly(editor, restore_pixels(editor, before));
 
-            if let Some(lines) = restore_scroll(editor, text_bounds) {
+            if let Some(lines) = restore_scroll(editor, before, text_bounds) {
                 scroll(editor, lines);
             }
         }
     }
+}
+
+/// The pixels from where the view sits now back to where `before` had it.
+///
+/// A pixel scroll moves in *visual* rows; a buffer scroll names a *logical*
+/// line. The two come apart the moment a line wraps - which the widget does by
+/// default (`Wrapping::default()` is `Word`, and nothing overrides it) - so
+/// subtracting one `scrolled_to` from another and calling the difference
+/// pixels lands the view somewhere it was never asked to go. That is what used
+/// to yank the view on every line command in a document with a long line in
+/// it: the restore missed, which left the cursor below the bottom margin, and
+/// the reveal below then "corrected" it onto the margin row.
+///
+/// So the gap is measured in rows that have actually been laid out. It spans
+/// the handful of lines between a fresh buffer's reveal and the view it is
+/// going back to, all of them in or beside the view and so already shaped.
+/// This is *not* the whole-document row count the scrollbar deliberately
+/// avoids (see its section in AGENTS.md): it is bounded, local, and runs once
+/// per rebuild rather than every frame. A line cosmic-text has not shaped
+/// falls back to counting logical lines, which is exact for a document that
+/// does not wrap and only reachable when the cursor moved further than a
+/// viewport - where the reveal is about to take over anyway.
+fn restore_pixels(
+    editor: &graphics::text::Editor,
+    before: CapturedView,
+) -> f32 {
+    let buffer = editor.buffer();
+    let now = buffer.scroll();
+
+    let rows = (now.line.min(before.scroll_line)
+        ..now.line.max(before.scroll_line))
+        .try_fold(0.0f32, |rows, line| {
+            Some(rows + buffer.lines.get(line)?.layout_opt()?.len() as f32)
+        });
+
+    let lines = match rows {
+        Some(rows) if before.scroll_line >= now.line => rows,
+        Some(rows) => -rows,
+        None => before.scroll_line as f32 - now.line as f32,
+    };
+
+    lines * buffer.metrics().line_height + before.scroll_vertical
+        - now.vertical
 }
 
 /// The scroll an edit still owes the view, in lines, measured against where
@@ -266,31 +365,51 @@ fn reveal_offset(
 /// edge cosmic-text already chased it to.
 fn restore_scroll(
     editor: &graphics::text::Editor,
+    before: CapturedView,
     text_bounds: Size,
 ) -> Option<i32> {
     let line_height = editor.buffer().metrics().line_height;
+    let cursor_row = cursor_row(editor)?;
 
-    restore_offset(cursor_row(editor)?, text_bounds.height / line_height)
+    restore_offset(
+        cursor_row,
+        cursor_row - before.cursor_row,
+        text_bounds.height / line_height,
+    )
 }
 
-/// How far to scroll to bring the cursor a rebuilt view left near an edge
-/// `REVEAL_MARGIN_LINES` inside that edge, or `None` while it is already in
-/// the band between the two - a partly cut last row counting as outside.
+/// How far to scroll to put the cursor a rebuilt view left near an edge
+/// `REVEAL_MARGIN_LINES` inside that edge, or `None` to leave the view alone.
+/// `moved_by` is the rows the cursor travelled, positive downwards.
 ///
-/// Waiting for the cursor to leave the view entirely is what made a held line
-/// command stutter: the caret crept onto the last visible row with nothing
-/// beneath it, the view sat still, and then it jumped a whole margin at once
-/// when the caret finally crossed. Acting across the band keeps the same
-/// context on screen a line at a time.
-fn restore_offset(cursor_row: f32, viewport_rows: f32) -> Option<i32> {
+/// A cursor still on screen only gets a scroll in the direction it is *going*.
+/// Chasing it off whichever margin it happens to be sitting in is what made a
+/// line moved up scroll the view down, and the two rules answer different
+/// questions: the margins say the cursor is running out of context ahead of
+/// it, `moved_by` says which way "ahead" is. A cursor already off screen has
+/// no context either way and is placed whichever way it went.
+///
+/// Waiting for the cursor to leave the view entirely was the other half of
+/// that: the caret crept onto the last visible row with nothing beneath it,
+/// the view sat still, and then it jumped a whole margin at once when the
+/// caret finally crossed.
+fn restore_offset(
+    cursor_row: f32,
+    moved_by: f32,
+    viewport_rows: f32,
+) -> Option<i32> {
     let margin = affordable_margin(viewport_rows).max(0) as f32;
     let last_row = viewport_rows.floor() - 1.0;
     // Never inverts: `affordable_margin` caps at the viewport's middle.
     let bottom = (last_row - margin).max(0.0);
 
-    let target = if cursor_row < margin {
+    let target = if cursor_row < 0.0 {
         margin
-    } else if cursor_row > bottom {
+    } else if cursor_row > last_row {
+        bottom
+    } else if cursor_row < margin && moved_by < 0.0 {
+        margin
+    } else if cursor_row > bottom && moved_by > 0.0 {
         bottom
     } else {
         return None;
@@ -628,6 +747,11 @@ where
     /// chance to record where the view sat when the change was made - `layout`
     /// acts on it and takes it back to `None`.
     pending_view: Option<PendingView>,
+    /// Whether `layout` has shaped this editor even once. Nothing that reads a
+    /// laid-out position may be asked before that - cosmic-text panics on a
+    /// line whose layout it has not cached yet - which rules out the cursor's
+    /// row, and so [`Content::capture_view`].
+    shaped: bool,
 }
 
 impl<R> Content<R>
@@ -644,6 +768,7 @@ where
         Self(RefCell::new(Internal {
             editor: R::Editor::with_text(text),
             pending_view: None,
+            shaped: false,
         }))
     }
 
@@ -759,16 +884,54 @@ where
         scrolled_to(&self.0.borrow().editor)
     }
 
-    /// Puts the view back where the [`Content`] this one replaces had it, then
-    /// reveals the cursor from there if the change left it off screen.
+    /// The logical line the caret is on, to hand back to
+    /// [`reveal_caret_from`] once a line command has finished moving it.
     ///
-    /// For undo and redo, which rebuild the whole [`Content`] rather than edit
-    /// the document in place: a rebuilt one starts at the top of the document
-    /// with no line metrics to scroll by, so neither can happen before the
-    /// next layout has shaped it once.
-    pub fn restore_view(&mut self, scrolled_to: Option<f32>) {
+    /// [`reveal_caret_from`]: Self::reveal_caret_from
+    pub fn caret_line(&self) -> usize {
+        self.0.borrow().editor.cursor().position.line
+    }
+
+    /// Asks the next shape to keep the caret `REVEAL_MARGIN_LINES` clear of
+    /// the edge it is heading for, given where it started.
+    ///
+    /// For the line commands, which splice in place and so keep the buffer's
+    /// own scroll - there is no view to restore, only a margin to honour.
+    /// Call it *after* the caret has been put where the command leaves it:
+    /// this is the record the next `layout` reads, and it measures the caret
+    /// as it finds it.
+    pub fn reveal_caret_from(&mut self, caret_line: usize) {
         self.0.get_mut().pending_view =
-            scrolled_to.map(|scrolled_to| PendingView::Rebuilt { scrolled_to });
+            Some(PendingView::Spliced { caret_line });
+    }
+
+    /// Where the view and the cursor sit, to hand to the [`Content`] that
+    /// replaces this one. `None` until the first layout, which is what gives
+    /// them a shaped line to measure against - and there is nothing to carry
+    /// across before then anyway, since the view has never been anywhere.
+    pub fn capture_view(&self) -> Option<CapturedView> {
+        let internal = self.0.borrow();
+        if !internal.shaped {
+            return None;
+        }
+        let scroll = internal.editor.buffer().scroll();
+
+        Some(CapturedView {
+            scroll_line: scroll.line,
+            scroll_vertical: scroll.vertical,
+            cursor_row: cursor_row(&internal.editor)?,
+        })
+    }
+
+    /// Puts the view back where the [`Content`] this one replaces had it, then
+    /// reveals the cursor from there if the change left it short of context.
+    ///
+    /// For undo, redo and the line commands, which rebuild the whole
+    /// [`Content`] rather than edit the document in place: a rebuilt one
+    /// starts at the top of the document with no line metrics to scroll by,
+    /// so neither can happen before the next layout has shaped it once.
+    pub fn restore_view(&mut self, before: Option<CapturedView>) {
+        self.0.get_mut().pending_view = before.map(PendingView::Rebuilt);
     }
 }
 
@@ -991,6 +1154,7 @@ where
 
         let pending_view = internal.pending_view.take();
         shape_and_reveal(&mut internal.editor, pending_view, text_bounds, shape);
+        internal.shaped = true;
 
         match self.height {
             Length::Fill | Length::FillPortion(_) | Length::Fixed(_) => {
@@ -2065,8 +2229,7 @@ mod tests {
         line: usize,
         text: &str,
     ) -> graphics::text::Editor {
-        let pending = scrolled_to(editor)
-            .map(|scrolled_to| PendingView::Rebuilt { scrolled_to });
+        let pending = captured(editor).map(PendingView::Rebuilt);
 
         let mut rebuilt = graphics::text::Editor::with_text(text);
         rebuilt.move_to(Cursor {
@@ -2078,6 +2241,18 @@ mod tests {
         });
 
         rebuilt
+    }
+
+    /// What `Content::capture_view` reads off a `Content` about to be
+    /// replaced, straight from the editor the harness drives by hand.
+    fn captured(editor: &graphics::text::Editor) -> Option<CapturedView> {
+        let scroll = editor.buffer().scroll();
+
+        Some(CapturedView {
+            scroll_line: scroll.line,
+            scroll_vertical: scroll.vertical,
+            cursor_row: cursor_row(editor)?,
+        })
     }
 
     /// Puts the cursor on `line`, then scrolls the view `lines` away from it.
@@ -2250,7 +2425,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rebuild_with_the_cursor_on_the_last_row_scrolls_context_under_it() {
+    fn a_line_moved_down_at_the_bottom_edge_scrolls_context_under_it() {
         // What a held line command used to do: each rebuild left the cursor
         // on the last visible row with nothing beneath it, the view sitting
         // still until the cursor finally crossed the edge and it jumped.
@@ -2258,14 +2433,85 @@ mod tests {
         scroll_away(&mut editor, bounds, 100, 0);
         assert_eq!(visible_row(&editor), VIEW_ROWS as f32 - 1.0);
 
-        let view = scrolled_to(&editor).expect("a shaped view scrolls");
-        let rebuilt = rebuild(&editor, bounds, 100);
+        let rebuilt = rebuild(&editor, bounds, 101);
 
         assert_eq!(
             visible_row(&rebuilt),
             VIEW_ROWS as f32 - 1.0 - REVEALED_ROW
         );
-        assert_eq!(scrolled_to(&rebuilt), Some(view + REVEALED_ROW));
+    }
+
+    #[test]
+    fn a_line_moved_up_from_the_bottom_margin_leaves_the_view_alone() {
+        // The cursor sits in the bottom margin, but it is walking away from
+        // that edge - scrolling down to "reveal" it would drag the view the
+        // opposite way to the line the user is moving.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 2);
+        assert_eq!(visible_row(&editor), VIEW_ROWS as f32 - 3.0);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let rebuilt = rebuild(&editor, bounds, 99);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view));
+        assert_eq!(visible_row(&rebuilt), VIEW_ROWS as f32 - 4.0);
+    }
+
+    #[test]
+    fn a_line_moved_down_from_the_top_margin_leaves_the_view_alone() {
+        // The same, at the other edge.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 17);
+        assert_eq!(visible_row(&editor), 2.0);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let rebuilt = rebuild(&editor, bounds, 101);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view));
+        assert_eq!(visible_row(&rebuilt), 3.0);
+    }
+
+    #[test]
+    fn a_rebuild_keeps_a_view_that_sits_between_two_lines() {
+        let (mut editor, bounds) = document();
+        // Cursor comfortably mid-view, then half a line further down, so the
+        // bottom row is cut in half and nothing is near enough an edge to
+        // want a reveal.
+        scroll_away(&mut editor, bounds, 100, 10);
+        editor.scroll_by(LINE_HEIGHT / 2.0);
+        shape(&mut editor, bounds);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        assert_eq!(view.fract(), 0.5, "half a line in");
+
+        let rebuilt = rebuild(&editor, bounds, 100);
+
+        assert_eq!(
+            scrolled_to(&rebuilt),
+            Some(view),
+            "the restored view owes the user the exact offset, cut row and all"
+        );
+    }
+
+    #[test]
+    fn a_line_moved_up_under_a_cut_off_bottom_row_changes_nothing() {
+        // The whole report in one case: scrolled half a line down, so the
+        // bottom row is cut off, with the caret seven rows up from it -
+        // counting the cut one. Alt+Up moves the caret and nothing else.
+        let (mut editor, bounds) = document();
+        scroll_away(&mut editor, bounds, 100, 5);
+        editor.scroll_by(LINE_HEIGHT / 2.0);
+        shape(&mut editor, bounds);
+
+        let view = scrolled_to(&editor).expect("a shaped view scrolls");
+        let row = visible_row(&editor);
+        assert_eq!(view.fract(), 0.5, "the bottom row is cut in half");
+        assert_eq!(row, VIEW_ROWS as f32 - REVEALED_ROW - 1.5, "seven up");
+
+        let rebuilt = rebuild(&editor, bounds, 99);
+
+        assert_eq!(scrolled_to(&rebuilt), Some(view), "the view must hold");
+        assert_eq!(visible_row(&rebuilt), row - 1.0, "only the caret moves");
     }
 
     #[test]
@@ -2339,41 +2585,67 @@ mod tests {
         assert_eq!(reveal_offset(100.0, 140.0, 0.0, 0.0), None);
     }
 
-    #[test]
-    fn a_restored_view_places_a_cursor_it_left_off_screen() {
-        // Twenty rows of view: six from the top is row five, six from the
-        // bottom is row fourteen.
-        assert_eq!(restore_offset(-8.0, 20.0), Some(-13));
-        assert_eq!(restore_offset(25.0, 20.0), Some(11));
+    /// A view 20 rows tall - six from the top is row five, six from the
+    /// bottom is row fourteen - with the cursor come to rest on `cursor_row`
+    /// after travelling `moved_by` rows, positive downwards.
+    fn restored(cursor_row: f32, moved_by: f32) -> Option<i32> {
+        restore_offset(cursor_row, moved_by, 20.0)
     }
 
     #[test]
-    fn a_restored_view_only_stays_put_inside_the_margin_band() {
-        // Between the two margins the view has context to spare, so it holds
-        // still - it is the edges it owes the cursor a scroll.
-        assert_eq!(restore_offset(10.0, 20.0), None);
-        assert_eq!(restore_offset(0.0, 20.0), Some(-5));
-        assert_eq!(restore_offset(19.0, 20.0), Some(5));
+    fn a_restored_view_places_a_cursor_it_left_off_screen() {
+        // Off screen is off screen: there is no context to preserve either
+        // side of it, so it comes back whichever way it went.
+        assert_eq!(restored(-8.0, -30.0), Some(-13));
+        assert_eq!(restored(25.0, 30.0), Some(11));
+        assert_eq!(restored(-8.0, 30.0), Some(-13));
+        assert_eq!(restored(25.0, -30.0), Some(11));
+    }
+
+    #[test]
+    fn a_restored_view_only_scrolls_the_way_the_cursor_went() {
+        // A line moved *up* used to scroll the view *down*, purely because
+        // the cursor was sitting in the bottom margin at the time.
+        assert_eq!(restored(19.0, -1.0), None);
+        assert_eq!(restored(0.0, 1.0), None);
+        // Heading for the edge it is near, though, and the view follows.
+        assert_eq!(restored(19.0, 1.0), Some(5));
+        assert_eq!(restored(0.0, -1.0), Some(-5));
+    }
+
+    #[test]
+    fn a_restored_view_stays_put_inside_the_margin_band() {
+        // Mid-view there is context to spare, whichever way the cursor went.
+        assert_eq!(restored(10.0, 1.0), None);
+        assert_eq!(restored(10.0, -1.0), None);
         // A last row the view only half shows counts as outside.
-        assert_eq!(restore_offset(20.0, 20.4), Some(6));
+        assert_eq!(restore_offset(20.0, 1.0, 20.4), Some(6));
+    }
+
+    #[test]
+    fn a_cursor_that_did_not_move_leaves_the_view_alone() {
+        // Deleting the line under the cursor keeps the caret on its row, so
+        // there is nothing to reveal even sitting inside a margin.
+        assert_eq!(restored(17.0, 0.0), None);
+        assert_eq!(restored(2.0, 0.0), None);
     }
 
     #[test]
     fn a_cursor_just_inside_an_edge_is_pushed_into_the_band() {
         // The band itself is where the cursor is allowed to rest: one row
         // further out and the view follows it by exactly that row.
-        assert_eq!(restore_offset(5.0, 20.0), None);
-        assert_eq!(restore_offset(14.0, 20.0), None);
-        assert_eq!(restore_offset(4.0, 20.0), Some(-1));
-        assert_eq!(restore_offset(15.0, 20.0), Some(1));
+        assert_eq!(restored(5.0, -1.0), None);
+        assert_eq!(restored(14.0, 1.0), None);
+        assert_eq!(restored(4.0, -1.0), Some(-1));
+        assert_eq!(restored(15.0, 1.0), Some(1));
     }
 
     #[test]
     fn a_restored_view_too_short_for_the_margin_lands_the_cursor_inside_it() {
         // Five rows of view: the cursor comes to rest two rows in, from
         // whichever edge it was past.
-        assert_eq!(restore_offset(9.0, 5.0), Some(7));
-        assert_eq!(restore_offset(-9.0, 5.0), Some(-11));
+        assert_eq!(restore_offset(9.0, 1.0, 5.0), Some(7));
+        assert_eq!(restore_offset(-9.0, -1.0, 5.0), Some(-11));
     }
 
     #[test]
@@ -2530,6 +2802,243 @@ mod tests {
         // No end of the range to clamp `NaN` to, so it takes the default.
         assert_eq!(clamp_scroll_sensitivity(f32::NAN), 1.0);
     }
+    /// Every line long enough to wrap at the harness width, so visual rows
+    /// and buffer lines come apart - which is what the widget actually runs
+    /// (`Wrapping::default()` is `Word`, and nothing overrides it).
+    fn wrapped_text() -> String {
+        (0..DOCUMENT_LINES)
+            .map(|line| format!("line {line} {}", "word ".repeat(20)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn shape_wrapped(editor: &mut graphics::text::Editor, bounds: Size) {
+        editor.update(
+            bounds,
+            iced_core::Font::MONOSPACE,
+            Pixels(14.0),
+            LineHeight::Absolute(Pixels(LINE_HEIGHT)),
+            Wrapping::Word,
+            &mut highlighter::PlainText::new(&()),
+        );
+    }
+
+    /// A wrapped document with the cursor on line 100 and the view scrolled
+    /// `lines` back over it, then that line moved down one - the way a line
+    /// command rebuilds. Returns the view and cursor row either side.
+    #[allow(clippy::type_complexity)]
+    fn wrapped_line_move(
+        lines: i32,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+        shape_wrapped(&mut editor, bounds);
+        editor.move_to(Cursor {
+            position: Position { line: 100, column: 0 },
+            selection: None,
+        });
+        shape_wrapped(&mut editor, bounds);
+        editor.perform(Action::Scroll { lines });
+        shape_wrapped(&mut editor, bounds);
+
+        let before = editor.buffer().scroll();
+        let before_row = visible_row(&editor);
+        let pending = captured(&editor).map(PendingView::Rebuilt);
+
+        let mut rebuilt = graphics::text::Editor::with_text(&wrapped_text());
+        rebuilt.move_to(Cursor {
+            position: Position { line: 101, column: 0 },
+            selection: None,
+        });
+        shape_and_reveal(&mut rebuilt, pending, bounds, |editor| {
+            shape_wrapped(editor, bounds);
+        });
+
+        let after = rebuilt.buffer().scroll();
+        (
+            (before.line, before.vertical),
+            before_row,
+            (after.line, after.vertical),
+            visible_row(&rebuilt),
+        )
+    }
+
+    /// A line command as it now runs: the buffer is kept, the caret walks
+    /// `by` lines, and the reveal gets the line it started on. Returns the
+    /// scroll and caret row either side.
+    #[allow(clippy::type_complexity)]
+    fn spliced_line_move(
+        wrap: bool,
+        scroll_by: i32,
+        by: isize,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        spliced_line_move_maybe(wrap, scroll_by, by, true)
+    }
+
+    /// With `reveal` off, the same walk with no margin logic at all - which
+    /// is where the caret naturally lands, and so what the reveal should be
+    /// judged against.
+    #[allow(clippy::type_complexity)]
+    fn spliced_line_move_maybe(
+        wrap: bool,
+        scroll_by: i32,
+        by: isize,
+        reveal: bool,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let text = if wrap { wrapped_text() } else { document_text() };
+        let lay_out = |e: &mut graphics::text::Editor, bounds| {
+            if wrap {
+                shape_wrapped(e, bounds);
+            } else {
+                shape(e, bounds);
+            }
+        };
+
+        let mut editor = graphics::text::Editor::with_text(&text);
+        lay_out(&mut editor, bounds);
+        editor.move_to(Cursor {
+            position: Position { line: 100, column: 0 },
+            selection: None,
+        });
+        lay_out(&mut editor, bounds);
+        editor.perform(Action::Scroll { lines: scroll_by });
+        lay_out(&mut editor, bounds);
+
+        let before = editor.buffer().scroll();
+        let before_row = visible_row(&editor);
+        let caret_line = editor.cursor().position.line;
+
+        // The splice itself only matters here for where it leaves the caret.
+        editor.move_to(Cursor {
+            position: Position {
+                line: caret_line.saturating_add_signed(by),
+                column: 0,
+            },
+            selection: None,
+        });
+        shape_and_reveal(
+            &mut editor,
+            reveal.then_some(PendingView::Spliced { caret_line }),
+            bounds,
+            |editor| lay_out(editor, bounds),
+        );
+
+        let after = editor.buffer().scroll();
+        (
+            (before.line, before.vertical),
+            before_row,
+            (after.line, after.vertical),
+            visible_row(&editor),
+        )
+    }
+
+    #[test]
+    fn a_spliced_line_landing_clear_of_the_margins_never_moves_the_view() {
+        // The whole point of splicing in place: there is no view to restore,
+        // so there is nothing to restore it *wrongly*. Judged against where
+        // the caret lands with no reveal at all, because one line of travel
+        // is three rows in a wrapped document - a caret that looks mid-view
+        // can land in a margin honestly.
+        let band = REVEALED_ROW..=VIEW_ROWS as f32 - 1.0 - REVEALED_ROW;
+        let mut checked = 0;
+
+        for wrap in [true, false] {
+            for scroll_by in [4, 6, 8, 10, 11, 12, 14] {
+                for by in [-1, 1] {
+                    let (_, _, natural_view, natural_row) =
+                        spliced_line_move_maybe(wrap, scroll_by, by, false);
+                    if !band.contains(&natural_row) {
+                        continue;
+                    }
+
+                    let (_, _, revealed_view, revealed_row) =
+                        spliced_line_move(wrap, scroll_by, by);
+                    let case = format!("wrap={wrap} scroll({scroll_by}) {by}");
+                    assert_eq!(revealed_view, natural_view, "{case}: view");
+                    assert_eq!(revealed_row, natural_row, "{case}: caret");
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(checked >= 10, "only {checked} cases landed in the band");
+    }
+
+    #[test]
+    fn a_spliced_line_into_the_bottom_margin_still_reveals() {
+        for wrap in [true, false] {
+            let (view, _, moved_view, moved_row) =
+                spliced_line_move(wrap, 0, 1);
+
+            assert_ne!(moved_view, view, "wrap={wrap}: view should follow");
+            assert!(
+                moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
+                "wrap={wrap}: caret should land in the margin, at {moved_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spliced_line_out_of_the_bottom_margin_leaves_the_view_alone() {
+        // Sitting in the margin but walking away from it - the case that
+        // scrolled the view the wrong way.
+        for wrap in [true, false] {
+            let (view, row, moved_view, moved_row) =
+                spliced_line_move(wrap, 0, -1);
+
+            assert_eq!(moved_view, view, "wrap={wrap}: view moved");
+            assert!(moved_row < row, "wrap={wrap}: caret should walk up");
+        }
+    }
+
+    #[test]
+    fn a_wrapped_documents_lines_really_do_wrap() {
+        // Guards every case below: the moment this text stops wrapping they
+        // all pass for the wrong reason, which is exactly how the bug they
+        // cover got in.
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+        shape_wrapped(&mut editor, bounds);
+
+        let rows = editor.buffer().lines[100]
+            .layout_opt()
+            .map(|layout| layout.len());
+        assert!(rows > Some(1), "line 100 should wrap, laid out as {rows:?}");
+    }
+
+    #[test]
+    fn a_line_moved_down_a_wrapped_document_leaves_the_view_alone() {
+        // The report: cursor anywhere clear of the margins, move the line,
+        // and the view has no business moving. `scrolled_to` mixes a logical
+        // line with a visual offset, so restoring by its difference used to
+        // miss - and the miss dropped the cursor past the bottom margin,
+        // where the reveal slammed it onto the margin row every time.
+        for lines in [8, 10, 11, 12, 14] {
+            let (view, row, moved_view, moved_row) = wrapped_line_move(lines);
+
+            assert_eq!(moved_view, view, "scroll({lines}) moved the view");
+            assert!(
+                moved_row > row,
+                "scroll({lines}): the caret should walk down the screen, \
+                 {row} -> {moved_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrapped_line_moved_into_the_bottom_margin_still_reveals() {
+        // The margin has to keep working under wrapping, or the fix above is
+        // just the reveal switched off.
+        let (view, _, moved_view, moved_row) = wrapped_line_move(4);
+
+        assert_ne!(moved_view, view, "the view should follow the caret down");
+        assert!(
+            moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
+            "the caret should land inside the bottom margin, at {moved_row}"
+        );
+    }
+
     /// The reference for any future pixel-granular scrolling: the buffer
     /// underneath already *holds and renders* a sub-line offset. Only the
     /// way in is quantized - `iced_core`'s `Action::Scroll` carries whole
