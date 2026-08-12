@@ -117,6 +117,14 @@ const REVEAL_MARGIN_LINES: i32 = 5;
 enum PendingView {
     /// An `Action` that edited the document in place.
     Edited { scrolled_to: f32 },
+    /// A line command, spliced in place. The buffer keeps its own scroll, so
+    /// unlike `Rebuilt` there is no view to put back - only the margin to
+    /// honour. All it carries is the *logical* line the caret started on:
+    /// the margins are measured against the caret's row as the next shape
+    /// finds it, and the only thing the past is needed for is which way the
+    /// caret went. Lines answer that exactly, where rows would not - a
+    /// wrapped line moves the caret three rows for one line of travel.
+    Spliced { caret_line: usize },
     /// A `Content` rebuilt under the same document, by undo, redo or a line
     /// command, carrying what the `Content` it replaces had.
     Rebuilt(CapturedView),
@@ -139,6 +147,7 @@ pub struct CapturedView {
     scroll_vertical: f32,
     cursor_row: f32,
 }
+
 
 /// Where the view sits, in lines from the top of the document, or `None` if it
 /// has no line height to measure against yet. Fractional: `scroll.vertical` is
@@ -226,6 +235,23 @@ fn shape_and_reveal(
         None => {}
         Some(PendingView::Edited { scrolled_to: before }) => {
             if let Some(lines) = reveal_scroll(editor, before, text_bounds) {
+                scroll(editor, lines);
+            }
+        }
+        Some(PendingView::Spliced { caret_line }) => {
+            // Nothing to put back: the splice never threw the view away. The
+            // caret may have walked into a margin, though, and cosmic-text
+            // only ever chases it as far as the bare edge.
+            let Some(row) = cursor_row(editor) else {
+                return;
+            };
+            let moved_by =
+                editor.cursor().position.line as f32 - caret_line as f32;
+            let line_height = editor.buffer().metrics().line_height;
+
+            if let Some(lines) =
+                restore_offset(row, moved_by, text_bounds.height / line_height)
+            {
                 scroll(editor, lines);
             }
         }
@@ -856,6 +882,27 @@ where
     /// before the first layout has given it any line metrics to measure with.
     pub fn scrolled_to(&self) -> Option<f32> {
         scrolled_to(&self.0.borrow().editor)
+    }
+
+    /// The logical line the caret is on, to hand back to
+    /// [`reveal_caret_from`] once a line command has finished moving it.
+    ///
+    /// [`reveal_caret_from`]: Self::reveal_caret_from
+    pub fn caret_line(&self) -> usize {
+        self.0.borrow().editor.cursor().position.line
+    }
+
+    /// Asks the next shape to keep the caret `REVEAL_MARGIN_LINES` clear of
+    /// the edge it is heading for, given where it started.
+    ///
+    /// For the line commands, which splice in place and so keep the buffer's
+    /// own scroll - there is no view to restore, only a margin to honour.
+    /// Call it *after* the caret has been put where the command leaves it:
+    /// this is the record the next `layout` reads, and it measures the caret
+    /// as it finds it.
+    pub fn reveal_caret_from(&mut self, caret_line: usize) {
+        self.0.get_mut().pending_view =
+            Some(PendingView::Spliced { caret_line });
     }
 
     /// Where the view and the cursor sit, to hand to the [`Content`] that
@@ -2814,6 +2861,135 @@ mod tests {
             (after.line, after.vertical),
             visible_row(&rebuilt),
         )
+    }
+
+    /// A line command as it now runs: the buffer is kept, the caret walks
+    /// `by` lines, and the reveal gets the line it started on. Returns the
+    /// scroll and caret row either side.
+    #[allow(clippy::type_complexity)]
+    fn spliced_line_move(
+        wrap: bool,
+        scroll_by: i32,
+        by: isize,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        spliced_line_move_maybe(wrap, scroll_by, by, true)
+    }
+
+    /// With `reveal` off, the same walk with no margin logic at all - which
+    /// is where the caret naturally lands, and so what the reveal should be
+    /// judged against.
+    #[allow(clippy::type_complexity)]
+    fn spliced_line_move_maybe(
+        wrap: bool,
+        scroll_by: i32,
+        by: isize,
+        reveal: bool,
+    ) -> ((usize, f32), f32, (usize, f32), f32) {
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let text = if wrap { wrapped_text() } else { document_text() };
+        let lay_out = |e: &mut graphics::text::Editor, bounds| {
+            if wrap {
+                shape_wrapped(e, bounds);
+            } else {
+                shape(e, bounds);
+            }
+        };
+
+        let mut editor = graphics::text::Editor::with_text(&text);
+        lay_out(&mut editor, bounds);
+        editor.move_to(Cursor {
+            position: Position { line: 100, column: 0 },
+            selection: None,
+        });
+        lay_out(&mut editor, bounds);
+        editor.perform(Action::Scroll { lines: scroll_by });
+        lay_out(&mut editor, bounds);
+
+        let before = editor.buffer().scroll();
+        let before_row = visible_row(&editor);
+        let caret_line = editor.cursor().position.line;
+
+        // The splice itself only matters here for where it leaves the caret.
+        editor.move_to(Cursor {
+            position: Position {
+                line: caret_line.saturating_add_signed(by),
+                column: 0,
+            },
+            selection: None,
+        });
+        shape_and_reveal(
+            &mut editor,
+            reveal.then_some(PendingView::Spliced { caret_line }),
+            bounds,
+            |editor| lay_out(editor, bounds),
+        );
+
+        let after = editor.buffer().scroll();
+        (
+            (before.line, before.vertical),
+            before_row,
+            (after.line, after.vertical),
+            visible_row(&editor),
+        )
+    }
+
+    #[test]
+    fn a_spliced_line_landing_clear_of_the_margins_never_moves_the_view() {
+        // The whole point of splicing in place: there is no view to restore,
+        // so there is nothing to restore it *wrongly*. Judged against where
+        // the caret lands with no reveal at all, because one line of travel
+        // is three rows in a wrapped document - a caret that looks mid-view
+        // can land in a margin honestly.
+        let band = REVEALED_ROW..=VIEW_ROWS as f32 - 1.0 - REVEALED_ROW;
+        let mut checked = 0;
+
+        for wrap in [true, false] {
+            for scroll_by in [4, 6, 8, 10, 11, 12, 14] {
+                for by in [-1, 1] {
+                    let (_, _, natural_view, natural_row) =
+                        spliced_line_move_maybe(wrap, scroll_by, by, false);
+                    if !band.contains(&natural_row) {
+                        continue;
+                    }
+
+                    let (_, _, revealed_view, revealed_row) =
+                        spliced_line_move(wrap, scroll_by, by);
+                    let case = format!("wrap={wrap} scroll({scroll_by}) {by}");
+                    assert_eq!(revealed_view, natural_view, "{case}: view");
+                    assert_eq!(revealed_row, natural_row, "{case}: caret");
+                    checked += 1;
+                }
+            }
+        }
+
+        assert!(checked >= 10, "only {checked} cases landed in the band");
+    }
+
+    #[test]
+    fn a_spliced_line_into_the_bottom_margin_still_reveals() {
+        for wrap in [true, false] {
+            let (view, _, moved_view, moved_row) =
+                spliced_line_move(wrap, 0, 1);
+
+            assert_ne!(moved_view, view, "wrap={wrap}: view should follow");
+            assert!(
+                moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
+                "wrap={wrap}: caret should land in the margin, at {moved_row}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_spliced_line_out_of_the_bottom_margin_leaves_the_view_alone() {
+        // Sitting in the margin but walking away from it - the case that
+        // scrolled the view the wrong way.
+        for wrap in [true, false] {
+            let (view, row, moved_view, moved_row) =
+                spliced_line_move(wrap, 0, -1);
+
+            assert_eq!(moved_view, view, "wrap={wrap}: view moved");
+            assert!(moved_row < row, "wrap={wrap}: caret should walk up");
+        }
     }
 
     #[test]
