@@ -26,6 +26,7 @@ use iced_core::{
     Pixels, Point, Rectangle, Shell, Size, SmolStr, Theme, Vector,
 };
 
+use crate::safe_area::SafeArea;
 use crate::scrollbar;
 use iced::advanced::graphics;
 
@@ -101,26 +102,20 @@ fn clamp_scroll_sensitivity(sensitivity: f32) -> f32 {
     }
 }
 
-/// Visible lines left between the cursor and the edge it came in from when a
-/// change pulls an off-screen cursor back into view - so the cursor lands on
-/// the sixth visible line rather than hard against the edge, which is where
-/// cosmic-text leaves it.
-const REVEAL_MARGIN_LINES: i32 = 5;
-
 /// A change to the document the widget has not laid out yet, and where the
 /// view sat when it happened. Both variants want the same thing of the next
-/// shape - a cursor on screen, `REVEAL_MARGIN_LINES` inside the edge it came
-/// in from - but they start from opposite ends: an in-place edit keeps the
-/// view it had, while a rebuilt `Content` starts at the top of the document
-/// with the view thrown away.
+/// shape - a cursor inside the safe area, clear of the edge it came in from -
+/// but they start from opposite ends: an in-place edit keeps the view it had,
+/// while a rebuilt `Content` starts at the top of the document with the view
+/// thrown away.
 #[derive(Debug, Clone, Copy)]
 enum PendingView {
     /// An `Action` that edited the document in place.
     Edited { scrolled_to: f32 },
     /// A line command, spliced in place. The buffer keeps its own scroll, so
-    /// unlike `Rebuilt` there is no view to put back - only the margin to
+    /// unlike `Rebuilt` there is no view to put back - only the safe area to
     /// honour. All it carries is the *logical* line the caret started on:
-    /// the margins are measured against the caret's row as the next shape
+    /// the boundaries are measured against the caret's row as the next shape
     /// finds it, and the only thing the past is needed for is which way the
     /// caret went. Lines answer that exactly, where rows would not - a
     /// wrapped line moves the caret three rows for one line of travel.
@@ -140,7 +135,7 @@ enum PendingView {
 ///
 /// The cursor's row travels with them because a reveal needs to know which way
 /// the cursor is *going*, not just where it ended up: a line moved up has no
-/// business scrolling the view down to chase it off the bottom margin.
+/// business scrolling the view down to chase it past the low boundary.
 #[derive(Debug, Clone, Copy)]
 pub struct CapturedView {
     scroll_line: usize,
@@ -188,11 +183,10 @@ fn cursor_row(editor: &graphics::text::Editor) -> Option<f32> {
     })
 }
 
-/// The margin the view can actually afford - never past its middle, so a view
-/// too short for the whole margin doesn't answer a cursor revealed at one edge
-/// by parking it against the other.
-fn affordable_margin(viewport_rows: f32) -> i32 {
-    REVEAL_MARGIN_LINES.min((viewport_rows as i32 - 1) / 2)
+/// How tall the view is, in rows - fractional, since it rarely divides into a
+/// whole number of them.
+fn viewport_rows(editor: &graphics::text::Editor, text_bounds: Size) -> f32 {
+    text_bounds.height / editor.buffer().metrics().line_height
 }
 
 /// Shapes the editor, then hands the cursor of a change the widget has not
@@ -240,18 +234,17 @@ fn shape_and_reveal(
         }
         Some(PendingView::Spliced { caret_line }) => {
             // Nothing to put back: the splice never threw the view away. The
-            // caret may have walked into a margin, though, and cosmic-text
-            // only ever chases it as far as the bare edge.
+            // caret may have walked out of the safe area, though, and
+            // cosmic-text only ever chases it as far as the bare edge.
             let Some(row) = cursor_row(editor) else {
                 return;
             };
             let moved_by =
                 editor.cursor().position.line as f32 - caret_line as f32;
-            let line_height = editor.buffer().metrics().line_height;
 
-            if let Some(lines) =
-                restore_offset(row, moved_by, text_bounds.height / line_height)
-            {
+            let rows = viewport_rows(editor, text_bounds);
+
+            if let Some(lines) = restore_offset(row, moved_by, rows) {
                 scroll(editor, lines);
             }
         }
@@ -276,8 +269,8 @@ fn shape_and_reveal(
 /// subtracting one `scrolled_to` from another and calling the difference
 /// pixels lands the view somewhere it was never asked to go. That is what used
 /// to yank the view on every line command in a document with a long line in
-/// it: the restore missed, which left the cursor below the bottom margin, and
-/// the reveal below then "corrected" it onto the margin row.
+/// it: the restore missed, which left the cursor past the low boundary, and
+/// the reveal below then "corrected" it onto that boundary.
 ///
 /// So the gap is measured in rows that have actually been laid out. It spans
 /// the handful of lines between a fresh buffer's reveal and the view it is
@@ -318,13 +311,11 @@ fn reveal_scroll(
     scrolled_before: f32,
     text_bounds: Size,
 ) -> Option<i32> {
-    let line_height = editor.buffer().metrics().line_height;
-
     reveal_offset(
         scrolled_before,
         scrolled_to(editor)?,
         cursor_row(editor)?,
-        text_bounds.height / line_height,
+        viewport_rows(editor, text_bounds),
     )
 }
 
@@ -332,28 +323,28 @@ fn reveal_scroll(
 /// it, where cosmic-text left it after, and which row the cursor ended up on.
 ///
 /// cosmic-text reveals an off-screen cursor by scrolling the bare minimum,
-/// leaving it on the first or last visible row; this backs the view off by
-/// `REVEAL_MARGIN_LINES` so it lands inside the view instead. `None` leaves
-/// the view alone - either it never moved (the cursor was still on screen
-/// after the edit) or it moved without chasing the cursor, which is what a
-/// document shrinking under a view anchored at its end does.
+/// leaving it on the first or last visible row; this backs the view off by the
+/// safe area's inset so it lands inside instead. `None` leaves the view alone:
+/// either it never moved (the cursor was still on screen after the edit) or it
+/// moved without chasing the cursor, which is what a document shrinking under
+/// a view anchored at its end does.
 fn reveal_offset(
     scrolled_before: f32,
     scrolled_after: f32,
     cursor_row: f32,
-    viewport_rows: f32,
+    rows: f32,
 ) -> Option<i32> {
-    let margin = affordable_margin(viewport_rows);
-    if margin <= 0 {
+    let area = SafeArea::of(rows);
+    if area.inset_line_count() == 0 {
         return None;
     }
 
-    if scrolled_after < scrolled_before && cursor_row < 1.0 {
-        Some(-margin)
+    if scrolled_after < scrolled_before && area.on_first_row(cursor_row) {
+        Some(-area.inset_line_count())
     } else if scrolled_after > scrolled_before
-        && cursor_row > viewport_rows - 2.0
+        && area.on_last_row(cursor_row)
     {
-        Some(margin)
+        Some(area.inset_line_count())
     } else {
         None
     }
@@ -368,49 +359,41 @@ fn restore_scroll(
     before: CapturedView,
     text_bounds: Size,
 ) -> Option<i32> {
-    let line_height = editor.buffer().metrics().line_height;
     let cursor_row = cursor_row(editor)?;
 
     restore_offset(
         cursor_row,
         cursor_row - before.cursor_row,
-        text_bounds.height / line_height,
+        viewport_rows(editor, text_bounds),
     )
 }
 
-/// How far to scroll to put the cursor a rebuilt view left near an edge
-/// `REVEAL_MARGIN_LINES` inside that edge, or `None` to leave the view alone.
+/// How far to scroll to put a cursor a rebuilt view left outside the safe area
+/// back onto its nearest boundary, or `None` to leave the view alone.
 /// `moved_by` is the rows the cursor travelled, positive downwards.
 ///
 /// A cursor still on screen only gets a scroll in the direction it is *going*.
-/// Chasing it off whichever margin it happens to be sitting in is what made a
-/// line moved up scroll the view down, and the two rules answer different
-/// questions: the margins say the cursor is running out of context ahead of
-/// it, `moved_by` says which way "ahead" is. A cursor already off screen has
-/// no context either way and is placed whichever way it went.
+/// Chasing it off whichever boundary it happens to be sitting past is what
+/// made a line moved up scroll the view down, and the two rules answer
+/// different questions: the safe area says the cursor is running out of
+/// context ahead of it, `moved_by` says which way "ahead" is. A cursor already
+/// off screen has no context either way and is placed whichever way it went.
 ///
 /// Waiting for the cursor to leave the view entirely was the other half of
 /// that: the caret crept onto the last visible row with nothing beneath it,
-/// the view sat still, and then it jumped a whole margin at once when the
-/// caret finally crossed.
-fn restore_offset(
-    cursor_row: f32,
-    moved_by: f32,
-    viewport_rows: f32,
-) -> Option<i32> {
-    let margin = affordable_margin(viewport_rows).max(0) as f32;
-    let last_row = viewport_rows.floor() - 1.0;
-    // Never inverts: `affordable_margin` caps at the viewport's middle.
-    let bottom = (last_row - margin).max(0.0);
+/// the view sat still, and then it jumped a whole inset at once when the caret
+/// finally crossed.
+fn restore_offset(cursor_row: f32, moved_by: f32, rows: f32) -> Option<i32> {
+    let area = SafeArea::of(rows);
 
     let target = if cursor_row < 0.0 {
-        margin
-    } else if cursor_row > last_row {
-        bottom
-    } else if cursor_row < margin && moved_by < 0.0 {
-        margin
-    } else if cursor_row > bottom && moved_by > 0.0 {
-        bottom
+        area.high()
+    } else if cursor_row > area.last_row() {
+        area.low()
+    } else if cursor_row < area.high() && moved_by < 0.0 {
+        area.high()
+    } else if cursor_row > area.low() && moved_by > 0.0 {
+        area.low()
     } else {
         return None;
     };
@@ -892,11 +875,11 @@ where
         self.0.borrow().editor.cursor().position.line
     }
 
-    /// Asks the next shape to keep the caret `REVEAL_MARGIN_LINES` clear of
+    /// Asks the next shape to keep the caret inside the safe area, clear of
     /// the edge it is heading for, given where it started.
     ///
     /// For the line commands, which splice in place and so keep the buffer's
-    /// own scroll - there is no view to restore, only a margin to honour.
+    /// own scroll - there is no view to restore, only the safe area to honour.
     /// Call it *after* the caret has been put where the command leaves it:
     /// this is the record the next `layout` reads, and it measures the caret
     /// as it finds it.
@@ -2284,7 +2267,7 @@ mod tests {
 
     /// The row the reveal aims for, counting from whichever edge the cursor
     /// came in from.
-    const REVEALED_ROW: f32 = REVEAL_MARGIN_LINES as f32;
+    const REVEALED_ROW: f32 = crate::safe_area::INSET_LINE_COUNT as f32;
 
     #[test]
     fn an_edit_with_the_cursor_on_screen_does_not_scroll() {
@@ -2325,7 +2308,7 @@ mod tests {
     }
 
     #[test]
-    fn an_edit_one_line_off_the_edge_still_gets_the_whole_margin() {
+    fn an_edit_one_line_off_the_edge_still_gets_the_whole_inset() {
         let (mut editor, bounds) = document();
         // The case cosmic-text on its own would settle with a single line of
         // scroll, leaving the cursor hard against the bottom edge.
@@ -2412,7 +2395,7 @@ mod tests {
     }
 
     #[test]
-    fn an_undo_one_line_off_the_edge_still_gets_the_whole_margin() {
+    fn an_undo_one_line_off_the_edge_still_gets_the_whole_inset() {
         let (mut editor, bounds) = document();
         scroll_away(&mut editor, bounds, 100, -1);
 
@@ -2442,8 +2425,8 @@ mod tests {
     }
 
     #[test]
-    fn a_line_moved_up_from_the_bottom_margin_leaves_the_view_alone() {
-        // The cursor sits in the bottom margin, but it is walking away from
+    fn a_line_moved_up_off_the_low_boundary_leaves_the_view_alone() {
+        // The cursor sits past the low boundary, but it is walking away from
         // that edge - scrolling down to "reveal" it would drag the view the
         // opposite way to the line the user is moving.
         let (mut editor, bounds) = document();
@@ -2458,7 +2441,7 @@ mod tests {
     }
 
     #[test]
-    fn a_line_moved_down_from_the_top_margin_leaves_the_view_alone() {
+    fn a_line_moved_down_off_the_high_boundary_leaves_the_view_alone() {
         // The same, at the other edge.
         let (mut editor, bounds) = document();
         scroll_away(&mut editor, bounds, 100, 17);
@@ -2558,9 +2541,11 @@ mod tests {
     }
 
     #[test]
-    fn a_cursor_revealed_at_an_edge_backs_off_by_the_margin() {
-        assert_eq!(offset(-40.0, 0.0), Some(-REVEAL_MARGIN_LINES));
-        assert_eq!(offset(40.0, 19.0), Some(REVEAL_MARGIN_LINES));
+    fn a_cursor_revealed_at_an_edge_backs_off_by_the_inset() {
+        const INSET: i32 = crate::safe_area::INSET_LINE_COUNT;
+
+        assert_eq!(offset(-40.0, 0.0), Some(-INSET));
+        assert_eq!(offset(40.0, 19.0), Some(INSET));
     }
 
     #[test]
@@ -2572,8 +2557,8 @@ mod tests {
     }
 
     #[test]
-    fn the_margin_never_scrolls_the_cursor_past_the_middle() {
-        // Five rows of view, so the margin gives up at two.
+    fn the_inset_never_scrolls_the_cursor_past_the_middle() {
+        // Five rows of view, so the inset gives up at two.
         assert_eq!(reveal_offset(100.0, 140.0, 4.0, 5.0), Some(2));
         assert_eq!(reveal_offset(100.0, 60.0, 0.0, 5.0), Some(-2));
     }
@@ -2605,7 +2590,7 @@ mod tests {
     #[test]
     fn a_restored_view_only_scrolls_the_way_the_cursor_went() {
         // A line moved *up* used to scroll the view *down*, purely because
-        // the cursor was sitting in the bottom margin at the time.
+        // the cursor was sitting past the low boundary at the time.
         assert_eq!(restored(19.0, -1.0), None);
         assert_eq!(restored(0.0, 1.0), None);
         // Heading for the edge it is near, though, and the view follows.
@@ -2614,7 +2599,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_view_stays_put_inside_the_margin_band() {
+    fn a_restored_view_stays_put_inside_the_safe_area() {
         // Mid-view there is context to spare, whichever way the cursor went.
         assert_eq!(restored(10.0, 1.0), None);
         assert_eq!(restored(10.0, -1.0), None);
@@ -2625,15 +2610,15 @@ mod tests {
     #[test]
     fn a_cursor_that_did_not_move_leaves_the_view_alone() {
         // Deleting the line under the cursor keeps the caret on its row, so
-        // there is nothing to reveal even sitting inside a margin.
+        // there is nothing to reveal even sitting outside a boundary.
         assert_eq!(restored(17.0, 0.0), None);
         assert_eq!(restored(2.0, 0.0), None);
     }
 
     #[test]
-    fn a_cursor_just_inside_an_edge_is_pushed_into_the_band() {
-        // The band itself is where the cursor is allowed to rest: one row
-        // further out and the view follows it by exactly that row.
+    fn a_cursor_just_outside_a_boundary_is_pushed_back_onto_it() {
+        // The boundaries themselves are where the cursor is allowed to rest:
+        // one row further out and the view follows it by exactly that row.
         assert_eq!(restored(5.0, -1.0), None);
         assert_eq!(restored(14.0, 1.0), None);
         assert_eq!(restored(4.0, -1.0), Some(-1));
@@ -2641,7 +2626,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restored_view_too_short_for_the_margin_lands_the_cursor_inside_it() {
+    fn a_restored_view_too_short_for_the_whole_inset_still_lands_inside_it() {
         // Five rows of view: the cursor comes to rest two rows in, from
         // whichever edge it was past.
         assert_eq!(restore_offset(9.0, 1.0, 5.0), Some(7));
@@ -2875,7 +2860,7 @@ mod tests {
         spliced_line_move_maybe(wrap, scroll_by, by, true)
     }
 
-    /// With `reveal` off, the same walk with no margin logic at all - which
+    /// With `reveal` off, the same walk with no safe-area logic at all - which
     /// is where the caret naturally lands, and so what the reveal should be
     /// judged against.
     #[allow(clippy::type_complexity)]
@@ -2934,13 +2919,13 @@ mod tests {
     }
 
     #[test]
-    fn a_spliced_line_landing_clear_of_the_margins_never_moves_the_view() {
+    fn a_spliced_line_landing_inside_the_safe_area_never_moves_the_view() {
         // The whole point of splicing in place: there is no view to restore,
         // so there is nothing to restore it *wrongly*. Judged against where
         // the caret lands with no reveal at all, because one line of travel
         // is three rows in a wrapped document - a caret that looks mid-view
-        // can land in a margin honestly.
-        let band = REVEALED_ROW..=VIEW_ROWS as f32 - 1.0 - REVEALED_ROW;
+        // can land outside a boundary honestly.
+        let area = SafeArea::of(VIEW_ROWS as f32);
         let mut checked = 0;
 
         for wrap in [true, false] {
@@ -2948,7 +2933,7 @@ mod tests {
                 for by in [-1, 1] {
                     let (_, _, natural_view, natural_row) =
                         spliced_line_move_maybe(wrap, scroll_by, by, false);
-                    if !band.contains(&natural_row) {
+                    if !(area.high()..=area.low()).contains(&natural_row) {
                         continue;
                     }
 
@@ -2962,11 +2947,11 @@ mod tests {
             }
         }
 
-        assert!(checked >= 10, "only {checked} cases landed in the band");
+        assert!(checked >= 10, "only {checked} cases landed in the safe area");
     }
 
     #[test]
-    fn a_spliced_line_into_the_bottom_margin_still_reveals() {
+    fn a_spliced_line_past_the_low_boundary_still_reveals() {
         for wrap in [true, false] {
             let (view, _, moved_view, moved_row) =
                 spliced_line_move(wrap, 0, 1);
@@ -2974,14 +2959,14 @@ mod tests {
             assert_ne!(moved_view, view, "wrap={wrap}: view should follow");
             assert!(
                 moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
-                "wrap={wrap}: caret should land in the margin, at {moved_row}"
+                "wrap={wrap}: caret should be past it, at {moved_row}"
             );
         }
     }
 
     #[test]
-    fn a_spliced_line_out_of_the_bottom_margin_leaves_the_view_alone() {
-        // Sitting in the margin but walking away from it - the case that
+    fn a_spliced_line_moving_back_off_the_low_boundary_holds_still() {
+        // Sitting past the boundary but walking away from it - the case that
         // scrolled the view the wrong way.
         for wrap in [true, false] {
             let (view, row, moved_view, moved_row) =
@@ -3009,11 +2994,11 @@ mod tests {
 
     #[test]
     fn a_line_moved_down_a_wrapped_document_leaves_the_view_alone() {
-        // The report: cursor anywhere clear of the margins, move the line,
+        // The report: cursor anywhere inside the safe area, move the line,
         // and the view has no business moving. `scrolled_to` mixes a logical
         // line with a visual offset, so restoring by its difference used to
-        // miss - and the miss dropped the cursor past the bottom margin,
-        // where the reveal slammed it onto the margin row every time.
+        // miss - and the miss dropped the cursor past the low boundary,
+        // where the reveal slammed it onto that boundary every time.
         for lines in [8, 10, 11, 12, 14] {
             let (view, row, moved_view, moved_row) = wrapped_line_move(lines);
 
@@ -3027,15 +3012,15 @@ mod tests {
     }
 
     #[test]
-    fn a_wrapped_line_moved_into_the_bottom_margin_still_reveals() {
-        // The margin has to keep working under wrapping, or the fix above is
-        // just the reveal switched off.
+    fn a_wrapped_line_moved_past_the_low_boundary_still_reveals() {
+        // The safe area has to keep working under wrapping, or the fix
+        // above is just the reveal switched off.
         let (view, _, moved_view, moved_row) = wrapped_line_move(4);
 
         assert_ne!(moved_view, view, "the view should follow the caret down");
         assert!(
             moved_row <= VIEW_ROWS as f32 - 1.0 - REVEALED_ROW,
-            "the caret should land inside the bottom margin, at {moved_row}"
+            "the caret should land past the low boundary, at {moved_row}"
         );
     }
 

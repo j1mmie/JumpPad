@@ -1,6 +1,7 @@
 mod comment;
 mod history;
 mod lines;
+mod safe_area;
 mod scrollbar;
 pub mod text_editor;
 
