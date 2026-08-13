@@ -22,6 +22,7 @@ pub struct Config {
     pub alpha: AlphaConfig,
     pub window: WindowConfig,
     pub scroll: ScrollConfig,
+    pub history: HistoryConfig,
     pub files: FilesConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
@@ -195,6 +196,21 @@ pub struct ScrollConfig {
 impl Default for ScrollConfig {
     fn default() -> Self {
         Self { sensitivity: 1.0 }
+    }
+}
+
+/// Undo history. `depth` counts steps, and a step is a burst of typing
+/// rather than a keystroke - a word typed straight through undoes at once.
+/// Clamped where applied, not here, so a nonsense value can't turn undo off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HistoryConfig {
+    pub depth: usize,
+}
+
+impl Default for HistoryConfig {
+    fn default() -> Self {
+        Self { depth: 200 }
     }
 }
 

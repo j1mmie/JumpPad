@@ -52,11 +52,13 @@ file, saving a note, or drafting a message.
  - Notices files changed by other programs - reloads clean tabs silently,
    never overwrites unsaved edits without asking
  - Configurable via TOML, with live reload - theme, transparency, scroll
-   speed, and keybind changes apply the moment the file is saved
+   speed, undo depth, and keybind changes apply the moment the file is saved
  - Pixel-granular scrolling - the view rests wherever you left it, with the
    top line partly clipped, rather than snapping to whole lines
  - Adjustable scroll sensitivity (`[scroll] sensitivity` in `config.toml`;
    `1.0` is the default speed, `2.0` twice as fast, `0.5` half)
+ - Adjustable undo depth (`[history] depth` in `config.toml`, `200` by
+   default) - a step is a burst of typing rather than a keystroke
  - Toggle comments with Cmd+/ (macOS) or Ctrl+/ - single-line prefixes
    or multi-line delimiters, per language, configurable in TOML
  - Whole-line editing: delete with Cmd+D (macOS) or Ctrl+D, move with

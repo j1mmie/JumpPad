@@ -413,6 +413,7 @@ impl JumpPadApp {
         );
         editor_config.set_foreground_alpha(config.alpha.foreground);
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
+        editor_config.set_undo_depth(config.history.depth);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
@@ -1207,6 +1208,12 @@ impl JumpPadApp {
         if new.scroll.sensitivity != current.scroll.sensitivity {
             self.editor_config
                 .set_scroll_sensitivity(new.scroll.sensitivity);
+        }
+
+        // No repaint either: tabs read the new depth on their next edit, and
+        // nothing on screen shows it.
+        if new.history.depth != current.history.depth {
+            self.editor_config.set_undo_depth(new.history.depth);
         }
 
         // One [[languages]] edit can feed two consumers, so diff the derived
