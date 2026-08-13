@@ -259,10 +259,10 @@ impl KeybindsConfig {
 /// `./config.toml` (a `cargo run` convenience).
 fn config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("config.toml"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        paths.push(dir.join("config.toml"));
     }
     paths.push(PathBuf::from("config.toml"));
     paths
@@ -417,10 +417,10 @@ fn write_default(path: &std::path::Path, config: &Config) {
 /// Where `keybinds.toml` is looked for - same search order as `config_paths()`.
 fn keybind_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("keybinds.toml"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        paths.push(dir.join("keybinds.toml"));
     }
     paths.push(PathBuf::from("keybinds.toml"));
     paths

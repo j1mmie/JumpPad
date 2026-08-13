@@ -116,10 +116,8 @@ Options:
     // Neither backend can do transparency on every platform, and the failure
     // is silent - the window just comes up solid, which reads as a rendering
     // bug rather than a wrong-binary problem. Say so up front instead.
-    if transparent {
-        if let Some(reason) = OPAQUE_WINDOW_REASON {
-            eprintln!("jumppad: {reason}");
-        }
+    if transparent && let Some(reason) = OPAQUE_WINDOW_REASON {
+        eprintln!("jumppad: {reason}");
     }
 
     // `config` and `paths` are cloned per call since the boot closure must be

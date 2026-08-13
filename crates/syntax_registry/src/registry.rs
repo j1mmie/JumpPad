@@ -185,10 +185,10 @@ impl SyntaxRegistry {
         let mut targets = BTreeSet::new();
         for pattern_index in 0..query.pattern_count() {
             for property in query.property_settings(pattern_index) {
-                if &*property.key == "injection.language" {
-                    if let Some(value) = &property.value {
-                        targets.insert(value.to_string());
-                    }
+                if &*property.key == "injection.language"
+                    && let Some(value) = &property.value
+                {
+                    targets.insert(value.to_string());
                 }
             }
         }

@@ -28,10 +28,10 @@ const MANIFEST_FILE: &str = "session.toml";
 /// executable, then `./drafts` (a `cargo run` convenience).
 pub fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            dirs.push(dir.join("drafts"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("drafts"));
     }
     dirs.push(PathBuf::from("drafts"));
     dirs
@@ -120,13 +120,11 @@ fn prune_orphaned_drafts(dir: &Path, manifest: &SessionManifest) {
             .and_then(|stem| stem.to_str())
             .and_then(|stem| stem.parse::<u64>().ok())
             .is_some_and(|id| live_ids.contains(&id));
-        if !is_live {
-            if let Err(err) = std::fs::remove_file(&path) {
-                eprintln!(
-                    "jumppad: couldn't remove stale draft {}: {err}",
-                    path.display()
-                );
-            }
+        if !is_live && let Err(err) = std::fs::remove_file(&path) {
+            eprintln!(
+                "jumppad: couldn't remove stale draft {}: {err}",
+                path.display()
+            );
         }
     }
 }

@@ -1590,11 +1590,11 @@ impl JumpPadApp {
                 if self.modal.is_some() || !self.find_is_open() {
                     return Task::none();
                 }
-                if let Some(tab) = self.tabs.get(self.active) {
-                    if let Some(state) = self.find.get_mut(&tab.id) {
-                        // Closed, not cleared - the query is there next time.
-                        state.open = false;
-                    }
+                if let Some(tab) = self.tabs.get(self.active)
+                    && let Some(state) = self.find.get_mut(&tab.id)
+                {
+                    // Closed, not cleared - the query is there next time.
+                    state.open = false;
                 }
                 self.refresh_find();
                 // Non-optional: without it the editor stays unfocused and
@@ -1731,10 +1731,9 @@ impl JumpPadApp {
             }
             Message::DraftFlushed(id, generation) => {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                    && generation > tab.flushed_generation
                 {
-                    if generation > tab.flushed_generation {
-                        tab.flushed_generation = generation;
-                    }
+                    tab.flushed_generation = generation;
                 }
                 Task::none()
             }
@@ -2489,14 +2488,11 @@ fn resolve_action(
     context: Context,
     overrides: &KeyOverrides,
 ) -> Option<Action> {
-    if let key::Physical::Code(code) = physical_key {
-        if let Some(&action) = overrides.get(&(modifiers, code)) {
-            if action.context() == Context::Always
-                || action.context() == context
-            {
-                return Some(action);
-            }
-        }
+    if let key::Physical::Code(code) = physical_key
+        && let Some(&action) = overrides.get(&(modifiers, code))
+        && (action.context() == Context::Always || action.context() == context)
+    {
+        return Some(action);
     }
     jumppad_keybinds::action_for(key, physical_key, modifiers, context)
 }
@@ -2919,10 +2915,10 @@ fn resolve_theme(name: &str) -> Theme {
 /// Where syntax-highlighting wasm grammars (`<extension>.wasm`) are looked for.
 fn default_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            dirs.push(dir.join("syntaxes"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("syntaxes"));
     }
     dirs.push(PathBuf::from("syntaxes")); // convenience for `cargo run`
     dirs
