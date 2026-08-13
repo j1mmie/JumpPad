@@ -275,10 +275,10 @@ pixels into it - rather than the single `scrolled_to` number. Subtracting one
 `scrolled_to` from another and spending the difference as pixels is only
 correct while nothing wraps; the widget wraps by default (`Wrapping::default()`
 is `Word`, and nothing overrides it), so in a document with a long line in it
-the restore missed, dropped the cursor below the bottom margin, and the reveal
-then "corrected" it onto the margin row - the view lurching on every single
-line command. `restore_pixels` measures the gap in rows that have actually
-been laid out instead. That is bounded and local - the handful of lines
+the restore missed, dropped the cursor past the safe area's low boundary, and
+the reveal then "corrected" it onto that boundary - the view lurching on every
+single line command. `restore_pixels` measures the gap in rows that have
+actually been laid out instead. That is bounded and local - the handful of lines
 between a fresh buffer's reveal and the view it is returning to, all of them
 in or beside the view - and runs once per rebuild, so it is *not* the
 whole-document row count the scrollbar section rejects. A line cosmic-text has
@@ -335,18 +335,24 @@ Two things not to reach for if the patch ever has to go away:
 
 ### Revealing the cursor after a change
 
+`safe_area.rs` defines the region all of this aims at: the rows of the viewport
+a cursor is allowed to come to rest on, everything but `INSET_LINE_COUNT` lines
+held back at each edge. `SafeArea::of(rows)` gives it two boundaries - `high`
+nearest the top of the screen, `low` nearest the bottom - and the inset gives
+way at the viewport's middle so the two can never cross. It is pure geometry;
+which way to scroll is decided by the two callers below.
+
 A change made while the cursor is off screen (scrolled away with the wheel or
-the thumb, then typed into) brings the cursor back into view with
-`REVEAL_MARGIN_LINES` of context past the edge it came in from - it lands on
-the sixth visible line, from the top or the bottom depending on which way the
-view had to move. Typing with the cursor already visible doesn't scroll at all.
-A change that rebuilds the document - undo, redo, the line commands - treats
-that margin as a *band* instead: it scrolls once the cursor is inside the
-margin and still heading for that edge, rather than waiting for it to leave
-the view. **Heading for it** is half the rule. A cursor sitting in the bottom
-margin that just moved *up* is walking away from the edge and gets nothing;
-scrolling down to "reveal" it would drag the view the opposite way to the line
-the user is moving.
+the thumb, then typed into) brings the cursor back into the safe area - it
+lands on the sixth visible line, from the top or the bottom depending on which
+way the view had to move. Typing with the cursor already visible doesn't scroll
+at all. A change that rebuilds the document - undo, redo, the line commands -
+honours the safe area as a whole region instead: it scrolls once the cursor is
+past a boundary and still heading for that edge, rather than waiting for it to
+leave the view. **Heading for it** is half the rule. A cursor sitting past the
+low boundary that just moved *up* is walking away from the edge and gets
+nothing; scrolling down to "reveal" it would drag the view the opposite way to
+the line the user is moving.
 
 Everything happens in `shape_and_reveal`, on the next `layout`, because that
 is where the shape happens: cosmic-text reveals a moved cursor lazily, inside
@@ -362,7 +368,7 @@ The two variants of `PendingView` come at the same result from opposite ends:
 
 - `Edited` - an `Action` that edited in place. cosmic-text has already chased
   the cursor, but by the bare minimum, leaving it hard against the edge, so
-  `reveal_offset` only adds the margin.
+  `reveal_offset` only adds the inset.
 - `Rebuilt` - undo/redo and the line commands, which replace `Content`
   wholesale (see the undo history section). The fresh buffer starts at the top
   of the document, so the first shape reveals the cursor from *there* - a view
@@ -370,20 +376,20 @@ The two variants of `PendingView` come at the same result from opposite ends:
   it and then places the cursor itself with `restore_offset`, since nothing is
   going to chase it a second time.
 
-  Because it places the cursor outright, this path can hold the margin as a
-  band: `restore_offset` scrolls once the cursor is nearer an edge than
-  `REVEAL_MARGIN_LINES` *and* moved that way, and holds still otherwise.
-  Firing only once the cursor was fully off screen is what made a held line
-  command stutter - the caret crept onto the last visible row with nothing
-  under it, the view sat there, and then it jumped a whole margin at once when
-  the caret finally crossed. The scroll needs no clamping of its own;
-  `Action::Scroll` already stops at both ends of the document.
+  Because it places the cursor outright, this path can honour the whole
+  region: `restore_offset` scrolls once the cursor is past a boundary *and*
+  moved that way, and holds still otherwise. Firing only once the cursor was
+  fully off screen is what made a held line command stutter - the caret crept
+  onto the last visible row with nothing under it, the view sat there, and then
+  it jumped a whole inset at once when the caret finally crossed. The scroll
+  needs no clamping of its own; `Action::Scroll` already stops at both ends of
+  the document.
 
   Which way the cursor moved is why `PendingView::Rebuilt` carries a whole
   `CapturedView` - the replaced `Content`'s scroll *and* its cursor row - and
   why `Content::capture_view` is the counterpart to `restore_view`. The
-  margins say the cursor is running out of context; the row it came from says
-  which side that context is on. A cursor already off screen is placed
+  boundaries say the cursor is running out of context; the row it came from
+  says which side that context is on. A cursor already off screen is placed
   whichever way it went, having none either side.
 
   `capture_view` returns `None` until `layout` has shaped the `Content` once
@@ -394,7 +400,7 @@ The two variants of `PendingView` come at the same result from opposite ends:
 **A view that moved is not proof the cursor was chased.** Deleting lines under
 a view anchored at the end of the document clamps the scroll upwards on its
 own, with the cursor still comfortably on screen; backing *that* off by the
-margin would push the cursor out of view. `reveal_offset` only fires when the
+inset would push the cursor out of view. `reveal_offset` only fires when the
 view moved *and* the cursor came to rest on the first or last visible row,
 which is where a real reveal - and nothing else - leaves it. The `Rebuilt`
 path has no such ambiguity: it measures the cursor's row against the restored
