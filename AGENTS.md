@@ -163,8 +163,9 @@ Porting notes, in case any of it looks accidental:
   JumpPad drives `highlight_with` with its own tree-sitter highlighter.
   `text_editor()`, upstream's constructor from `iced_widget::helpers`, moved
   in.
-- One let-chain was unwound - the workspace is edition 2021, `iced_widget`
-  is 2024.
+- One let-chain was unwound, back when the workspace was edition 2021 and
+  `iced_widget` was 2024. Both are 2024 now, so that constraint is gone and
+  the unwinding can be undone whenever someone is in there anyway.
 
 ### The scrollbar
 

@@ -71,9 +71,14 @@ pub fn subscription(paths: Vec<PathBuf>) -> Subscription<Message> {
 }
 
 // `&Vec` rather than `&[..]`: this is handed to `run_with` as a bare
-// `fn(&D) -> S` pointer, and `D` is the `Vec` the recipe hashes.
+// `fn(&D) -> S` pointer, and `D` is the `Vec` the recipe hashes. `use<>` keeps
+// it one - from edition 2024 an `impl Trait` return captures every lifetime in
+// scope unless told otherwise, which would make this borrow `paths`. It clones
+// straight away, so there was never anything to capture.
 #[allow(clippy::ptr_arg)]
-fn watch_events(paths: &Vec<PathBuf>) -> impl iced::futures::Stream<Item = ()> {
+fn watch_events(
+    paths: &Vec<PathBuf>,
+) -> impl iced::futures::Stream<Item = ()> + use<> {
     let paths = paths.clone();
     iced::stream::channel(16, |output: iced::futures::channel::mpsc::Sender<()>| async move {
         // Held across the pending() so the OS registration lives as long as
