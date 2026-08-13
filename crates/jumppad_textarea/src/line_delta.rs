@@ -3,7 +3,7 @@ use std::ops::Range;
 /// A delta: the block of lines an edit changed, plus the text on either side
 /// of it. Undo and redo replay these instead of whole documents.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EditFootprint {
+pub struct LineDelta {
     /// Lines replaced, in the document as it stands.
     replaced: Range<usize>,
     /// Byte offset of `replaced.start`.
@@ -14,7 +14,7 @@ pub struct EditFootprint {
     replacement: String,
 }
 
-impl EditFootprint {
+impl LineDelta {
     /// The delta between two documents, or `None` if they match.
     pub fn between(before: &str, after: &str) -> Option<Self> {
         if before == after {
@@ -146,31 +146,30 @@ fn count_lines(text: &[u8]) -> usize {
 mod tests {
     use super::*;
 
-    /// Replays a footprint the way `TextArea` does, so a test can state its
+    /// Replays a delta the way `TextArea` does, so a test can state its
     /// expectation as the document it wants back.
-    fn apply(text: &str, footprint: &EditFootprint) -> String {
+    fn apply(text: &str, delta: &LineDelta) -> String {
         let mut applied = text.to_owned();
-        applied
-            .replace_range(footprint.source_range(), footprint.replacement());
+        applied.replace_range(delta.source_range(), delta.replacement());
         applied
     }
 
     #[test]
-    fn identical_documents_have_no_footprint() {
-        assert_eq!(EditFootprint::between("a\nb\nc", "a\nb\nc"), None);
+    fn identical_documents_have_no_delta() {
+        assert_eq!(LineDelta::between("a\nb\nc", "a\nb\nc"), None);
     }
 
     #[test]
-    fn a_footprint_covers_only_the_line_that_changed() {
-        let footprint = EditFootprint::between("a\nb\nc", "a\nB\nc")
+    fn a_delta_covers_only_the_line_that_changed() {
+        let delta = LineDelta::between("a\nb\nc", "a\nB\nc")
             .expect("the middle line changed");
-        assert_eq!(footprint.replaced_lines(), 1..2);
-        assert_eq!(footprint.replacement(), "B\n");
-        assert_eq!(footprint.first_line(), 1);
+        assert_eq!(delta.replaced_lines(), 1..2);
+        assert_eq!(delta.replacement(), "B\n");
+        assert_eq!(delta.first_line(), 1);
     }
 
     #[test]
-    fn applying_a_footprint_produces_the_document_it_was_taken_from() {
+    fn applying_a_delta_produces_the_document_it_was_taken_from() {
         for (before, after) in [
             ("a\nb\nc", "a\nB\nc"),         // replace a middle line
             ("a\nb\nc", "a\nb\nc\nd"),      // append past the end
@@ -186,18 +185,14 @@ mod tests {
             ("a\nx", "ax"),                 // two lines join into one
             ("ax", "a\nx"),                 // and split apart again
         ] {
-            let footprint = EditFootprint::between(before, after)
+            let delta = LineDelta::between(before, after)
                 .unwrap_or_else(|| panic!("{before:?} -> {after:?} changed"));
-            assert_eq!(
-                apply(before, &footprint),
-                after,
-                "{before:?} -> {after:?}"
-            );
+            assert_eq!(apply(before, &delta), after, "{before:?} -> {after:?}");
         }
     }
 
     #[test]
-    fn an_inverted_footprint_walks_the_change_back() {
+    fn an_inverted_delta_walks_the_change_back() {
         for (before, after) in [
             ("a\nb\nc", "a\nB\nc"),
             ("a\nb\nc", "a\nb\nc\nd"),
@@ -208,11 +203,11 @@ mod tests {
             ("a\r\nb\r\nc", "a\r\nB\r\nc"),
             ("a\nx", "ax"),
         ] {
-            let footprint = EditFootprint::between(before, after)
+            let delta = LineDelta::between(before, after)
                 .unwrap_or_else(|| panic!("{before:?} -> {after:?} changed"));
-            let back = footprint.inverted();
+            let back = delta.inverted();
             assert_eq!(apply(after, &back), before, "{before:?} -> {after:?}");
-            assert_eq!(back.inverted(), footprint, "{before:?} -> {after:?}");
+            assert_eq!(back.inverted(), delta, "{before:?} -> {after:?}");
         }
     }
 
@@ -220,46 +215,44 @@ mod tests {
     fn the_replaced_range_names_the_lines_that_actually_go_out() {
         // Deleting the middle line takes lines 1..2 out of a three-line
         // document; the replacement puts nothing back in their place.
-        let footprint =
-            EditFootprint::between("a\nb\nc", "a\nc").expect("a line went");
-        assert_eq!(footprint.replaced_lines(), 1..2);
-        assert_eq!(footprint.replacement(), "");
+        let delta = LineDelta::between("a\nb\nc", "a\nc").expect("a line went");
+        assert_eq!(delta.replaced_lines(), 1..2);
+        assert_eq!(delta.replacement(), "");
     }
 
     #[test]
     fn an_insertion_past_the_last_line_replaces_it() {
         // The last line carries no ending, so appending after it has to
         // rewrite that line to give it one.
-        let footprint =
-            EditFootprint::between("a\nb", "a\nb\nc").expect("a line arrived");
-        assert_eq!(footprint.replaced_lines(), 1..2);
-        assert_eq!(footprint.replacement(), "b\nc");
+        let delta =
+            LineDelta::between("a\nb", "a\nb\nc").expect("a line arrived");
+        assert_eq!(delta.replaced_lines(), 1..2);
+        assert_eq!(delta.replacement(), "b\nc");
     }
 
     #[test]
     fn a_multibyte_edit_lands_on_character_boundaries() {
         // The matching runs meet mid-codepoint here; the boundaries still
         // have to be sliceable.
-        let footprint = EditFootprint::between("héllo\nworld", "héllo\nwörld")
+        let delta = LineDelta::between("héllo\nworld", "héllo\nwörld")
             .expect("the second line changed");
-        assert_eq!(footprint.replaced_lines(), 1..2);
-        assert_eq!(footprint.replacement(), "wörld");
+        assert_eq!(delta.replaced_lines(), 1..2);
+        assert_eq!(delta.replacement(), "wörld");
     }
 
     #[test]
     fn deleting_an_ending_reaches_past_the_line_that_lost_it() {
         // The two documents disagree about the line break where their tails
         // meet - `a\n|x` against `a|x` - so both ends have to reach further.
-        let footprint =
-            EditFootprint::between("a\nx", "ax").expect("an ending went");
-        assert_eq!(footprint.replaced_lines(), 0..2);
-        assert_eq!(footprint.replacement(), "ax");
-        assert_eq!(apply("a\nx", &footprint), "ax");
+        let delta = LineDelta::between("a\nx", "ax").expect("an ending went");
+        assert_eq!(delta.replaced_lines(), 0..2);
+        assert_eq!(delta.replacement(), "ax");
+        assert_eq!(apply("a\nx", &delta), "ax");
     }
 
     #[test]
     fn line_count_counts_the_wider_side() {
-        let grew = EditFootprint::between("a\nb\nc", "a\nb1\nb2\nb3\nc")
+        let grew = LineDelta::between("a\nb\nc", "a\nb1\nb2\nb3\nc")
             .expect("one line became three");
         assert_eq!(grew.line_count(), 3);
         assert_eq!(grew.inverted().line_count(), 3);

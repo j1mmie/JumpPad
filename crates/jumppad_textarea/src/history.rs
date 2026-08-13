@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use editor_core::{Debounce, SavedSelection};
 
-use crate::edit_footprint::EditFootprint;
+use crate::line_delta::LineDelta;
 
 /// Where the caret was and what was selected. Undoing an edit that replaced
 /// a selection has to put the selection back too, not just the caret.
@@ -33,7 +33,7 @@ pub struct History {
 
 /// One entry on either stack.
 struct Step {
-    footprint: EditFootprint,
+    delta: LineDelta,
     cursor: CursorState,
 }
 
@@ -103,12 +103,12 @@ impl History {
         &mut self,
         current_text: &Arc<String>,
         current_cursor: CursorState,
-    ) -> Option<(EditFootprint, CursorState)> {
+    ) -> Option<(LineDelta, CursorState)> {
         self.close_open_burst(current_text);
         let step = self.undo.pop()?;
-        let undoing = step.footprint.inverted();
+        let undoing = step.delta.inverted();
         self.redo.push(Step {
-            footprint: step.footprint,
+            delta: step.delta,
             cursor: current_cursor,
         });
         self.burst.reset(); // the next edit starts a fresh step
@@ -120,12 +120,12 @@ impl History {
         &mut self,
         current_text: &Arc<String>,
         current_cursor: CursorState,
-    ) -> Option<(EditFootprint, CursorState)> {
+    ) -> Option<(LineDelta, CursorState)> {
         self.close_open_burst(current_text);
         let step = self.redo.pop()?;
-        let redoing = step.footprint.clone();
+        let redoing = step.delta.clone();
         self.undo.push(Step {
-            footprint: step.footprint,
+            delta: step.delta,
             cursor: current_cursor,
         });
         self.burst.reset();
@@ -138,13 +138,11 @@ impl History {
         let Some(open) = self.open.take() else {
             return;
         };
-        let Some(footprint) =
-            EditFootprint::between(&open.before, current_text)
-        else {
+        let Some(delta) = LineDelta::between(&open.before, current_text) else {
             return;
         };
         self.undo.push(Step {
-            footprint,
+            delta,
             cursor: open.cursor,
         });
         self.trim();
@@ -186,10 +184,9 @@ mod tests {
         Arc::new(text.to_owned())
     }
 
-    fn replayed(text: &str, footprint: &EditFootprint) -> String {
+    fn replayed(text: &str, delta: &LineDelta) -> String {
         let mut applied = text.to_owned();
-        applied
-            .replace_range(footprint.source_range(), footprint.replacement());
+        applied.replace_range(delta.source_range(), delta.replacement());
         applied
     }
 
@@ -200,8 +197,8 @@ mod tests {
         text: &str,
         cursor: CursorState,
     ) -> Option<(String, CursorState)> {
-        let (footprint, restored) = history.undo(&doc(text), cursor)?;
-        Some((replayed(text, &footprint), restored))
+        let (delta, restored) = history.undo(&doc(text), cursor)?;
+        Some((replayed(text, &delta), restored))
     }
 
     /// Mirror of [`undone`].
@@ -210,8 +207,8 @@ mod tests {
         text: &str,
         cursor: CursorState,
     ) -> Option<(String, CursorState)> {
-        let (footprint, restored) = history.redo(&doc(text), cursor)?;
-        Some((replayed(text, &footprint), restored))
+        let (delta, restored) = history.redo(&doc(text), cursor)?;
+        Some((replayed(text, &delta), restored))
     }
 
     #[test]
@@ -388,13 +385,13 @@ mod tests {
 
         let mut history = History::new();
         history.record_before_edit(&Arc::new(before.clone()), caret(200, 8));
-        let (footprint, _) = history
+        let (delta, _) = history
             .undo(&Arc::new(after.clone()), caret(200, 15))
             .expect("something to undo");
 
-        assert_eq!(footprint.replaced_lines(), 200..201);
-        assert_eq!(footprint.replacement(), "line 200\n");
-        assert_eq!(replayed(&after, &footprint), before);
+        assert_eq!(delta.replaced_lines(), 200..201);
+        assert_eq!(delta.replacement(), "line 200\n");
+        assert_eq!(replayed(&after, &delta), before);
     }
 
     #[test]

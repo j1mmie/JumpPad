@@ -1,6 +1,6 @@
 mod comment;
-mod edit_footprint;
 mod history;
+mod line_delta;
 mod lines;
 mod safe_area;
 mod scrollbar;
@@ -13,7 +13,6 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use edit_footprint::EditFootprint;
 use editor_core::{
     EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection,
     SelectionKind, TextEditorWidget, scrollbar_wash,
@@ -23,6 +22,7 @@ use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use jumppad_actions::Action;
+use line_delta::LineDelta;
 use syntax_registry::{
     Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry,
 };
@@ -276,15 +276,15 @@ impl TextArea {
             &mut History,
             &Arc<String>,
             CursorState,
-        ) -> Option<(EditFootprint, CursorState)>,
+        ) -> Option<(LineDelta, CursorState)>,
     ) -> bool {
         let current = self.cursor_state();
-        let Some((footprint, restored)) =
+        let Some((delta, restored)) =
             op(&mut self.history, &self.source, current)
         else {
             return false;
         };
-        let caret_was = self.apply_footprint(&footprint);
+        let caret_was = self.apply_delta(&delta);
         // `move_cursor_to` clears a selection, so a restored one needs the
         // other branch. Neither changes text.
         match restored.selection {
@@ -308,34 +308,30 @@ impl TextArea {
 
     /// Replays a delta in place. Returns the caret's starting line for the
     /// reveal that follows, or `None` if it rebuilt instead.
-    fn apply_footprint(&mut self, footprint: &EditFootprint) -> Option<usize> {
-        if footprint.line_count() > Self::LINES_WORTH_SPLICING {
-            let replaced = self.source_with(footprint);
+    fn apply_delta(&mut self, delta: &LineDelta) -> Option<usize> {
+        if delta.line_count() > Self::LINES_WORTH_SPLICING {
+            let replaced = self.source_with(delta);
             self.replace_document(&replaced);
             return None;
         }
         let caret_was = self.content.caret_line(); // the splice moves it
-        self.paste_over_lines(
-            footprint.replaced_lines(),
-            footprint.replacement(),
-        );
-        self.splice_source(footprint);
-        self.edited_from = Some(footprint.first_line());
+        self.paste_over_lines(delta.replaced_lines(), delta.replacement());
+        self.splice_source(delta);
+        self.edited_from = Some(delta.first_line());
         Some(caret_was)
     }
 
     /// One copy of the document, against the per-line reassembly
     /// `Content::text()` would cost.
-    fn source_with(&self, footprint: &EditFootprint) -> String {
+    fn source_with(&self, delta: &LineDelta) -> String {
         let mut replaced = self.source.as_str().to_owned();
-        replaced
-            .replace_range(footprint.source_range(), footprint.replacement());
+        replaced.replace_range(delta.source_range(), delta.replacement());
         replaced
     }
 
     /// `resync_source` for paths that already know what moved.
-    fn splice_source(&mut self, footprint: &EditFootprint) {
-        self.source = Arc::new(self.source_with(footprint));
+    fn splice_source(&mut self, delta: &LineDelta) {
+        self.source = Arc::new(self.source_with(delta));
     }
 
     /// Replaces the whole document, carrying the view across - a rebuilt
@@ -484,7 +480,7 @@ impl TextArea {
     }
 
     /// Replaces lines with the exact bytes of `text`, endings included -
-    /// what an [`EditFootprint`] carries. Keeps mixed endings intact.
+    /// what a [`LineDelta`] carries. Keeps mixed endings intact.
     fn paste_over_lines(&mut self, replaced: Range<usize>, text: &str) {
         let line_count = self.content.line_count();
         let start = replaced.start.min(line_count);

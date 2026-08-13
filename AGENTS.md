@@ -467,7 +467,7 @@ would re-introduce the linear rebuild in dev builds, where it was worst
 ### Undo history
 
 `History` (`history.rs`) is a stack of deltas. Each step is an
-`EditFootprint` - the block of lines an edit changed, plus the text on either
+`LineDelta` - the block of lines an edit changed, plus the text on either
 side - and a `CursorState` (caret position *and* selection) from just before
 the edit. `apply_history` splices the delta back in place and restores both.
 
@@ -497,7 +497,7 @@ indistinguishable from Delete with a selection.
 is what `paste_over_lines` splices. Byte-exact because re-joining split lines
 would re-derive the endings, normalizing a mixed-ending document.
 
-**`EditFootprint::between` advances both ends by one shared distance.** The
+**`LineDelta::between` advances both ends by one shared distance.** The
 start backs up to the line containing the first difference; the end advances
 by a distance applied to *both* documents, not worked out per side. The
 unchanged tail is identical in each, so a shared advance keeps the two ends
