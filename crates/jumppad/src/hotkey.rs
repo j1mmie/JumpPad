@@ -22,7 +22,9 @@ impl Hotkey {
         let manager = match GlobalHotKeyManager::new() {
             Ok(manager) => manager,
             Err(err) => {
-                eprintln!("jumppad: couldn't create global hotkey manager: {err}");
+                eprintln!(
+                    "jumppad: couldn't create global hotkey manager: {err}"
+                );
                 return None;
             }
         };
@@ -50,14 +52,17 @@ pub fn subscription() -> Subscription<Message> {
 /// A plain fn, as required by `Subscription::run` - iced uses the function
 /// pointer as the subscription's identity, so this only starts once.
 fn hotkey_events() -> impl iced::futures::Stream<Item = GlobalHotKeyEvent> {
-    iced::stream::channel(16, |output: iced::futures::channel::mpsc::Sender<GlobalHotKeyEvent>| async move {
-        GlobalHotKeyEvent::set_event_handler(Some(move |event| {
-            // `try_send` needs `&mut`; cloning the sender is cheap.
-            let mut output = output.clone();
-            let _ = output.try_send(event);
-        }));
-        // Keeps the stream alive for the life of the app - the event
-        // handler above is what actually delivers events.
-        std::future::pending::<()>().await
-    })
+    iced::stream::channel(
+        16,
+        |output: iced::futures::channel::mpsc::Sender<GlobalHotKeyEvent>| async move {
+            GlobalHotKeyEvent::set_event_handler(Some(move |event| {
+                // `try_send` needs `&mut`; cloning the sender is cheap.
+                let mut output = output.clone();
+                let _ = output.try_send(event);
+            }));
+            // Keeps the stream alive for the life of the app - the event
+            // handler above is what actually delivers events.
+            std::future::pending::<()>().await
+        },
+    )
 }

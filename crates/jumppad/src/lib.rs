@@ -57,14 +57,18 @@ fn program_name(argv0: Option<&OsString>) -> String {
 /// when the window can really be translucent. One known case, evidenced in
 /// AGENTS.md: a hard platform limit, not an app bug, with the other binary
 /// as the fix.
-const OPAQUE_WINDOW_REASON: Option<&str> =
-    if cfg!(all(target_os = "macos", feature = "tiny-skia")) {
-        // softbuffer's CoreGraphics backend hardcodes `NoneSkipFirst`,
-        // discarding the alpha channel tiny-skia painted.
-        Some("[alpha] background is ignored by this binary on macOS - the software renderer's presentation path drops the alpha channel. Run jumppad-gpu for a translucent window.")
-    } else {
-        None
-    };
+const OPAQUE_WINDOW_REASON: Option<&str> = if cfg!(all(
+    target_os = "macos",
+    feature = "tiny-skia"
+)) {
+    // softbuffer's CoreGraphics backend hardcodes `NoneSkipFirst`,
+    // discarding the alpha channel tiny-skia painted.
+    Some(
+        "[alpha] background is ignored by this binary on macOS - the software renderer's presentation path drops the alpha channel. Run jumppad-gpu for a translucent window.",
+    )
+} else {
+    None
+};
 
 /// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {
@@ -104,8 +108,10 @@ Options:
 
     // Defaults to `info` level (still overridable via `RUST_LOG`) so
     // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
-    let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .try_init();
+    let _ = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("info"),
+    )
+    .try_init();
 
     // Neither backend can do transparency on every platform, and the failure
     // is silent - the window just comes up solid, which reads as a rendering
@@ -123,27 +129,27 @@ Options:
         JumpPadApp::update,
         JumpPadApp::view,
     )
-        .title("JumpPad")
-        .window_size(iced::Size::new(900.0, 600.0))
-        .decorations(decorations)
-        .transparent(transparent)
-        // iced defaults this on, but its MSAA only ever applies to triangle
-        // primitives - meshes, canvases, gradient quads - and this app draws
-        // none. Quads and text are always `count: 1` regardless. So it buys
-        // nothing visually and costs pipelines plus a 4x-sampled render target.
-        .antialiasing(false)
-        // The visor floats above whatever else has focus; an ordinary window doesn't.
-        .level(if visor_enabled {
-            iced::window::Level::AlwaysOnTop
-        } else {
-            iced::window::Level::Normal
-        })
-        .subscription(JumpPadApp::subscription)
-        .theme(JumpPadApp::theme)
-        .style(JumpPadApp::style)
-        // Runs a last-ditch draft flush before actually closing the window.
-        .exit_on_close_request(false)
-        .run()
+    .title("JumpPad")
+    .window_size(iced::Size::new(900.0, 600.0))
+    .decorations(decorations)
+    .transparent(transparent)
+    // iced defaults this on, but its MSAA only ever applies to triangle
+    // primitives - meshes, canvases, gradient quads - and this app draws
+    // none. Quads and text are always `count: 1` regardless. So it buys
+    // nothing visually and costs pipelines plus a 4x-sampled render target.
+    .antialiasing(false)
+    // The visor floats above whatever else has focus; an ordinary window doesn't.
+    .level(if visor_enabled {
+        iced::window::Level::AlwaysOnTop
+    } else {
+        iced::window::Level::Normal
+    })
+    .subscription(JumpPadApp::subscription)
+    .theme(JumpPadApp::theme)
+    .style(JumpPadApp::style)
+    // Runs a last-ditch draft flush before actually closing the window.
+    .exit_on_close_request(false)
+    .run()
 }
 
 #[cfg(test)]
@@ -193,8 +199,14 @@ mod tests {
 
     #[test]
     fn program_name_falls_back_when_argv0_is_missing_or_odd() {
-        assert_eq!(program_name(Some(&OsString::from("/usr/bin/jumppad"))), "jumppad");
-        assert_eq!(program_name(Some(&OsString::from("jumppad-gpu"))), "jumppad-gpu");
+        assert_eq!(
+            program_name(Some(&OsString::from("/usr/bin/jumppad"))),
+            "jumppad"
+        );
+        assert_eq!(
+            program_name(Some(&OsString::from("jumppad-gpu"))),
+            "jumppad-gpu"
+        );
         assert_eq!(program_name(None), "jumppad");
     }
 }

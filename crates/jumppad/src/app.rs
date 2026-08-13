@@ -4,18 +4,19 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use editor_core::{
-    DiskStamp, EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN, SavedSelection,
-    SelectionKind, Tab, darkening_wash,
+    DiskStamp, EditorFactory, EditorMessage, FLOATING_SURFACE_DARKEN,
+    SavedSelection, SelectionKind, Tab, darkening_wash,
 };
 use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
 use iced::keyboard::key;
 use iced::widget::{
-    button, center, column, container, keyed_column, mouse_area, row, scrollable, stack, text,
-    text_input,
+    button, center, column, container, keyed_column, mouse_area, row,
+    scrollable, stack, text, text_input,
 };
 use iced::{
-    Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task, Theme, Top, keyboard,
+    Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task,
+    Theme, Top, keyboard,
 };
 
 use jumppad_actions::{Action, Context};
@@ -64,7 +65,9 @@ const SURFACE_RESET_FRAMES: u8 = 3;
 /// click a mouse switch produces, leaving the incoming editor unfocused
 /// (typing dropped, caret and selection invisible).
 fn focus_editor() -> Task<Message> {
-    operate(operation::focusable::focus(Id::new(editor_core::EDITOR_WIDGET_ID)))
+    operate(operation::focusable::focus(Id::new(
+        editor_core::EDITOR_WIDGET_ID,
+    )))
 }
 
 /// The find palette's query field, targeted by id for the same reason
@@ -188,9 +191,10 @@ impl Modal {
             Modal::Close(pending) => {
                 Message::CloseConfirmed(pending.tab_id, CloseDecision::Cancel)
             }
-            Modal::SaveConflict(pending) => {
-                Message::ConflictResolved(pending.tab_id, ConflictDecision::Cancel)
-            }
+            Modal::SaveConflict(pending) => Message::ConflictResolved(
+                pending.tab_id,
+                ConflictDecision::Cancel,
+            ),
         }
     }
 }
@@ -251,7 +255,12 @@ pub enum Message {
     ConflictResolved(u64, ConflictDecision),
     /// The user asked for the on-disk version of tab `.0`, from the conflict
     /// dialog or the banner - here are its contents.
-    ConflictReloaded(u64, PathBuf, Option<DiskStamp>, Result<Arc<String>, std::io::ErrorKind>),
+    ConflictReloaded(
+        u64,
+        PathBuf,
+        Option<DiskStamp>,
+        Result<Arc<String>, std::io::ErrorKind>,
+    ),
     /// "Reload" on the changed-on-disk bar - the dialog's Discard & Reload,
     /// reachable without a save first.
     ReloadFromDisk(u64),
@@ -379,7 +388,10 @@ impl JumpPadApp {
     /// Takes the already-loaded config rather than loading it itself: `run()`
     /// (in `lib.rs`) loads it before the iced runtime starts, which is
     /// before this constructor ever runs.
-    pub fn new(config: jumppad_config::Config, paths: Vec<PathBuf>) -> (Self, Task<Message>) {
+    pub fn new(
+        config: jumppad_config::Config,
+        paths: Vec<PathBuf>,
+    ) -> (Self, Task<Message>) {
         // Deferred to a message rather than opened here, so the paths land
         // after `next_id` has been settled by whatever the session restored.
         let argv_task = if paths.is_empty() {
@@ -409,10 +421,11 @@ impl JumpPadApp {
             || {},
         );
         // Which `TextEditorWidget` implementation new tabs are created with.
-        let editor_factory: EditorFactory = Box::new(jumppad_textarea::TextArea::factory(
-            registry,
-            editor_config.clone(),
-        ));
+        let editor_factory: EditorFactory =
+            Box::new(jumppad_textarea::TextArea::factory(
+                registry,
+                editor_config.clone(),
+            ));
 
         let session_candidates = session::candidate_dirs();
         let session_dir = session_candidates
@@ -469,7 +482,9 @@ impl JumpPadApp {
 
         let window_task = iced::window::latest().map(Message::WindowReady);
 
-        let Some(manifest) = manifest.filter(|manifest| !manifest.tabs.is_empty()) else {
+        let Some(manifest) =
+            manifest.filter(|manifest| !manifest.tabs.is_empty())
+        else {
             let task = app.new_tab();
             return (
                 app,
@@ -515,9 +530,12 @@ impl JumpPadApp {
                         );
                         tab.restamp();
                         app.tabs.push(tab);
-                        reload_tasks.push(Task::perform(reload_from_disk(path), move |result| {
-                            Message::SessionFileLoaded(id, result)
-                        }));
+                        reload_tasks.push(Task::perform(
+                            reload_from_disk(path),
+                            move |result| {
+                                Message::SessionFileLoaded(id, result)
+                            },
+                        ));
                     }
                     Err(_) => {
                         // No draft to recover - drop this entry.
@@ -541,9 +559,10 @@ impl JumpPadApp {
                 tab.restamp();
                 if path.exists() {
                     let id = entry.id;
-                    reload_tasks.push(Task::perform(reload_from_disk(path.clone()), move |result| {
-                        Message::SessionFileLoaded(id, result)
-                    }));
+                    reload_tasks.push(Task::perform(
+                        reload_from_disk(path.clone()),
+                        move |result| Message::SessionFileLoaded(id, result),
+                    ));
                 }
                 app.tabs.push(tab);
             } else {
@@ -576,11 +595,12 @@ impl JumpPadApp {
         } else {
             Task::none()
         };
-        let task = Task::batch(
-            reload_tasks
-                .into_iter()
-                .chain([switch_task, focus_task, window_task, argv_task]),
-        );
+        let task = Task::batch(reload_tasks.into_iter().chain([
+            switch_task,
+            focus_task,
+            window_task,
+            argv_task,
+        ]));
         (app, task)
     }
 
@@ -620,13 +640,17 @@ impl JumpPadApp {
                 continue;
             }
             match std::fs::read_to_string(&path) {
-                Ok(contents) => tasks.push(self.open_loaded_file(path, &contents)),
+                Ok(contents) => {
+                    tasks.push(self.open_loaded_file(path, &contents))
+                }
                 // Naming a file that isn't there yet is how you start one -
                 // an empty tab, saved to that path on the first save.
                 Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                     tasks.push(self.open_loaded_file(path, ""))
                 }
-                Err(err) => problems.push(format!("{}: {}", path.display(), err.kind())),
+                Err(err) => {
+                    problems.push(format!("{}: {}", path.display(), err.kind()))
+                }
             }
         }
         // One row, so several bad paths have to share it.
@@ -640,9 +664,9 @@ impl JumpPadApp {
     /// read that landed after a Save As retargeted the tab belongs to a file
     /// the tab no longer shows.
     fn tab_index_holding(&self, id: u64, path: &Path) -> Option<usize> {
-        self.tabs
-            .iter()
-            .position(|tab| tab.id == id && tab.document.path.as_deref() == Some(path))
+        self.tabs.iter().position(|tab| {
+            tab.id == id && tab.document.path.as_deref() == Some(path)
+        })
     }
 
     /// The tab already showing `path`, if one is open.
@@ -655,14 +679,21 @@ impl JumpPadApp {
     /// Opens an already-read file, loading it into the active tab when that tab
     /// is an untouched scratch tab rather than leaving a stray "Untitled"
     /// behind. Shared by dropped files and files named on the command line.
-    fn open_loaded_file(&mut self, path: PathBuf, contents: &str) -> Task<Message> {
+    fn open_loaded_file(
+        &mut self,
+        path: PathBuf,
+        contents: &str,
+    ) -> Task<Message> {
         let scratch = self.tabs.get(self.active).is_some_and(|tab| {
-            tab.document.path.is_none() && !tab.dirty && tab.editor.text().is_empty()
+            tab.document.path.is_none()
+                && !tab.dirty
+                && tab.editor.text().is_empty()
         });
         if !scratch {
             let id = self.next_id;
             self.next_id += 1;
-            let mut tab = Tab::from_file(id, path, contents, &self.editor_factory);
+            let mut tab =
+                Tab::from_file(id, path, contents, &self.editor_factory);
             tab.restamp();
             self.tabs.push(tab);
             return self.switch_active(self.tabs.len() - 1);
@@ -673,7 +704,8 @@ impl JumpPadApp {
         // would stay unhighlighted. The id carries over, since the session
         // manifest and `find` are keyed by it.
         let id = self.tabs[self.active].id;
-        self.tabs[self.active] = Tab::from_file(id, path, contents, &self.editor_factory);
+        self.tabs[self.active] =
+            Tab::from_file(id, path, contents, &self.editor_factory);
         self.tabs[self.active].restamp();
         // The index didn't move, so `switch_active` would call it a no-op -
         // the same situation `new_tab` handles above.
@@ -723,7 +755,9 @@ impl JumpPadApp {
         while self.modal.is_none() {
             if !self.close_queue.is_empty() {
                 let next_id = self.close_queue.remove(0);
-                if let Some(index) = self.tabs.iter().position(|tab| tab.id == next_id) {
+                if let Some(index) =
+                    self.tabs.iter().position(|tab| tab.id == next_id)
+                {
                     tasks.push(self.request_close(index));
                 }
                 continue;
@@ -841,7 +875,8 @@ impl JumpPadApp {
         let cursor = tab.editor.cursor_position();
         if let Some(touched) = state.index_at(cursor) {
             state.current = Some(touched);
-            tab.editor.set_find_matches(state.matches.clone(), state.current);
+            tab.editor
+                .set_find_matches(state.matches.clone(), state.current);
         }
     }
 
@@ -864,7 +899,8 @@ impl JumpPadApp {
         };
         if state.open {
             state.search(&tab.editor.text());
-            tab.editor.set_find_matches(state.matches.clone(), state.current);
+            tab.editor
+                .set_find_matches(state.matches.clone(), state.current);
         } else {
             tab.editor.set_find_matches(Vec::new(), None);
         }
@@ -883,7 +919,8 @@ impl JumpPadApp {
         // find-again - the editor holds focus, so the ordinary selection
         // marks the match on its own.
         if state.open {
-            tab.editor.set_find_matches(state.matches.clone(), state.current);
+            tab.editor
+                .set_find_matches(state.matches.clone(), state.current);
         } else {
             tab.editor.set_find_matches(Vec::new(), None);
         }
@@ -916,7 +953,9 @@ impl JumpPadApp {
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
             match tab.last_selection {
-                Some(selection) => tab.editor.restore_selection(selection, tab.last_cursor),
+                Some(selection) => {
+                    tab.editor.restore_selection(selection, tab.last_cursor)
+                }
                 None => tab.editor.move_cursor_to(line, column),
             }
         }
@@ -973,10 +1012,12 @@ impl JumpPadApp {
     #[cfg(target_os = "windows")]
     fn disable_system_backdrop(&self) -> Task<Message> {
         match self.window {
-            Some(id) if self.background_alpha < 1.0 => iced::window::run(id, |window| {
-                crate::windows::disable_system_backdrop(window);
-            })
-            .discard(),
+            Some(id) if self.background_alpha < 1.0 => {
+                iced::window::run(id, |window| {
+                    crate::windows::disable_system_backdrop(window);
+                })
+                .discard()
+            }
             _ => Task::none(),
         }
     }
@@ -1023,9 +1064,8 @@ impl JumpPadApp {
     fn reload_settled_configs(&mut self) {
         for file in self.config_watch.settled(Instant::now()) {
             let result = match file {
-                reload::WatchedFile::Config => {
-                    jumppad_config::try_load().map(|config| self.apply_config(config))
-                }
+                reload::WatchedFile::Config => jumppad_config::try_load()
+                    .map(|config| self.apply_config(config)),
                 reload::WatchedFile::Keybinds => {
                     jumppad_config::try_load_keybinds()
                         .map(|keybinds| self.apply_keybinds(keybinds))
@@ -1056,11 +1096,22 @@ impl JumpPadApp {
 
     /// Re-reads whatever the sweep decided had changed underneath a clean tab.
     fn sweep_documents(&mut self) -> Task<Message> {
-        let reads = self.resolve_disk_changes().into_iter().map(|(id, path, stamp)| {
-            Task::perform(reload_from_disk(path.clone()), move |result| {
-                Message::DocumentReloaded(id, path.clone(), Some(stamp), result)
-            })
-        });
+        let reads =
+            self.resolve_disk_changes()
+                .into_iter()
+                .map(|(id, path, stamp)| {
+                    Task::perform(
+                        reload_from_disk(path.clone()),
+                        move |result| {
+                            Message::DocumentReloaded(
+                                id,
+                                path.clone(),
+                                Some(stamp),
+                                result,
+                            )
+                        },
+                    )
+                });
         Task::batch(reads)
     }
 
@@ -1131,19 +1182,23 @@ impl JumpPadApp {
         }
 
         if new.alpha.foreground != current.alpha.foreground {
-            self.editor_config.set_foreground_alpha(new.alpha.foreground);
+            self.editor_config
+                .set_foreground_alpha(new.alpha.foreground);
             repaint = true;
         }
 
         if new.alpha.background != current.alpha.background {
             if self.window_transparent {
                 self.background_alpha = new.alpha.background.clamp(0.0, 1.0);
-                self.editor_config.set_background_alpha(new.alpha.background);
+                self.editor_config
+                    .set_background_alpha(new.alpha.background);
                 repaint = true;
             } else if new.alpha.background < 1.0 {
                 // Applying anyway would darken the window without revealing
                 // the desktop: an opaque surface presents `rgb * a` as-is.
-                restart_required("[alpha] background on a window that started opaque");
+                restart_required(
+                    "[alpha] background on a window that started opaque",
+                );
             }
         }
 
@@ -1157,8 +1212,11 @@ impl JumpPadApp {
         // One [[languages]] edit can feed two consumers, so diff the derived
         // views: comment styles apply live (no repaint - nothing on screen
         // changes until the next toggle), grammar mappings can't.
-        if new.comment_styles_by_extension() != current.comment_styles_by_extension() {
-            self.editor_config.set_comment_styles(build_comment_styles(&new));
+        if new.comment_styles_by_extension()
+            != current.comment_styles_by_extension()
+        {
+            self.editor_config
+                .set_comment_styles(build_comment_styles(&new));
         }
 
         if new.window != current.window {
@@ -1239,7 +1297,11 @@ impl JumpPadApp {
     /// Read from `self.config` here rather than applied through
     /// `apply_config`, so a reloaded `config.toml` takes effect on the next
     /// save for free - the one live setting with no `apply_config` arm.
-    fn save_expectation(&self, tab: &Tab, shows_dialog: bool) -> SaveExpectation {
+    fn save_expectation(
+        &self,
+        tab: &Tab,
+        shows_dialog: bool,
+    ) -> SaveExpectation {
         if shows_dialog || !self.config.files.save_conflict_resolution.asks() {
             SaveExpectation::Unchecked
         } else {
@@ -1262,7 +1324,8 @@ impl JumpPadApp {
                 self.file_dialog_active = false;
                 let id = self.next_id;
                 self.next_id += 1;
-                let mut tab = Tab::from_file(id, path, &contents, &self.editor_factory);
+                let mut tab =
+                    Tab::from_file(id, path, &contents, &self.editor_factory);
                 tab.restamp();
                 self.tabs.push(tab);
                 self.switch_active(self.tabs.len() - 1)
@@ -1273,7 +1336,8 @@ impl JumpPadApp {
             }
             Message::FileOpened(Err(OpenError::Io { path, kind })) => {
                 self.file_dialog_active = false;
-                self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
+                self.error =
+                    Some(format!("Couldn't open {}: {kind}", path.display()));
                 Task::none()
             }
             Message::FilesHovered(hovered) => {
@@ -1296,7 +1360,10 @@ impl JumpPadApp {
                     return self.switch_active(index);
                 }
                 if path.is_dir() {
-                    self.error = Some(format!("Can't open {}: it's a folder", path.display()));
+                    self.error = Some(format!(
+                        "Can't open {}: it's a folder",
+                        path.display()
+                    ));
                     return Task::none();
                 }
                 Task::perform(read_path(path), Message::DroppedFileRead)
@@ -1305,18 +1372,22 @@ impl JumpPadApp {
                 self.open_loaded_file(path, &contents)
             }
             Message::DroppedFileRead(Err(OpenError::Io { path, kind })) => {
-                self.error = Some(format!("Couldn't open {}: {kind}", path.display()));
+                self.error =
+                    Some(format!("Couldn't open {}: {kind}", path.display()));
                 Task::none()
             }
             // No dialog is involved in a drop.
-            Message::DroppedFileRead(Err(OpenError::DialogClosed)) => Task::none(),
+            Message::DroppedFileRead(Err(OpenError::DialogClosed)) => {
+                Task::none()
+            }
             Message::OpenPaths(paths) => self.open_paths(paths),
             Message::SaveFile => self.save_active_tab(false),
             Message::SaveFileAs => self.save_active_tab(true),
             Message::FileSaved(id, Ok((path, stamp))) => {
                 self.file_dialog_active = false;
                 self.config_watch.note_saved(&path, Instant::now());
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
                     tab.document.path = Some(path);
                     tab.dirty = false;
                     tab.disk = stamp;
@@ -1331,7 +1402,9 @@ impl JumpPadApp {
                     .position(|&pending_id| pending_id == id)
                 {
                     self.pending_close_after_save.remove(pos);
-                    if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                    if let Some(index) =
+                        self.tabs.iter().position(|tab| tab.id == id)
+                    {
                         return self.close_tab(index);
                     }
                 }
@@ -1341,7 +1414,8 @@ impl JumpPadApp {
                 // The user canceled the save dialog - leave the tab open
                 // rather than closing it unsaved.
                 self.file_dialog_active = false;
-                self.pending_close_after_save.retain(|&pending_id| pending_id != id);
+                self.pending_close_after_save
+                    .retain(|&pending_id| pending_id != id);
                 Task::none()
             }
             Message::FileSaved(id, Err(SaveError::Conflict)) => {
@@ -1351,8 +1425,10 @@ impl JumpPadApp {
                 //
                 // A conflict aborts the close, the same way VS Code leaves
                 // the editor open when its save doesn't go through.
-                self.pending_close_after_save.retain(|&pending_id| pending_id != id);
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                self.pending_close_after_save
+                    .retain(|&pending_id| pending_id != id);
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
                     // The sweep may not have run yet - the save is how this
                     // one found out.
                     tab.externally_changed = true;
@@ -1361,14 +1437,18 @@ impl JumpPadApp {
             }
             Message::FileSaved(id, Err(SaveError::Io { path, kind })) => {
                 self.file_dialog_active = false;
-                self.pending_close_after_save.retain(|&pending_id| pending_id != id);
+                self.pending_close_after_save
+                    .retain(|&pending_id| pending_id != id);
                 if let Some(tab) = self.tabs.iter().find(|tab| tab.id == id) {
                     self.error = Some(format!(
                         "Couldn't save {}: {kind}",
                         tab.document.display_name()
                     ));
                 } else {
-                    self.error = Some(format!("Couldn't save {}: {kind}", path.display()));
+                    self.error = Some(format!(
+                        "Couldn't save {}: {kind}",
+                        path.display()
+                    ));
                 }
                 Task::none()
             }
@@ -1378,7 +1458,8 @@ impl JumpPadApp {
             Message::SelectNextTab => self.cycle_tab(1),
             Message::SelectPreviousTab => self.cycle_tab(-1),
             Message::SelectPreviousActiveTab => match self.previous_active_id {
-                Some(id) => match self.tabs.iter().position(|tab| tab.id == id) {
+                Some(id) => match self.tabs.iter().position(|tab| tab.id == id)
+                {
                     Some(index) => self.switch_active(index),
                     // That tab was closed since - do nothing
                     None => Task::none(),
@@ -1419,7 +1500,12 @@ impl JumpPadApp {
                         _ => return Task::none(),
                     }
                 }
-                match handle_hotkey(key, modifiers, physical_key, &self.keybind_overrides) {
+                match handle_hotkey(
+                    key,
+                    modifiers,
+                    physical_key,
+                    &self.keybind_overrides,
+                ) {
                     Some(resolved) => self.update(resolved),
                     None => Task::none(),
                 }
@@ -1452,9 +1538,9 @@ impl JumpPadApp {
                 // Scoped to one-character growth so a Cmd+V paste, which
                 // legitimately arrives with `command()` held, still lands.
                 let leaked_shortcut_character = self.modifiers.command()
-                    && self
-                        .active_find()
-                        .is_some_and(|state| query.len() == state.query.len() + 1);
+                    && self.active_find().is_some_and(|state| {
+                        query.len() == state.query.len() + 1
+                    });
                 if leaked_shortcut_character {
                     return Task::none();
                 }
@@ -1467,7 +1553,11 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::FindNext | Message::FindPrevious => {
-                let delta = if matches!(message, Message::FindNext) { 1 } else { -1 };
+                let delta = if matches!(message, Message::FindNext) {
+                    1
+                } else {
+                    -1
+                };
                 let Some(tab) = self.tabs.get(self.active) else {
                     return Task::none();
                 };
@@ -1484,7 +1574,8 @@ impl JumpPadApp {
                     // document may have changed since it last searched, and
                     // stepping should continue from the cursor rather than
                     // from wherever the palette was left.
-                    state.matches = editor_core::find_matches(&text, &state.query);
+                    state.matches =
+                        editor_core::find_matches(&text, &state.query);
                     state.origin = cursor;
                     state.current = state.index_at(cursor);
                 }
@@ -1590,7 +1681,8 @@ impl JumpPadApp {
                 }
                 let mut edited = false;
                 if let Some(tab) = self.tabs.get_mut(index) {
-                    let editor_message = editor_message.with_shift_click(self.modifiers.shift());
+                    let editor_message =
+                        editor_message.with_shift_click(self.modifiers.shift());
                     if tab.editor.update(editor_message) {
                         edited = true;
                         let just_became_dirty = !tab.dirty;
@@ -1620,18 +1712,26 @@ impl JumpPadApp {
             }
             Message::AutosaveTick => {
                 let dir = self.session_dir.clone();
-                let writes = session::stale_tabs(&self.tabs)
-                    .into_iter()
-                    .map(|(id, generation, text)| {
+                let writes = session::stale_tabs(&self.tabs).into_iter().map(
+                    |(id, generation, text)| {
                         Task::perform(
-                            session::flush_draft_async(dir.clone(), id, generation, text),
-                            |(id, generation)| Message::DraftFlushed(id, generation),
+                            session::flush_draft_async(
+                                dir.clone(),
+                                id,
+                                generation,
+                                text,
+                            ),
+                            |(id, generation)| {
+                                Message::DraftFlushed(id, generation)
+                            },
                         )
-                    });
+                    },
+                );
                 Task::batch(writes)
             }
             Message::DraftFlushed(id, generation) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
                     if generation > tab.flushed_generation {
                         tab.flushed_generation = generation;
                     }
@@ -1639,11 +1739,16 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::WindowCloseRequested(id) => {
-                session::flush_on_exit(&self.session_dir, &self.tabs, self.active);
+                session::flush_on_exit(
+                    &self.session_dir,
+                    &self.tabs,
+                    self.active,
+                );
                 iced::window::close(id)
             }
             Message::SessionFileLoaded(id, Ok(contents)) => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
                     tab.editor.set_text(&contents);
                     // The boot-time version of an external reload: the tab and
                     // its file agree again, so this is where the stamp is taken.
@@ -1652,7 +1757,8 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::SessionFileLoaded(_, Err(kind)) => {
-                self.error = Some(format!("Couldn't reload a restored tab: {kind}"));
+                self.error =
+                    Some(format!("Couldn't reload a restored tab: {kind}"));
                 Task::none()
             }
             Message::CloseConfirmed(id, decision) => {
@@ -1680,8 +1786,12 @@ impl JumpPadApp {
                     ConflictDecision::Cancel => Task::none(),
                     // Re-run the save with no expectation, so the check the
                     // first attempt failed is skipped this time.
-                    ConflictDecision::Overwrite => self.save_tab_forcing_overwrite(id),
-                    ConflictDecision::DiscardAndReload => self.reload_from_conflict(id),
+                    ConflictDecision::Overwrite => {
+                        self.save_tab_forcing_overwrite(id)
+                    }
+                    ConflictDecision::DiscardAndReload => {
+                        self.reload_from_conflict(id)
+                    }
                 };
                 let next_task = self.show_next_modal();
                 Task::batch([decision_task, next_task])
@@ -1706,7 +1816,10 @@ impl JumpPadApp {
                 // Named by the path actually read, not by whatever the tab
                 // shows now - a Save As can have moved it in between.
                 if self.tab_index_holding(id, &path).is_some() {
-                    self.error = Some(format!("Couldn't reload {}: {kind}", path.display()));
+                    self.error = Some(format!(
+                        "Couldn't reload {}: {kind}",
+                        path.display()
+                    ));
                 }
                 Task::none()
             }
@@ -1723,7 +1836,8 @@ impl JumpPadApp {
                 if self.modal.is_some() {
                     return Task::none();
                 }
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id) {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == id)
+                {
                     tab.externally_changed = false;
                     // Re-stamping is the point: it records "I have seen this
                     // version", so the next save goes through unprompted.
@@ -1737,12 +1851,17 @@ impl JumpPadApp {
                 // outlast the first presented frames (see `windows.rs`), so
                 // it's armed here and fires from the frame countdown.
                 self.arm_surface_reset();
-                Task::batch([self.disable_system_backdrop(), self.snap_to_monitor()])
+                Task::batch([
+                    self.disable_system_backdrop(),
+                    self.snap_to_monitor(),
+                ])
             }
             Message::HotkeyEvent(event) => {
-                let is_our_toggle = self.hotkey.as_ref().is_some_and(|hotkey| {
-                    event.state() == HotKeyState::Pressed && event.id() == hotkey.id()
-                });
+                let is_our_toggle =
+                    self.hotkey.as_ref().is_some_and(|hotkey| {
+                        event.state() == HotKeyState::Pressed
+                            && event.id() == hotkey.id()
+                    });
                 if is_our_toggle {
                     self.toggle_visor()
                 } else {
@@ -1755,11 +1874,13 @@ impl JumpPadApp {
                 Task::none()
             }
             Message::RedrawNudgeFrame => {
-                self.redraw_nudge_frames = self.redraw_nudge_frames.saturating_sub(1);
+                self.redraw_nudge_frames =
+                    self.redraw_nudge_frames.saturating_sub(1);
                 Task::none()
             }
             Message::ShadowRefreshFrame => {
-                self.shadow_refresh_frames = self.shadow_refresh_frames.saturating_sub(1);
+                self.shadow_refresh_frames =
+                    self.shadow_refresh_frames.saturating_sub(1);
                 if self.shadow_refresh_frames == 0 {
                     self.refresh_window_shadow()
                 } else {
@@ -1767,7 +1888,8 @@ impl JumpPadApp {
                 }
             }
             Message::SurfaceResetFrame => {
-                self.surface_reset_frames = self.surface_reset_frames.saturating_sub(1);
+                self.surface_reset_frames =
+                    self.surface_reset_frames.saturating_sub(1);
                 if self.surface_reset_frames == 0 {
                     self.reset_redirection_surface()
                 } else {
@@ -1788,7 +1910,9 @@ impl JumpPadApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!("jumppad: couldn't determine the primary monitor's bounds");
+            eprintln!(
+                "jumppad: couldn't determine the primary monitor's bounds"
+            );
             return Task::none();
         };
         Task::batch([
@@ -1807,7 +1931,9 @@ impl JumpPadApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!("jumppad: couldn't determine the primary monitor's bounds");
+            eprintln!(
+                "jumppad: couldn't determine the primary monitor's bounds"
+            );
             return Task::none();
         };
 
@@ -1899,7 +2025,10 @@ impl JumpPadApp {
             .style(find_input_style);
 
         let counter: Element<'_, Message> = match state.counter() {
-            Some(label) => text(label).size(12).line_height(FIND_TEXT_LINE_HEIGHT).into(),
+            Some(label) => text(label)
+                .size(12)
+                .line_height(FIND_TEXT_LINE_HEIGHT)
+                .into(),
             None => text("").into(),
         };
 
@@ -1930,20 +2059,27 @@ impl JumpPadApp {
         let tab_chips = self.tabs.iter().enumerate().map(|(index, tab)| {
             let is_active = index == self.active;
 
-            let title = button(text(tab.title()).line_height(TAB_TITLE_LINE_HEIGHT))
-                .padding([6, 10])
-                .style(move |theme, status| tab_title_style(theme, status, is_active))
-                .on_press(Message::SelectTab(index));
+            let title =
+                button(text(tab.title()).line_height(TAB_TITLE_LINE_HEIGHT))
+                    .padding([6, 10])
+                    .style(move |theme, status| {
+                        tab_title_style(theme, status, is_active)
+                    })
+                    .on_press(Message::SelectTab(index));
 
-            let close = button(text("x").size(12).line_height(TAB_CLOSE_LINE_HEIGHT))
-                .padding([6, 8])
-                .style(move |theme, status| tab_close_style(theme, status, is_active))
-                .on_press(Message::CloseTab(index));
+            let close =
+                button(text("x").size(12).line_height(TAB_CLOSE_LINE_HEIGHT))
+                    .padding([6, 8])
+                    .style(move |theme, status| {
+                        tab_close_style(theme, status, is_active)
+                    })
+                    .on_press(Message::CloseTab(index));
 
             // The frame is the only thing that paints this tab's background -
             // title and close stay fully transparent so there's one seamless surface.
-            let frame = container(row![title, close].spacing(0).align_y(Center))
-                .style(move |theme| tab_frame_style(theme, is_active));
+            let frame =
+                container(row![title, close].spacing(0).align_y(Center))
+                    .style(move |theme| tab_frame_style(theme, is_active));
 
             // Middle-click closes it too, same as the "x".
             mouse_area(frame)
@@ -1951,14 +2087,16 @@ impl JumpPadApp {
                 .into()
         });
 
-        let new_tab_button = button(text("+").line_height(TAB_TITLE_LINE_HEIGHT))
-            .padding([6, 10])
-            .style(new_tab_style)
-            .on_press(Message::NewTab);
+        let new_tab_button =
+            button(text("+").line_height(TAB_TITLE_LINE_HEIGHT))
+                .padding([6, 10])
+                .style(new_tab_style)
+                .on_press(Message::NewTab);
 
-        let tabs_row = row(tab_chips.chain(std::iter::once(new_tab_button.into())))
-            .spacing(0)
-            .align_y(Center);
+        let tabs_row =
+            row(tab_chips.chain(std::iter::once(new_tab_button.into())))
+                .spacing(0)
+                .align_y(Center);
 
         // No shared background container behind the row - on a transparent
         // window every extra layer compounds opacity, so the row is painted
@@ -1980,24 +2118,32 @@ impl JumpPadApp {
         .align_y(Center)
         .into();
 
-        let editor: Element<'_, Message> = if let Some(tab) = self.tabs.get(self.active) {
-            let index = self.active;
-            let tab_id = tab.id;
-            let view = tab
-                .editor
-                .view()
-                .map(move |message| Message::Editor(index, message));
-            // Keyed by the tab's stable id, not its Vec index, so switching
-            // tabs replaces the editor widget instead of reusing stale state.
-            keyed_column([(tab_id, view)]).width(Fill).height(Fill).into()
-        } else {
-            text("No open tabs").into()
-        };
+        let editor: Element<'_, Message> =
+            if let Some(tab) = self.tabs.get(self.active) {
+                let index = self.active;
+                let tab_id = tab.id;
+                let view = tab
+                    .editor
+                    .view()
+                    .map(move |message| Message::Editor(index, message));
+                // Keyed by the tab's stable id, not its Vec index, so switching
+                // tabs replaces the editor widget instead of reusing stale state.
+                keyed_column([(tab_id, view)])
+                    .width(Fill)
+                    .height(Fill)
+                    .into()
+            } else {
+                text("No open tabs").into()
+            };
 
         // Composed before the find palette so the palette floats above the
         // bar rather than under it - the bar's controls sit at its left end,
         // where the top-right palette doesn't reach.
-        let editor = match self.tabs.get(self.active).filter(|tab| tab.externally_changed) {
+        let editor = match self
+            .tabs
+            .get(self.active)
+            .filter(|tab| tab.externally_changed)
+        {
             Some(tab) => stack![
                 editor,
                 container(self.changed_on_disk_bar(tab.id))
@@ -2046,7 +2192,8 @@ impl JumpPadApp {
         if let Some(error) = &self.error {
             content = content.push(
                 row![
-                    text(error.clone()).color(iced::Color::from_rgb8(220, 60, 60)),
+                    text(error.clone())
+                        .color(iced::Color::from_rgb8(220, 60, 60)),
                     button("Dismiss").on_press(Message::DismissError),
                 ]
                 .spacing(10)
@@ -2062,10 +2209,14 @@ impl JumpPadApp {
             Modal::Close(pending) => {
                 // Wired up with `on_press` too, so a click works the same as
                 // Enter/Space.
-                let choice = |label: &'static str, index: usize, decision: CloseDecision| {
-                    modal_choice(label, pending.focused == index)
-                        .on_press(Message::CloseConfirmed(pending.tab_id, decision))
-                };
+                let choice =
+                    |label: &'static str,
+                     index: usize,
+                     decision: CloseDecision| {
+                        modal_choice(label, pending.focused == index).on_press(
+                            Message::CloseConfirmed(pending.tab_id, decision),
+                        )
+                    };
                 modal_dialog(
                     format!(
                         "Do you want to save the changes you made to {}?",
@@ -2079,15 +2230,26 @@ impl JumpPadApp {
                 )
             }
             Modal::SaveConflict(pending) => {
-                let choice = |label: &'static str, index: usize, decision: ConflictDecision| {
-                    modal_choice(label, pending.focused == index)
-                        .on_press(Message::ConflictResolved(pending.tab_id, decision))
-                };
+                let choice =
+                    |label: &'static str,
+                     index: usize,
+                     decision: ConflictDecision| {
+                        modal_choice(label, pending.focused == index).on_press(
+                            Message::ConflictResolved(pending.tab_id, decision),
+                        )
+                    };
                 modal_dialog(
-                    format!("{} has changed on disk since you opened it.", pending.title),
+                    format!(
+                        "{} has changed on disk since you opened it.",
+                        pending.title
+                    ),
                     row![
                         choice("Overwrite", 0, ConflictDecision::Overwrite),
-                        choice("Discard & Reload", 1, ConflictDecision::DiscardAndReload),
+                        choice(
+                            "Discard & Reload",
+                            1,
+                            ConflictDecision::DiscardAndReload
+                        ),
                         choice("Cancel", 2, ConflictDecision::Cancel),
                     ],
                 )
@@ -2096,7 +2258,12 @@ impl JumpPadApp {
 
         // Covers the window to block clicks reaching what's underneath; no
         // `on_press`, so clicking it can't lose unsaved work by accident.
-        let scrim = mouse_area(container(text("")).width(Fill).height(Fill).style(modal_scrim_style));
+        let scrim = mouse_area(
+            container(text(""))
+                .width(Fill)
+                .height(Fill)
+                .style(modal_scrim_style),
+        );
 
         stack![content, scrim, center(dialog)].into()
     }
@@ -2114,7 +2281,8 @@ impl JumpPadApp {
     pub fn style(&self, theme: &Theme) -> iced::theme::Style {
         let mut style = iced::theme::default(theme);
         if self.background_alpha < 1.0 {
-            style.background_color = style.background_color.scale_alpha(self.background_alpha);
+            style.background_color =
+                style.background_color.scale_alpha(self.background_alpha);
             if CLEAR_COLOR_NEEDS_PREMULTIPLY {
                 style.background_color = premultiply(style.background_color);
             }
@@ -2145,13 +2313,17 @@ impl JumpPadApp {
             // presses to close - one eaten by the field, one seen here.
             iced::event::listen_with(|event, status, _window| {
                 let iced::Event::Keyboard(keyboard::Event::KeyPressed {
-                    key, modifiers, ..
+                    key,
+                    modifiers,
+                    ..
                 }) = event
                 else {
                     return None;
                 };
                 match key.as_ref() {
-                    keyboard::Key::Named(key::Named::Escape) => Some(Message::CloseFind),
+                    keyboard::Key::Named(key::Named::Escape) => {
+                        Some(Message::CloseFind)
+                    }
                     // Find-again, but only for a press some widget swallowed.
                     // An uncaptured one already reached `handle_hotkey`, and
                     // acting on it twice would skip a match.
@@ -2195,48 +2367,63 @@ impl JumpPadApp {
         // Gated timers below: each only ticks while its condition holds, so
         // there's no idle cost once things settle.
         if self.animation.is_some() {
-            subscriptions
-                .push(iced::time::every(VISOR_ANIM_TICK).map(|_| Message::AnimationTick));
+            subscriptions.push(
+                iced::time::every(VISOR_ANIM_TICK)
+                    .map(|_| Message::AnimationTick),
+            );
         }
 
         // Real presented frames, not a wall-clock tick - the point is to outlast
         // the platform's buffer rotation, which is counted in frames.
         if self.redraw_nudge_frames > 0 {
-            subscriptions.push(iced::window::frames().map(|_| Message::RedrawNudgeFrame));
+            subscriptions.push(
+                iced::window::frames().map(|_| Message::RedrawNudgeFrame),
+            );
         }
 
         if self.shadow_refresh_frames > 0 {
-            subscriptions.push(iced::window::frames().map(|_| Message::ShadowRefreshFrame));
+            subscriptions.push(
+                iced::window::frames().map(|_| Message::ShadowRefreshFrame),
+            );
         }
 
         if self.surface_reset_frames > 0 {
-            subscriptions.push(iced::window::frames().map(|_| Message::SurfaceResetFrame));
-        }
-
-        if self.tabs.iter().any(|tab| tab.editor.has_pending_highlighting()) {
             subscriptions.push(
-                iced::time::every(Duration::from_millis(50)).map(|_| Message::PollHighlighting),
+                iced::window::frames().map(|_| Message::SurfaceResetFrame),
             );
         }
 
         if self
             .tabs
             .iter()
-            .any(|tab| tab.dirty && tab.draft_generation != tab.flushed_generation)
+            .any(|tab| tab.editor.has_pending_highlighting())
         {
-            subscriptions
-                .push(iced::time::every(AUTOSAVE_INTERVAL).map(|_| Message::AutosaveTick));
+            subscriptions.push(
+                iced::time::every(Duration::from_millis(50))
+                    .map(|_| Message::PollHighlighting),
+            );
+        }
+
+        if self.tabs.iter().any(|tab| {
+            tab.dirty && tab.draft_generation != tab.flushed_generation
+        }) {
+            subscriptions.push(
+                iced::time::every(AUTOSAVE_INTERVAL)
+                    .map(|_| Message::AutosaveTick),
+            );
         }
 
         if self.config_watch.pending() {
             subscriptions.push(
-                iced::time::every(reload::SETTLE_TICK).map(|_| Message::ConfigSettleTick),
+                iced::time::every(reload::SETTLE_TICK)
+                    .map(|_| Message::ConfigSettleTick),
             );
         }
 
         if self.document_watch.pending() {
             subscriptions.push(
-                iced::time::every(docwatch::SETTLE_TICK).map(|_| Message::DocumentSettleTick),
+                iced::time::every(docwatch::SETTLE_TICK)
+                    .map(|_| Message::DocumentSettleTick),
             );
         }
 
@@ -2256,7 +2443,9 @@ pub type KeyOverrides = HashMap<(keyboard::Modifiers, key::Code), Action>;
 /// modifiers. One table for both layers now that both speak `Action` - it
 /// used to be two, `build_app_overrides` and `build_editor_overrides`, each
 /// carrying its own copy of the command-name list.
-fn build_key_overrides(keybinds: &jumppad_config::KeybindsConfig) -> KeyOverrides {
+fn build_key_overrides(
+    keybinds: &jumppad_config::KeybindsConfig,
+) -> KeyOverrides {
     let mut map = HashMap::new();
     for (name, resolved) in keybinds.resolved_overrides() {
         if let Some(action) = Action::from_name(&name) {
@@ -2280,7 +2469,9 @@ fn message_for(action: Action) -> Option<Message> {
         Action::CloseActiveTab => Some(Message::CloseActiveTab),
         Action::SelectPreviousTab => Some(Message::SelectPreviousTab),
         Action::SelectNextTab => Some(Message::SelectNextTab),
-        Action::SelectPreviousActiveTab => Some(Message::SelectPreviousActiveTab),
+        Action::SelectPreviousActiveTab => {
+            Some(Message::SelectPreviousActiveTab)
+        }
         Action::Find => Some(Message::OpenFind),
         Action::FindNext => Some(Message::FindNext),
         Action::FindPrevious => Some(Message::FindPrevious),
@@ -2300,7 +2491,9 @@ fn resolve_action(
 ) -> Option<Action> {
     if let key::Physical::Code(code) = physical_key {
         if let Some(&action) = overrides.get(&(modifiers, code)) {
-            if action.context() == Context::Always || action.context() == context {
+            if action.context() == Context::Always
+                || action.context() == context
+            {
                 return Some(action);
             }
         }
@@ -2310,7 +2503,9 @@ fn resolve_action(
 
 /// The resolver handed to every `TextArea`, closing over the overrides of the
 /// moment. Rebuilt and re-injected on a `keybinds.toml` reload.
-fn build_key_resolver(overrides: Arc<KeyOverrides>) -> Arc<jumppad_textarea::KeyResolver> {
+fn build_key_resolver(
+    overrides: Arc<KeyOverrides>,
+) -> Arc<jumppad_textarea::KeyResolver> {
     Arc::new(move |press: &jumppad_textarea::KeyPress| {
         resolve_action(
             &press.key,
@@ -2325,7 +2520,9 @@ fn build_key_resolver(overrides: Arc<KeyOverrides>) -> Arc<jumppad_textarea::Key
 /// Logs (doesn't fail) any `keybinds.toml` override whose command name
 /// isn't recognized by either layer - a cheap typo-catcher, not a
 /// validation framework.
-fn warn_unrecognized_overrides(overrides: &HashMap<String, global_hotkey::hotkey::HotKey>) {
+fn warn_unrecognized_overrides(
+    overrides: &HashMap<String, global_hotkey::hotkey::HotKey>,
+) {
     for name in overrides.keys() {
         if Action::from_name(name).is_none() {
             eprintln!(
@@ -2375,13 +2572,21 @@ const TAB_ROW_DARKEN: f32 = 0.09; // ~23/255 per channel
 /// risking drift.
 fn tab_text_color(theme: &Theme, is_active: bool) -> Color {
     let text = theme.extended_palette().background.base.text;
-    if is_active { text } else { text.scale_alpha(0.7) }
+    if is_active {
+        text
+    } else {
+        text.scale_alpha(0.7)
+    }
 }
 
 /// A tab's title button: always transparent - the enclosing `tab_frame_style`
 /// container is what paints the tab's background, so title and close never
 /// have to agree on a box size to look like one continuous surface.
-fn tab_title_style(theme: &Theme, _status: button::Status, is_active: bool) -> button::Style {
+fn tab_title_style(
+    theme: &Theme,
+    _status: button::Status,
+    is_active: bool,
+) -> button::Style {
     let text_color = tab_text_color(theme, is_active);
     button::Style {
         background: None,
@@ -2393,7 +2598,11 @@ fn tab_title_style(theme: &Theme, _status: button::Status, is_active: bool) -> b
 /// A tab's close button: transparent at rest (same reasoning as
 /// `tab_title_style`), with a faint highlight only on hover/press as the
 /// only background it ever paints itself.
-fn tab_close_style(theme: &Theme, status: button::Status, is_active: bool) -> button::Style {
+fn tab_close_style(
+    theme: &Theme,
+    status: button::Status,
+    is_active: bool,
+) -> button::Style {
     let text_color = tab_text_color(theme, is_active);
     let background = match status {
         button::Status::Hovered | button::Status::Pressed => {
@@ -2417,7 +2626,8 @@ fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
     if is_active {
         container::Style::default()
     } else {
-        container::Style::default().background(darkening_wash(theme, INACTIVE_TAB_DARKEN))
+        container::Style::default()
+            .background(darkening_wash(theme, INACTIVE_TAB_DARKEN))
     }
 }
 
@@ -2427,7 +2637,9 @@ fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
 fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
     let palette = theme.extended_palette();
     let text_color = match status {
-        button::Status::Hovered | button::Status::Pressed => palette.background.base.text,
+        button::Status::Hovered | button::Status::Pressed => {
+            palette.background.base.text
+        }
         _ => palette.background.base.text.scale_alpha(0.4),
     };
     button::Style {
@@ -2440,16 +2652,22 @@ fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
 /// The tab row's own background - a wash darker than even an inactive tab, so
 /// empty space past the last tab reads as a frame, not a gap.
 fn tab_bar_style(theme: &Theme) -> container::Style {
-    container::Style::default().background(darkening_wash(theme, TAB_ROW_DARKEN))
+    container::Style::default()
+        .background(darkening_wash(theme, TAB_ROW_DARKEN))
 }
 
 /// One modal choice button, shared by both dialogs - they differ only in
 /// their labels and the message each choice sends. The caller adds that with
 /// `.on_press`, so a click resolves the dialog the same way Enter does.
-fn modal_choice(label: &'static str, is_focused: bool) -> button::Button<'static, Message> {
+fn modal_choice(
+    label: &'static str,
+    is_focused: bool,
+) -> button::Button<'static, Message> {
     button(text(label))
         .padding([6, 14])
-        .style(move |theme, status| modal_button_style(theme, status, is_focused))
+        .style(move |theme, status| {
+            modal_button_style(theme, status, is_focused)
+        })
 }
 
 /// A modal's box: one line of prompt over a row of choices.
@@ -2467,7 +2685,11 @@ fn modal_dialog<'a>(
 
 /// One of a modal's three choices - a colored border marks whichever one
 /// keyboard nav currently has focused.
-fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -> button::Style {
+fn modal_button_style(
+    theme: &Theme,
+    status: button::Status,
+    is_focused: bool,
+) -> button::Style {
     let palette = theme.extended_palette();
     let border = if is_focused {
         iced::Border {
@@ -2502,7 +2724,8 @@ fn modal_button_style(theme: &Theme, status: button::Status, is_focused: bool) -
 const FIND_TEXT_LINE_HEIGHT: Pixels = Pixels(16.0);
 
 fn find_palette_style(theme: &Theme) -> container::Style {
-    container::Style::default().background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
+    container::Style::default()
+        .background(darkening_wash(theme, FLOATING_SURFACE_DARKEN))
 }
 
 /// How far the drag-and-drop overlay dims the document underneath. Lighter
@@ -2525,7 +2748,10 @@ fn drop_overlay_style(theme: &Theme) -> container::Style {
         })
 }
 
-fn find_input_style(theme: &Theme, status: text_input::Status) -> text_input::Style {
+fn find_input_style(
+    theme: &Theme,
+    status: text_input::Status,
+) -> text_input::Style {
     let palette = theme.extended_palette();
     let default = text_input::default(theme, status);
     text_input::Style {
@@ -2710,14 +2936,21 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                 let mut wasm_files: Vec<String> = entries
                     .filter_map(|entry| entry.ok())
                     .map(|entry| entry.path())
-                    .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("wasm"))
+                    .filter(|path| {
+                        path.extension().and_then(|ext| ext.to_str())
+                            == Some("wasm")
+                    })
                     .filter_map(|path| {
-                        path.file_name().map(|name| name.to_string_lossy().into_owned())
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
                     })
                     .collect();
                 wasm_files.sort();
                 if wasm_files.is_empty() {
-                    eprintln!("jumppad: {}: exists but no .wasm files found", dir.display());
+                    eprintln!(
+                        "jumppad: {}: exists but no .wasm files found",
+                        dir.display()
+                    );
                 } else {
                     eprintln!(
                         "jumppad: {}: found {} .wasm file(s): {}",
@@ -2728,14 +2961,19 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                 }
             }
             Err(err) => {
-                eprintln!("jumppad: {}: couldn't read directory: {err}", dir.display());
+                eprintln!(
+                    "jumppad: {}: couldn't read directory: {err}",
+                    dir.display()
+                );
             }
         }
     }
 }
 
 /// Re-reads a restored tab's real file fresh from disk, never a cached copy.
-async fn reload_from_disk(path: PathBuf) -> Result<Arc<String>, std::io::ErrorKind> {
+async fn reload_from_disk(
+    path: PathBuf,
+) -> Result<Arc<String>, std::io::ErrorKind> {
     tokio::fs::read_to_string(&path)
         .await
         .map(Arc::new)
@@ -2860,7 +3098,12 @@ mod tests {
         fn selection(&self) -> Option<SavedSelection> {
             None
         }
-        fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
+        fn restore_selection(
+            &mut self,
+            _selection: SavedSelection,
+            _cursor: (usize, usize),
+        ) {
+        }
         fn set_find_matches(
             &mut self,
             _matches: Vec<editor_core::FindMatch>,
@@ -2920,7 +3163,12 @@ mod tests {
         fn selection(&self) -> Option<SavedSelection> {
             None
         }
-        fn restore_selection(&mut self, _selection: SavedSelection, _cursor: (usize, usize)) {}
+        fn restore_selection(
+            &mut self,
+            _selection: SavedSelection,
+            _cursor: (usize, usize),
+        ) {
+        }
         fn set_find_matches(
             &mut self,
             _matches: Vec<editor_core::FindMatch>,
@@ -2967,13 +3215,21 @@ mod tests {
             self.cursor
         }
         fn move_cursor_to(&mut self, line: usize, column: usize) {
-            self.restored.borrow_mut().push(Restore::Cursor(line, column));
+            self.restored
+                .borrow_mut()
+                .push(Restore::Cursor(line, column));
         }
         fn selection(&self) -> Option<SavedSelection> {
             self.selection
         }
-        fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize)) {
-            self.restored.borrow_mut().push(Restore::Selection { selection, cursor });
+        fn restore_selection(
+            &mut self,
+            selection: SavedSelection,
+            cursor: (usize, usize),
+        ) {
+            self.restored
+                .borrow_mut()
+                .push(Restore::Selection { selection, cursor });
         }
         fn set_find_matches(
             &mut self,
@@ -2989,7 +3245,9 @@ mod tests {
     /// Builds an `JumpPadApp` with `tab_count` untitled tabs, skipping the real I/O `new()` does.
     fn test_app(tab_count: u64) -> JumpPadApp {
         let factory = stub_factory();
-        let tabs = (0..tab_count).map(|id| Tab::untitled(id, &factory)).collect();
+        let tabs = (0..tab_count)
+            .map(|id| Tab::untitled(id, &factory))
+            .collect();
         JumpPadApp {
             tabs,
             active: 0,
@@ -3019,7 +3277,10 @@ mod tests {
             modifiers: Modifiers::default(),
             config: jumppad_config::Config::default(),
             keybinds: jumppad_config::KeybindsConfig::default(),
-            editor_config: jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
+            editor_config: jumppad_textarea::SharedEditorConfig::new(
+                1.0,
+                Arc::new(|_: &jumppad_textarea::KeyPress| None),
+            ),
             window_transparent: false,
             config_watch: reload::ConfigWatch::new(),
             document_watch: docwatch::DocumentWatch::new(),
@@ -3033,12 +3294,19 @@ mod tests {
         use iced::widget::text_editor::{Action, Motion};
 
         let factory: EditorFactory = Box::new(|text, _extension| {
-            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            let registry = syntax_registry::SyntaxRegistry::new(
+                Vec::new(),
+                HashMap::new(),
+                || {},
+            );
             Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
+                jumppad_textarea::SharedEditorConfig::new(
+                    1.0,
+                    Arc::new(|_: &jumppad_textarea::KeyPress| None),
+                ),
             ))
         });
         let mut app = test_app(0);
@@ -3055,17 +3323,29 @@ mod tests {
             0,
             EditorMessage::Action(Action::Click(iced::Point::new(10.0, 4.0))),
         ));
-        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::SelectWord)));
+        let _ = app.update(Message::Editor(
+            0,
+            EditorMessage::Action(Action::SelectWord),
+        ));
         let word = app.tabs[0].editor.selection();
         assert!(
-            matches!(word, Some(SavedSelection { kind: SelectionKind::Word, .. })),
+            matches!(
+                word,
+                Some(SavedSelection {
+                    kind: SelectionKind::Word,
+                    ..
+                })
+            ),
             "expected a word selection, got {word:?}"
         );
 
         // Tab 1: a keyboard range selection over "ga".
         let _ = app.update(Message::SelectTab(1));
         for _ in 0..2 {
-            let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Select(Motion::Right))));
+            let _ = app.update(Message::Editor(
+                1,
+                EditorMessage::Action(Action::Select(Motion::Right)),
+            ));
         }
 
         // Both tabs hold their own selection, verified across two round trips.
@@ -3075,7 +3355,10 @@ mod tests {
         let _ = app.update(Message::SelectTab(1));
         assert_eq!(
             app.tabs[1].editor.selection(),
-            Some(SavedSelection { anchor: (0, 0), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(app.tabs[1].editor.cursor_position(), (0, 2));
     }
@@ -3088,12 +3371,19 @@ mod tests {
         use iced::widget::text_editor::Action;
 
         let factory: EditorFactory = Box::new(|text, _extension| {
-            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            let registry = syntax_registry::SyntaxRegistry::new(
+                Vec::new(),
+                HashMap::new(),
+                || {},
+            );
             Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
+                jumppad_textarea::SharedEditorConfig::new(
+                    1.0,
+                    Arc::new(|_: &jumppad_textarea::KeyPress| None),
+                ),
             ))
         });
         let mut app = test_app(0);
@@ -3103,15 +3393,27 @@ mod tests {
         ];
         app.next_id = 2;
 
-        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::Click(Point::ORIGIN))));
-        let _ = app.update(Message::Editor(0, EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0)))));
+        let _ = app.update(Message::Editor(
+            0,
+            EditorMessage::Action(Action::Click(Point::ORIGIN)),
+        ));
+        let _ = app.update(Message::Editor(
+            0,
+            EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0))),
+        ));
         let selection_0 = app.tabs[0].editor.selection();
         assert!(selection_0.is_some());
         let cursor_0 = app.tabs[0].editor.cursor_position();
 
         let _ = app.update(Message::SelectTab(1));
-        let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Click(Point::ORIGIN))));
-        let _ = app.update(Message::Editor(1, EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0)))));
+        let _ = app.update(Message::Editor(
+            1,
+            EditorMessage::Action(Action::Click(Point::ORIGIN)),
+        ));
+        let _ = app.update(Message::Editor(
+            1,
+            EditorMessage::Action(Action::Drag(Point::new(500.0, 4.0))),
+        ));
         assert!(app.tabs[1].editor.selection().is_some());
 
         let _ = app.update(Message::SelectTab(0));
@@ -3123,19 +3425,28 @@ mod tests {
     /// for find flows that need actual text and cursor behavior.
     fn app_with_text(texts: &[&str]) -> JumpPadApp {
         let factory: EditorFactory = Box::new(|text, _extension| {
-            let registry = syntax_registry::SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+            let registry = syntax_registry::SyntaxRegistry::new(
+                Vec::new(),
+                HashMap::new(),
+                || {},
+            );
             Box::new(jumppad_textarea::TextArea::new(
                 text,
                 &registry,
                 None,
-                jumppad_textarea::SharedEditorConfig::new(1.0, Arc::new(|_: &jumppad_textarea::KeyPress| None)),
+                jumppad_textarea::SharedEditorConfig::new(
+                    1.0,
+                    Arc::new(|_: &jumppad_textarea::KeyPress| None),
+                ),
             ))
         });
         let mut app = test_app(0);
         app.tabs = texts
             .iter()
             .enumerate()
-            .map(|(index, body)| Tab::restored(index as u64, None, body, false, &factory))
+            .map(|(index, body)| {
+                Tab::restored(index as u64, None, body, false, &factory)
+            })
             .collect();
         app.next_id = texts.len() as u64;
         app.editor_factory = factory;
@@ -3163,7 +3474,10 @@ mod tests {
         let _ = app.update(Message::FindQueryChanged("two".into()));
 
         let _ = app.update(Message::FindNext);
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("2 of 2"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("2 of 2")
+        );
         assert_eq!(app.tabs[0].editor.cursor_position(), (1, 9));
 
         let _ = app.update(Message::FindNext);
@@ -3234,7 +3548,10 @@ mod tests {
         assert!(!app.find_is_open());
         let _ = app.update(Message::OpenFind);
         let _ = app.update(Message::FindQueryChanged("gamma".into()));
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 2"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("1 of 2")
+        );
 
         // Back to tab 0: its own query and its own match count.
         let _ = app.update(Message::SelectTab(0));
@@ -3272,9 +3589,9 @@ mod tests {
         for character in " two".chars() {
             let _ = app.update(Message::Editor(
                 0,
-                EditorMessage::Action(text_editor::Action::Edit(text_editor::Edit::Insert(
-                    character,
-                ))),
+                EditorMessage::Action(text_editor::Action::Edit(
+                    text_editor::Edit::Insert(character),
+                )),
             ));
         }
         assert_eq!(app.active_find().unwrap().matches.len(), 2);
@@ -3299,7 +3616,10 @@ mod tests {
         let mut app = app_with_text(&["Two two TWO"]);
         let _ = app.update(Message::OpenFind);
         let _ = app.update(Message::FindQueryChanged("two".into()));
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("1 of 3")
+        );
     }
 
     #[test]
@@ -3309,12 +3629,23 @@ mod tests {
         let _ = app.update(Message::FindQueryChanged("two".into()));
         let _ = app.update(Message::CloseFind);
         assert!(!app.find_is_open());
-        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 3), "on the first match");
+        assert_eq!(
+            app.tabs[0].editor.cursor_position(),
+            (0, 3),
+            "on the first match"
+        );
 
         // Cmd+G steps without reopening the palette.
         let _ = app.update(Message::FindNext);
-        assert!(!app.find_is_open(), "find-again must not reopen the palette");
-        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 11), "second match");
+        assert!(
+            !app.find_is_open(),
+            "find-again must not reopen the palette"
+        );
+        assert_eq!(
+            app.tabs[0].editor.cursor_position(),
+            (0, 11),
+            "second match"
+        );
 
         // And wraps back around.
         let _ = app.update(Message::FindNext);
@@ -3337,9 +3668,9 @@ mod tests {
         for character in " two".chars() {
             let _ = app.update(Message::Editor(
                 0,
-                EditorMessage::Action(text_editor::Action::Edit(text_editor::Edit::Insert(
-                    character,
-                ))),
+                EditorMessage::Action(text_editor::Action::Edit(
+                    text_editor::Edit::Insert(character),
+                )),
             ));
         }
         // Step from the top so the target is unambiguous - starting at the
@@ -3351,7 +3682,11 @@ mod tests {
             2,
             "the stale match list was re-searched"
         );
-        assert_eq!(app.tabs[0].editor.cursor_position(), (0, 7), "the new match");
+        assert_eq!(
+            app.tabs[0].editor.cursor_position(),
+            (0, 7),
+            "the new match"
+        );
     }
 
     #[test]
@@ -3368,16 +3703,25 @@ mod tests {
         let mut app = app_with_text(&["two one two three two"]);
         let _ = app.update(Message::OpenFind);
         let _ = app.update(Message::FindQueryChanged("two".into()));
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("1 of 3")
+        );
 
         // Cmd+G with the palette still up steps without closing it.
         let _ = app.update(Message::FindNext);
         assert!(app.find_is_open());
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("2 of 3"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("2 of 3")
+        );
 
         // Cmd+Shift+G goes back.
         let _ = app.update(Message::FindPrevious);
-        assert_eq!(app.active_find().unwrap().counter().as_deref(), Some("1 of 3"));
+        assert_eq!(
+            app.active_find().unwrap().counter().as_deref(),
+            Some("1 of 3")
+        );
         let _ = app.update(Message::FindPrevious);
         assert_eq!(
             app.active_find().unwrap().counter().as_deref(),
@@ -3387,7 +3731,8 @@ mod tests {
     }
 
     #[test]
-    fn a_shortcut_character_leaked_while_command_is_held_is_not_typed_into_the_query() {
+    fn a_shortcut_character_leaked_while_command_is_held_is_not_typed_into_the_query()
+     {
         // macOS only in practice: Cmd doesn't suppress character production
         // and `text_input` inserts it, so Cmd+G would append "g" to the
         // query on its way to being a shortcut.
@@ -3405,7 +3750,11 @@ mod tests {
 
         // A multi-character change with command held is a paste, not a leak.
         let _ = app.update(Message::FindQueryChanged("twobeta".into()));
-        assert_eq!(app.active_find().unwrap().query, "twobeta", "paste still lands");
+        assert_eq!(
+            app.active_find().unwrap().query,
+            "twobeta",
+            "paste still lands"
+        );
 
         // And ordinary typing is untouched once command is released.
         let _ = app.update(Message::ModifiersChanged(Modifiers::empty()));
@@ -3458,7 +3807,9 @@ mod tests {
         let mut app = test_app(1);
         let log = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
         app.tabs[0].editor = Box::new(RecordingEditor(log.clone()));
-        let click = EditorMessage::Action(text_editor::Action::Click(iced::Point::ORIGIN));
+        let click = EditorMessage::Action(text_editor::Action::Click(
+            iced::Point::ORIGIN,
+        ));
 
         let _ = app.update(Message::ModifiersChanged(Modifiers::SHIFT));
         let _ = app.update(Message::Editor(0, click.clone()));
@@ -3479,7 +3830,10 @@ mod tests {
     fn switching_tabs_saves_and_restores_the_selection() {
         let mut app = test_app(2);
         let restored = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let saved = SavedSelection { anchor: (0, 2), kind: SelectionKind::Range };
+        let saved = SavedSelection {
+            anchor: (0, 2),
+            kind: SelectionKind::Range,
+        };
         app.tabs[0].editor = Box::new(SelectionSpyEditor {
             selection: Some(saved),
             cursor: (1, 4),
@@ -3493,7 +3847,10 @@ mod tests {
         let _ = app.switch_active(0);
         assert_eq!(
             restored.borrow().as_slice(),
-            [Restore::Selection { selection: saved, cursor: (1, 4) }]
+            [Restore::Selection {
+                selection: saved,
+                cursor: (1, 4)
+            }]
         );
     }
 
@@ -3582,16 +3939,23 @@ mod tests {
     fn ctrl_tab_with_extra_modifiers_does_not_match() {
         let tab_key = Key::Named(Named::Tab);
         let physical = key::Physical::Code(key::Code::Tab);
-        assert!(handle_hotkey(
-            tab_key.clone(),
-            Modifiers::CTRL | Modifiers::SHIFT,
-            physical,
-            &no_overrides()
-        )
-        .is_none());
         assert!(
-            handle_hotkey(tab_key, Modifiers::CTRL | Modifiers::ALT, physical, &no_overrides())
-                .is_none()
+            handle_hotkey(
+                tab_key.clone(),
+                Modifiers::CTRL | Modifiers::SHIFT,
+                physical,
+                &no_overrides()
+            )
+            .is_none()
+        );
+        assert!(
+            handle_hotkey(
+                tab_key,
+                Modifiers::CTRL | Modifiers::ALT,
+                physical,
+                &no_overrides()
+            )
+            .is_none()
         );
     }
 
@@ -3693,7 +4057,8 @@ mod tests {
             Some(&Action::DeleteLine)
         );
         assert_eq!(
-            overrides.get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::ArrowUp)),
+            overrides
+                .get(&(Modifiers::CTRL | Modifiers::ALT, key::Code::ArrowUp)),
             Some(&Action::MoveLineUp)
         );
         assert_eq!(
@@ -3784,7 +4149,10 @@ mod tests {
     fn apply_config_background_alpha_needs_a_window_born_transparent() {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
-            alpha: jumppad_config::AlphaConfig { background: 0.5, foreground: 1.0 },
+            alpha: jumppad_config::AlphaConfig {
+                background: 0.5,
+                foreground: 1.0,
+            },
             ..Default::default()
         };
 
@@ -3824,7 +4192,9 @@ mod tests {
                     "Zig",
                     Some("zig"),
                     &["zig"],
-                    Some(jumppad_config::CommentSyntax::Single("// ".to_string())),
+                    Some(jumppad_config::CommentSyntax::Single(
+                        "// ".to_string(),
+                    )),
                 ),
                 language(
                     "HTML",
@@ -3876,7 +4246,9 @@ mod tests {
         };
         // A new grammar mapping without a comment style: restart-required,
         // nothing live to apply.
-        config.languages.push(language("Zig", Some("zig"), &["zig"], None));
+        config
+            .languages
+            .push(language("Zig", Some("zig"), &["zig"], None));
 
         app.apply_config(config.clone());
         assert_eq!(app.theme.to_string(), theme_before);
@@ -3889,12 +4261,21 @@ mod tests {
         assert_eq!(app.config, config);
     }
 
-    fn key_press(named: Named, modifiers: Modifiers, code: key::Code) -> Message {
-        Message::KeyPressed(Key::Named(named), modifiers, key::Physical::Code(code))
+    fn key_press(
+        named: Named,
+        modifiers: Modifiers,
+        code: key::Code,
+    ) -> Message {
+        Message::KeyPressed(
+            Key::Named(named),
+            modifiers,
+            key::Physical::Code(code),
+        )
     }
 
     #[test]
-    fn request_close_queues_a_second_request_instead_of_showing_a_second_prompt() {
+    fn request_close_queues_a_second_request_instead_of_showing_a_second_prompt()
+     {
         let mut app = test_app(3);
         app.tabs[0].dirty = true;
         app.tabs[1].dirty = true;
@@ -3931,7 +4312,8 @@ mod tests {
         let _ = app.request_close(1);
 
         let tab0_id = app.tabs[0].id;
-        let _ = app.update(Message::CloseConfirmed(tab0_id, CloseDecision::DontSave));
+        let _ = app
+            .update(Message::CloseConfirmed(tab0_id, CloseDecision::DontSave));
 
         assert!(app.close_queue.is_empty());
         assert_eq!(close_prompt(&app).expect("a close prompt").tab_id, tab1_id);
@@ -3944,21 +4326,38 @@ mod tests {
         let _ = app.request_close(0);
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 0);
 
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(
+            Named::ArrowRight,
+            Modifiers::empty(),
+            key::Code::ArrowRight,
+        ));
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 1);
 
-        let _ = app.update(key_press(Named::Tab, Modifiers::empty(), key::Code::Tab));
+        let _ = app.update(key_press(
+            Named::Tab,
+            Modifiers::empty(),
+            key::Code::Tab,
+        ));
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 2);
 
         // Wraps back around to 0.
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(
+            Named::ArrowRight,
+            Modifiers::empty(),
+            key::Code::ArrowRight,
+        ));
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 0);
 
         // Shift+Tab goes backward, wrapping to the last choice.
-        let _ = app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
+        let _ =
+            app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 2);
 
-        let _ = app.update(key_press(Named::ArrowLeft, Modifiers::empty(), key::Code::ArrowLeft));
+        let _ = app.update(key_press(
+            Named::ArrowLeft,
+            Modifiers::empty(),
+            key::Code::ArrowLeft,
+        ));
         assert_eq!(close_prompt(&app).expect("a close prompt").focused, 1);
     }
 
@@ -3968,10 +4367,18 @@ mod tests {
         app.tabs[0].dirty = true;
         let _ = app.request_close(0);
         // Move focus to "Don't Save" (index 1).
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(
+            Named::ArrowRight,
+            Modifiers::empty(),
+            key::Code::ArrowRight,
+        ));
         let tabs_before = app.tabs.len();
 
-        let _ = app.update(key_press(Named::Enter, Modifiers::empty(), key::Code::Enter));
+        let _ = app.update(key_press(
+            Named::Enter,
+            Modifiers::empty(),
+            key::Code::Enter,
+        ));
 
         assert!(app.modal.is_none());
         assert_eq!(app.tabs.len(), tabs_before - 1); // Don't Save actually closed it
@@ -3983,10 +4390,18 @@ mod tests {
         app.tabs[0].dirty = true;
         let _ = app.request_close(0);
         // Move focus to "Don't Save" - Escape should still cancel, not "Don't Save".
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(
+            Named::ArrowRight,
+            Modifiers::empty(),
+            key::Code::ArrowRight,
+        ));
         let tabs_before = app.tabs.len();
 
-        let _ = app.update(key_press(Named::Escape, Modifiers::empty(), key::Code::Escape));
+        let _ = app.update(key_press(
+            Named::Escape,
+            Modifiers::empty(),
+            key::Code::Escape,
+        ));
 
         assert!(app.modal.is_none());
         assert_eq!(app.tabs.len(), tabs_before); // nothing closed
@@ -4084,11 +4499,15 @@ mod tests {
         std::fs::write(&second, "b").expect("write");
 
         let mut app = test_app(1);
-        let _ = app.update(Message::OpenPaths(vec![first.clone(), second.clone()]));
+        let _ =
+            app.update(Message::OpenPaths(vec![first.clone(), second.clone()]));
 
         assert_eq!(app.tabs.len(), 2);
         assert_eq!(app.tabs[0].document.path.as_deref(), Some(first.as_path()));
-        assert_eq!(app.tabs[1].document.path.as_deref(), Some(second.as_path()));
+        assert_eq!(
+            app.tabs[1].document.path.as_deref(),
+            Some(second.as_path())
+        );
         assert_eq!(app.active, 1, "the last one named is the one you land on");
     }
 
@@ -4108,7 +4527,10 @@ mod tests {
         );
         assert!(app.tabs[0].editor.text().is_empty());
         assert!(!app.tabs[0].dirty, "nothing typed yet");
-        assert!(app.error.is_none(), "a file you're about to create isn't an error");
+        assert!(
+            app.error.is_none(),
+            "a file you're about to create isn't an error"
+        );
     }
 
     #[test]
@@ -4156,7 +4578,12 @@ mod tests {
         let mut app = test_app(0);
         app.session_dir = dir.to_path_buf();
         let contents = std::fs::read_to_string(path).unwrap_or_default();
-        let mut tab = Tab::from_file(0, path.to_path_buf(), &contents, &app.editor_factory);
+        let mut tab = Tab::from_file(
+            0,
+            path.to_path_buf(),
+            &contents,
+            &app.editor_factory,
+        );
         tab.restamp();
         app.tabs = vec![tab];
         app.next_id = 1;
@@ -4235,7 +4662,11 @@ mod tests {
 
         assert!(reads.is_empty(), "there's nothing to read");
         assert_eq!(app.tabs.len(), 1, "the tab stays open");
-        assert_eq!(app.tabs[0].editor.text(), "still wanted", "content preserved");
+        assert_eq!(
+            app.tabs[0].editor.text(),
+            "still wanted",
+            "content preserved"
+        );
         assert!(app.tabs[0].dirty, "so the next save recreates the file");
         assert_eq!(app.tabs[0].disk, None);
         assert_eq!(
@@ -4258,7 +4689,10 @@ mod tests {
         app.tabs[0].dirty = true;
 
         std::fs::write(&file, "saved by jumppad").expect("the save");
-        let _ = app.update(Message::FileSaved(0, Ok((file.clone(), DiskStamp::of(&file)))));
+        let _ = app.update(Message::FileSaved(
+            0,
+            Ok((file.clone(), DiskStamp::of(&file))),
+        ));
 
         let reads = app.resolve_disk_changes();
         assert!(reads.is_empty(), "our own write must not trigger a reload");
@@ -4318,7 +4752,8 @@ mod tests {
         let file = dir.join("shared.txt");
         std::fs::write(&file, "before").expect("write");
         let mut app = app_watching(&dir, &file);
-        let mut second = Tab::from_file(1, file.clone(), "before", &app.editor_factory);
+        let mut second =
+            Tab::from_file(1, file.clone(), "before", &app.editor_factory);
         second.restamp();
         second.dirty = true;
         app.tabs.push(second);
@@ -4408,13 +4843,13 @@ mod tests {
         let mut app = app_in_conflict(&dir, &file);
         app.tabs[0].externally_changed = false; // the sweep hasn't run yet
 
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
 
         assert_eq!(conflict_prompt(&app).expect("a conflict prompt").tab_id, 0);
-        assert!(app.tabs[0].externally_changed, "the save is how it found out");
+        assert!(
+            app.tabs[0].externally_changed,
+            "the save is how it found out"
+        );
         assert!(!app.file_dialog_active);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
@@ -4430,17 +4865,18 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
 
-        let _ = app.update(Message::ConflictResolved(0, ConflictDecision::Overwrite));
+        let _ = app
+            .update(Message::ConflictResolved(0, ConflictDecision::Overwrite));
         assert!(app.modal.is_none(), "the prompt is dismissed");
 
         // The re-run save lands the way any other successful save does.
         std::fs::write(&file, "my unsaved edits").expect("the overwrite");
-        let _ = app.update(Message::FileSaved(0, Ok((file.clone(), DiskStamp::of(&file)))));
+        let _ = app.update(Message::FileSaved(
+            0,
+            Ok((file.clone(), DiskStamp::of(&file))),
+        ));
 
         assert!(!app.tabs[0].dirty);
         assert!(!app.tabs[0].externally_changed);
@@ -4459,7 +4895,10 @@ mod tests {
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
 
-        let _ = app.update(Message::ConflictResolved(0, ConflictDecision::DiscardAndReload));
+        let _ = app.update(Message::ConflictResolved(
+            0,
+            ConflictDecision::DiscardAndReload,
+        ));
         let _ = app.update(Message::ConflictReloaded(
             0,
             file.clone(),
@@ -4480,12 +4919,10 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
 
-        let _ = app.update(Message::ConflictResolved(0, ConflictDecision::Cancel));
+        let _ =
+            app.update(Message::ConflictResolved(0, ConflictDecision::Cancel));
 
         assert!(app.modal.is_none());
         assert!(app.tabs[0].dirty, "still unsaved");
@@ -4528,10 +4965,7 @@ mod tests {
         let _ = app.update(Message::CloseConfirmed(0, CloseDecision::Save));
         assert_eq!(app.pending_close_after_save, vec![0]);
 
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
 
         assert_eq!(app.tabs.len(), 1, "the tab stays open");
         assert!(
@@ -4557,11 +4991,11 @@ mod tests {
         assert!(close_prompt(&app).is_some());
 
         // The conflict arrives while that prompt is up - queued, not stacked.
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
-        assert!(close_prompt(&app).is_some(), "the close prompt keeps the screen");
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
+        assert!(
+            close_prompt(&app).is_some(),
+            "the close prompt keeps the screen"
+        );
         assert_eq!(app.conflict_queue, vec![0]);
 
         let _ = app.update(Message::CloseConfirmed(1, CloseDecision::Cancel));
@@ -4578,24 +5012,34 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
         assert_eq!(
             conflict_prompt(&app).unwrap().focused,
             2,
             "opens on Cancel - the other two both destroy someone's work"
         );
 
-        let _ = app.update(key_press(Named::ArrowRight, Modifiers::empty(), key::Code::ArrowRight));
+        let _ = app.update(key_press(
+            Named::ArrowRight,
+            Modifiers::empty(),
+            key::Code::ArrowRight,
+        ));
         assert_eq!(conflict_prompt(&app).unwrap().focused, 0, "wraps forward");
-        let _ = app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
+        let _ =
+            app.update(key_press(Named::Tab, Modifiers::SHIFT, key::Code::Tab));
         assert_eq!(conflict_prompt(&app).unwrap().focused, 2, "and backward");
 
         // Focus "Discard & Reload" and take it.
-        let _ = app.update(key_press(Named::ArrowLeft, Modifiers::empty(), key::Code::ArrowLeft));
-        let _ = app.update(key_press(Named::Enter, Modifiers::empty(), key::Code::Enter));
+        let _ = app.update(key_press(
+            Named::ArrowLeft,
+            Modifiers::empty(),
+            key::Code::ArrowLeft,
+        ));
+        let _ = app.update(key_press(
+            Named::Enter,
+            Modifiers::empty(),
+            key::Code::Enter,
+        ));
         assert!(app.modal.is_none());
         let _ = app.update(Message::ConflictReloaded(
             0,
@@ -4613,12 +5057,13 @@ mod tests {
         let dir = argv_scratch_dir();
         let file = dir.join("notes.txt");
         let mut app = app_in_conflict(&dir, &file);
-        let _ = app.update(Message::FileSaved(
-            0,
-            Err(SaveError::Conflict),
-        ));
+        let _ = app.update(Message::FileSaved(0, Err(SaveError::Conflict)));
         // Focused on "Overwrite" - Escape must still cancel.
-        let _ = app.update(key_press(Named::Escape, Modifiers::empty(), key::Code::Escape));
+        let _ = app.update(key_press(
+            Named::Escape,
+            Modifiers::empty(),
+            key::Code::Escape,
+        ));
 
         assert!(app.modal.is_none());
         assert!(app.tabs[0].externally_changed);
@@ -4683,9 +5128,14 @@ mod tests {
 
         assert!(app.close_queue.is_empty());
         assert!(app.conflict_queue.is_empty());
-        assert!(!app.tabs.iter().any(|tab| tab.id == 1), "the clean tab closed");
+        assert!(
+            !app.tabs.iter().any(|tab| tab.id == 1),
+            "the clean tab closed"
+        );
         assert_eq!(
-            conflict_prompt(&app).expect("the queued conflict still shows").tab_id,
+            conflict_prompt(&app)
+                .expect("the queued conflict still shows")
+                .tab_id,
             0
         );
 
@@ -4758,7 +5208,13 @@ mod tests {
 
         let mut app = test_app(0);
         app.session_dir = dir.clone();
-        let mut tab = Tab::restored(0, Some(file.clone()), "", false, &app.editor_factory);
+        let mut tab = Tab::restored(
+            0,
+            Some(file.clone()),
+            "",
+            false,
+            &app.editor_factory,
+        );
         tab.restamp();
         app.tabs = vec![tab];
 
@@ -4766,7 +5222,11 @@ mod tests {
             app.resolve_disk_changes().is_empty(),
             "a sweep before the re-read lands must find nothing to do"
         );
-        assert_eq!(app.tabs[0].editor.text(), "", "the buffer is left for the re-read");
+        assert_eq!(
+            app.tabs[0].editor.text(),
+            "",
+            "the buffer is left for the re-read"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -4774,7 +5234,8 @@ mod tests {
     #[test]
     fn a_flagged_tab_says_so_in_its_title() {
         let factory = stub_factory();
-        let mut tab = Tab::from_file(0, PathBuf::from("/tmp/notes.txt"), "", &factory);
+        let mut tab =
+            Tab::from_file(0, PathBuf::from("/tmp/notes.txt"), "", &factory);
         assert_eq!(tab.title(), "notes.txt");
         tab.dirty = true;
         assert_eq!(tab.title(), "notes.txt \u{2022}");
@@ -4824,7 +5285,10 @@ mod tests {
 
         assert_eq!(
             app.watched_paths(),
-            vec![PathBuf::from("/tmp/apple.txt"), PathBuf::from("/tmp/zebra.txt")]
+            vec![
+                PathBuf::from("/tmp/apple.txt"),
+                PathBuf::from("/tmp/zebra.txt")
+            ]
         );
 
         app.tabs[0].document.path = None;
@@ -4855,7 +5319,8 @@ mod tests {
         // so the drop itself has to dismiss the overlay.
         let mut app = test_app(1);
         app.files_hovered = true;
-        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+        let _ =
+            app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
         assert!(!app.files_hovered);
     }
 
@@ -4879,7 +5344,8 @@ mod tests {
     #[test]
     fn dropping_onto_a_file_backed_tab_opens_a_new_one() {
         let mut app = test_app(1);
-        app.tabs[0].document.path = Some(PathBuf::from("/tmp/already-open.txt"));
+        app.tabs[0].document.path =
+            Some(PathBuf::from("/tmp/already-open.txt"));
         let _ = app.update(Message::DroppedFileRead(Ok((
             PathBuf::from("/tmp/dropped.txt"),
             Arc::new("body".to_string()),
@@ -4896,8 +5362,11 @@ mod tests {
     #[test]
     fn dropping_an_already_open_file_focuses_its_tab() {
         let mut app = test_app(2);
-        app.tabs[1].document.path = Some(PathBuf::from("/tmp/already-open.txt"));
-        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/already-open.txt")));
+        app.tabs[1].document.path =
+            Some(PathBuf::from("/tmp/already-open.txt"));
+        let _ = app.update(Message::FileDropped(PathBuf::from(
+            "/tmp/already-open.txt",
+        )));
 
         assert_eq!(app.tabs.len(), 2, "no duplicate tab");
         assert_eq!(app.active, 1);
@@ -4907,7 +5376,8 @@ mod tests {
     fn dropping_a_file_leaves_an_in_flight_dialog_alone() {
         let mut app = test_app(1);
         app.file_dialog_active = true;
-        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+        let _ =
+            app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
         assert!(app.file_dialog_active);
 
         let _ = app.update(Message::DroppedFileRead(Ok((
@@ -4926,7 +5396,8 @@ mod tests {
             focused: 0,
         }));
         app.files_hovered = true;
-        let _ = app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
+        let _ =
+            app.update(Message::FileDropped(PathBuf::from("/tmp/dropped.txt")));
 
         assert!(!app.files_hovered, "the overlay still clears");
         assert!(app.tabs[0].document.path.is_none(), "nothing was opened");
@@ -4951,7 +5422,8 @@ mod tests {
         let id = app.tabs[0].id;
 
         app.file_dialog_active = true;
-        let _ = app.update(Message::FileSaved(id, Err(SaveError::DialogClosed)));
+        let _ =
+            app.update(Message::FileSaved(id, Err(SaveError::DialogClosed)));
         assert!(!app.file_dialog_active);
 
         app.file_dialog_active = true;
@@ -4965,12 +5437,16 @@ mod tests {
         assert!(!app.file_dialog_active);
 
         app.file_dialog_active = true;
-        let _ = app.update(Message::FileSaved(id, Ok((PathBuf::from("/tmp/x"), None))));
+        let _ = app.update(Message::FileSaved(
+            id,
+            Ok((PathBuf::from("/tmp/x"), None)),
+        ));
         assert!(!app.file_dialog_active);
     }
 
     #[test]
-    fn save_tab_does_not_spawn_a_second_dialog_for_an_untitled_tab_while_one_is_active() {
+    fn save_tab_does_not_spawn_a_second_dialog_for_an_untitled_tab_while_one_is_active()
+     {
         // A Save on a never-saved tab shows a file-picker just like Open File does.
         let mut app = test_app(1);
         assert!(app.tabs[0].document.path.is_none());
@@ -4996,7 +5472,8 @@ mod tests {
     }
 
     #[test]
-    fn darkening_wash_darkens_by_the_requested_amount_on_every_theme_bright_enough_to() {
+    fn darkening_wash_darkens_by_the_requested_amount_on_every_theme_bright_enough_to()
+     {
         let mut checked = 0;
         for theme in Theme::ALL {
             let base = theme.extended_palette().background.base.color;
@@ -5081,7 +5558,10 @@ mod tests {
     fn premultiply_scales_encoded_rgb_by_alpha() {
         // White premultiplied is the alpha itself, per channel - directly on
         // the encoded values, with no linear round-trip to brighten them.
-        let color = premultiply(Color { a: 0.25, ..Color::WHITE });
+        let color = premultiply(Color {
+            a: 0.25,
+            ..Color::WHITE
+        });
         assert_eq!(color.r, 0.25);
         assert_eq!(color.g, 0.25);
         assert_eq!(color.b, 0.25);
@@ -5091,7 +5571,10 @@ mod tests {
     #[test]
     fn premultiply_leaves_black_black() {
         // Why dark themes never showed the bug: rgb ~ 0 premultiplies to itself.
-        let color = premultiply(Color { a: 0.25, ..Color::BLACK });
+        let color = premultiply(Color {
+            a: 0.25,
+            ..Color::BLACK
+        });
         assert_eq!(color.r, 0.0);
         assert_eq!(color.g, 0.0);
         assert_eq!(color.b, 0.0);
@@ -5107,14 +5590,24 @@ mod tests {
         // solid even at 0.1 while a dark one looked fine. Premultiplied, the
         // desktop keeps its full `1 - a` share of the result.
         let alpha = 0.1;
-        let straight = Color { a: alpha, ..Color::WHITE };
+        let straight = Color {
+            a: alpha,
+            ..Color::WHITE
+        };
         let premultiplied = premultiply(straight);
 
-        let over_desktop = |src: Color, desktop: f32| src.r + (1.0 - src.a) * desktop;
+        let over_desktop =
+            |src: Color, desktop: f32| src.r + (1.0 - src.a) * desktop;
 
         // Straight: black desktop and white desktop composite identically.
-        assert_eq!(over_desktop(straight, 0.0), over_desktop(straight, 1.0) - 0.9);
-        assert!(over_desktop(straight, 0.0) >= 1.0, "already saturated before the desktop is added");
+        assert_eq!(
+            over_desktop(straight, 0.0),
+            over_desktop(straight, 1.0) - 0.9
+        );
+        assert!(
+            over_desktop(straight, 0.0) >= 1.0,
+            "already saturated before the desktop is added"
+        );
 
         // Premultiplied: the window contributes its 0.1 and the desktop the rest.
         assert!((over_desktop(premultiplied, 0.0) - 0.1).abs() < 1e-6);
@@ -5131,8 +5624,14 @@ mod tests {
         app.background_alpha = 0.5;
         let theme = app.theme();
 
-        let scaled = iced::theme::default(&theme).background_color.scale_alpha(0.5);
-        let expected = if CLEAR_COLOR_NEEDS_PREMULTIPLY { premultiply(scaled) } else { scaled };
+        let scaled = iced::theme::default(&theme)
+            .background_color
+            .scale_alpha(0.5);
+        let expected = if CLEAR_COLOR_NEEDS_PREMULTIPLY {
+            premultiply(scaled)
+        } else {
+            scaled
+        };
 
         assert_eq!(app.style(&theme).background_color, expected);
     }
@@ -5143,7 +5642,9 @@ mod tests {
         // user configured - premultiplying must not eat into it.
         let mut app = test_app(1);
         app.background_alpha = 0.5;
-        assert!((app.style(&app.theme()).background_color.a - 0.5).abs() < 1e-6);
+        assert!(
+            (app.style(&app.theme()).background_color.a - 0.5).abs() < 1e-6
+        );
     }
 
     #[test]
@@ -5175,7 +5676,10 @@ mod tests {
 
         for (index, color) in seen.iter().enumerate() {
             for other in &seen[index + 1..] {
-                assert_ne!(color, other, "two frames share a background color: {seen:?}");
+                assert_ne!(
+                    color, other,
+                    "two frames share a background color: {seen:?}"
+                );
             }
         }
     }

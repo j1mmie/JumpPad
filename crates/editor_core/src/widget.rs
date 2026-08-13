@@ -48,7 +48,11 @@ pub trait TextEditorWidget {
 
     /// Restores a previously saved selection, with the moving end at
     /// `cursor`, clamping like `move_cursor_to` does.
-    fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize));
+    fn restore_selection(
+        &mut self,
+        selection: SavedSelection,
+        cursor: (usize, usize),
+    );
 
     /// Ranges to mark as find matches, and which of them is current.
     /// An empty slice clears the marking.
@@ -57,7 +61,11 @@ pub trait TextEditorWidget {
     /// editor's selection because iced's `text_editor` only draws a
     /// selection while it is focused - and the find field holds focus
     /// exactly when matches need to be visible (see AGENTS.md).
-    fn set_find_matches(&mut self, matches: Vec<FindMatch>, current: Option<usize>);
+    fn set_find_matches(
+        &mut self,
+        matches: Vec<FindMatch>,
+        current: Option<usize>,
+    );
 
     /// Whether this editor is still waiting on a grammar load - its own, or
     /// an injection target its grammar needs to color embedded content.
@@ -134,7 +142,9 @@ impl EditorMessage {
     /// passes through untouched.
     pub fn with_shift_click(self, shift_held: bool) -> Self {
         match self {
-            Self::Action(text_editor::Action::Click(position)) if shift_held => {
+            Self::Action(text_editor::Action::Click(position))
+                if shift_held =>
+            {
                 Self::Action(text_editor::Action::Drag(position))
             }
             message => message,
@@ -146,7 +156,8 @@ impl EditorMessage {
 /// if known, the file extension it was opened from (no leading dot). A
 /// boxed closure so the app shell can capture shared state (e.g. a syntax
 /// registry) once, without knowing the concrete widget type.
-pub type EditorFactory = Box<dyn Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget>>;
+pub type EditorFactory =
+    Box<dyn Fn(&str, Option<&str>) -> Box<dyn TextEditorWidget>>;
 
 #[cfg(test)]
 mod tests {
@@ -155,7 +166,9 @@ mod tests {
 
     #[test]
     fn shift_click_becomes_a_selection_extending_drag() {
-        let click = EditorMessage::Action(text_editor::Action::Click(Point::new(3.0, 7.0)));
+        let click = EditorMessage::Action(text_editor::Action::Click(
+            Point::new(3.0, 7.0),
+        ));
         assert!(matches!(
             click.with_shift_click(true),
             EditorMessage::Action(text_editor::Action::Drag(position))
@@ -165,7 +178,8 @@ mod tests {
 
     #[test]
     fn plain_click_stays_a_click() {
-        let click = EditorMessage::Action(text_editor::Action::Click(Point::ORIGIN));
+        let click =
+            EditorMessage::Action(text_editor::Action::Click(Point::ORIGIN));
         assert!(matches!(
             click.with_shift_click(false),
             EditorMessage::Action(text_editor::Action::Click(_))
@@ -183,6 +197,9 @@ mod tests {
 
     #[test]
     fn non_action_messages_pass_through() {
-        assert!(matches!(EditorMessage::Undo.with_shift_click(true), EditorMessage::Undo));
+        assert!(matches!(
+            EditorMessage::Undo.with_shift_click(true),
+            EditorMessage::Undo
+        ));
     }
 }

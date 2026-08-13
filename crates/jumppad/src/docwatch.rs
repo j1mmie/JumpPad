@@ -67,7 +67,8 @@ pub fn subscription(paths: Vec<PathBuf>) -> Subscription<Message> {
     }
     // `run_with`'s builder is a bare `fn(&D) -> S`, not a closure - it can
     // capture nothing, so everything the watcher needs arrives in `paths`.
-    Subscription::run_with(paths, watch_events).map(|()| Message::DocumentFileEvent)
+    Subscription::run_with(paths, watch_events)
+        .map(|()| Message::DocumentFileEvent)
 }
 
 // `&Vec` rather than `&[..]`: this is handed to `run_with` as a bare
@@ -80,13 +81,16 @@ fn watch_events(
     paths: &Vec<PathBuf>,
 ) -> impl iced::futures::Stream<Item = ()> + use<> {
     let paths = paths.clone();
-    iced::stream::channel(16, |output: iced::futures::channel::mpsc::Sender<()>| async move {
-        // Held across the pending() so the OS registration lives as long as
-        // this recipe does. If the watcher couldn't start, the stream stays
-        // open but silent - the focus sweep still notices changes.
-        let _watcher = start_watcher(&paths, output);
-        std::future::pending::<()>().await
-    })
+    iced::stream::channel(
+        16,
+        |output: iced::futures::channel::mpsc::Sender<()>| async move {
+            // Held across the pending() so the OS registration lives as long as
+            // this recipe does. If the watcher couldn't start, the stream stays
+            // open but silent - the focus sweep still notices changes.
+            let _watcher = start_watcher(&paths, output);
+            std::future::pending::<()>().await
+        },
+    )
 }
 
 fn start_watcher(
@@ -109,10 +113,9 @@ fn start_watcher(
         if matches!(event.kind, notify::EventKind::Access(_)) {
             return;
         }
-        let touches_an_open_file = event
-            .paths
-            .iter()
-            .any(|path| path.file_name().is_some_and(|name| names.contains(name)));
+        let touches_an_open_file = event.paths.iter().any(|path| {
+            path.file_name().is_some_and(|name| names.contains(name))
+        });
         if touches_an_open_file {
             // `try_send` needs `&mut`; cloning the sender is cheap.
             let _ = output.clone().try_send(());
@@ -134,7 +137,9 @@ fn start_watcher(
     // atomic saves, where a file watch is lost with the old inode on some
     // platforms (same reasoning as `reload.rs`).
     for dir in watched_dirs(paths) {
-        if let Err(err) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        if let Err(err) =
+            watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
+        {
             eprintln!(
                 "jumppad: couldn't watch {} for file changes: {err}",
                 dir.display()
@@ -150,7 +155,9 @@ fn watched_dirs(paths: &[PathBuf]) -> BTreeSet<PathBuf> {
     paths
         .iter()
         .map(|path| match path.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
+            Some(parent) if !parent.as_os_str().is_empty() => {
+                parent.to_path_buf()
+            }
             _ => PathBuf::from("."),
         })
         .collect()
@@ -199,7 +206,10 @@ mod tests {
         ]);
         assert!(dirs.contains(&PathBuf::from("/home/user/notes")));
         assert!(dirs.contains(&PathBuf::from("/etc")));
-        assert!(dirs.contains(&PathBuf::from(".")), "a bare name watches the cwd");
+        assert!(
+            dirs.contains(&PathBuf::from(".")),
+            "a bare name watches the cwd"
+        );
         assert_eq!(dirs.len(), 3);
     }
 }

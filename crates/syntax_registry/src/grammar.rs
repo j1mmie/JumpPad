@@ -12,7 +12,8 @@ use crate::{Handle, PollResult};
 /// unchanged text (the common case, since highlighting is recomputed on
 /// every render) are nearly free.
 pub struct Grammar {
-    #[allow(dead_code)] // kept alive alongside the parser; not read directly by Grammar itself
+    #[allow(dead_code)]
+    // kept alive alongside the parser; not read directly by Grammar itself
     language: Language,
     injections: Option<Query>,
     injected: HashMap<String, Handle>,
@@ -92,7 +93,8 @@ impl Grammar {
             let mut injected_spans: Vec<HighlightSpan> = Vec::new();
 
             let mut cursor = QueryCursor::new();
-            let mut matches = cursor.matches(query, tree.root_node(), source.as_bytes());
+            let mut matches =
+                cursor.matches(query, tree.root_node(), source.as_bytes());
             while let Some(m) = matches.next() {
                 let language_name = query
                     .property_settings(m.pattern_index)
@@ -121,17 +123,20 @@ impl Grammar {
                     if capture.index as usize != content_capture_index {
                         continue;
                     }
-                    let (start, end) = (capture.node.start_byte(), capture.node.end_byte());
+                    let (start, end) =
+                        (capture.node.start_byte(), capture.node.end_byte());
                     let Some(sub_source) = source.get(start..end) else {
                         continue;
                     };
-                    injected_spans.extend(inner_grammar.highlight(sub_source).iter().map(|span| {
-                        HighlightSpan {
-                            start: start + span.start,
-                            end: start + span.end,
-                            category: span.category,
-                        }
-                    }));
+                    injected_spans.extend(
+                        inner_grammar.highlight(sub_source).iter().map(
+                            |span| HighlightSpan {
+                                start: start + span.start,
+                                end: start + span.end,
+                                category: span.category,
+                            },
+                        ),
+                    );
                     // An injected grammar can have injections of its own, and
                     // its result is just as incomplete while they load.
                     injections_pending |= inner_grammar.injections_unresolved();
@@ -145,21 +150,27 @@ impl Grammar {
                 // where `**bold**` is overridden, and a plain `# Title`, which
                 // the inline grammar has nothing to say about, stays heading
                 // colored end to end.
-                let mut result = Vec::with_capacity(spans.len() + injected_spans.len());
+                let mut result =
+                    Vec::with_capacity(spans.len() + injected_spans.len());
                 for span in &spans {
                     let mut pieces = vec![(span.start, span.end)];
                     for injected in &injected_spans {
                         pieces = pieces
                             .into_iter()
                             .flat_map(|piece| {
-                                subtract_range(piece, (injected.start, injected.end))
+                                subtract_range(
+                                    piece,
+                                    (injected.start, injected.end),
+                                )
                             })
                             .collect();
                     }
-                    result.extend(pieces.into_iter().map(|(start, end)| HighlightSpan {
-                        start,
-                        end,
-                        category: span.category,
+                    result.extend(pieces.into_iter().map(|(start, end)| {
+                        HighlightSpan {
+                            start,
+                            end,
+                            category: span.category,
+                        }
                     }));
                 }
                 result.extend(injected_spans);
@@ -178,7 +189,10 @@ impl Grammar {
 
 /// Removes the `[remove.0, remove.1)` byte range from `piece`, returning
 /// the 0, 1, or 2 remaining sub-ranges that don't overlap it.
-fn subtract_range(piece: (usize, usize), remove: (usize, usize)) -> Vec<(usize, usize)> {
+fn subtract_range(
+    piece: (usize, usize),
+    remove: (usize, usize),
+) -> Vec<(usize, usize)> {
     let (start, end) = piece;
     let (remove_start, remove_end) = remove;
     if remove_end <= start || remove_start >= end {

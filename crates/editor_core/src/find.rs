@@ -91,8 +91,19 @@ mod tests {
         let text = "Hello HELLO hello";
         let found = find_matches(text, "hello");
         assert_eq!(found.len(), 3);
-        assert_eq!(found[0], FindMatch { line: 0, start: 0, end: 5 });
-        assert!(found.iter().all(|f| matched(text, f).eq_ignore_ascii_case("hello")));
+        assert_eq!(
+            found[0],
+            FindMatch {
+                line: 0,
+                start: 0,
+                end: 5
+            }
+        );
+        assert!(
+            found
+                .iter()
+                .all(|f| matched(text, f).eq_ignore_ascii_case("hello"))
+        );
 
         // A mixed-case query finds the same three.
         assert_eq!(find_matches(text, "HeLLo").len(), 3);
@@ -105,8 +116,16 @@ mod tests {
         assert_eq!(
             found,
             vec![
-                FindMatch { line: 0, start: 4, end: 7 },
-                FindMatch { line: 1, start: 6, end: 9 },
+                FindMatch {
+                    line: 0,
+                    start: 4,
+                    end: 7
+                },
+                FindMatch {
+                    line: 1,
+                    start: 6,
+                    end: 9
+                },
             ]
         );
     }
@@ -125,7 +144,14 @@ mod tests {
     fn occurrences_do_not_overlap() {
         // "aa" in "aaa" is one match, not two - the second would overlap.
         let found = find_matches("aaa", "aa");
-        assert_eq!(found, vec![FindMatch { line: 0, start: 0, end: 2 }]);
+        assert_eq!(
+            found,
+            vec![FindMatch {
+                line: 0,
+                start: 0,
+                end: 2
+            }]
+        );
     }
 
     #[test]
@@ -133,7 +159,14 @@ mod tests {
         // A CRLF document must not leave `\r` inside a match at line end.
         let text = "find me\r\nsecond";
         let found = find_matches(text, "me");
-        assert_eq!(found, vec![FindMatch { line: 0, start: 5, end: 7 }]);
+        assert_eq!(
+            found,
+            vec![FindMatch {
+                line: 0,
+                start: 5,
+                end: 7
+            }]
+        );
     }
 
     #[test]

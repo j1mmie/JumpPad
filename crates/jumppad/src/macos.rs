@@ -21,7 +21,9 @@ use objc2::runtime::AnyObject;
 /// first (`SHADOW_REFRESH_FRAMES`).
 pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
     let Ok(handle) = window.window_handle() else {
-        log::warn!("jumppad: no window handle; leaving the window shadow alone");
+        log::warn!(
+            "jumppad: no window handle; leaving the window shadow alone"
+        );
         return;
     };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {

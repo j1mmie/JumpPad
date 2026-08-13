@@ -9,7 +9,7 @@
 //! chord was the one part of an action's identity that wasn't already written
 //! down as data.
 
-use iced_core::keyboard::{key, Key, Modifiers};
+use iced_core::keyboard::{Key, Modifiers, key};
 use jumppad_actions::{Action, Context};
 
 /// What has to be held. `command` and `jump` are *roles*, not physical keys:
@@ -39,26 +39,52 @@ impl Mods {
     }
 
     pub const NONE: Self = Self::new();
-    pub const COMMAND: Self = Self { command: true, ..Self::new() };
-    pub const COMMAND_SHIFT: Self =
-        Self { command: true, shift: true, ..Self::new() };
-    pub const CONTROL: Self = Self { control: true, ..Self::new() };
-    pub const JUMP: Self = Self { jump: true, ..Self::new() };
-    pub const ALT: Self = Self { alt: true, ..Self::new() };
+    pub const COMMAND: Self = Self {
+        command: true,
+        ..Self::new()
+    };
+    pub const COMMAND_SHIFT: Self = Self {
+        command: true,
+        shift: true,
+        ..Self::new()
+    };
+    pub const CONTROL: Self = Self {
+        control: true,
+        ..Self::new()
+    };
+    pub const JUMP: Self = Self {
+        jump: true,
+        ..Self::new()
+    };
+    pub const ALT: Self = Self {
+        alt: true,
+        ..Self::new()
+    };
     /// Cmd+Opt on macOS, Ctrl+Alt elsewhere - `command` is the platform
     /// accelerator, `alt` is the literal Option/Alt key on both.
-    pub const COMMAND_ALT: Self =
-        Self { command: true, alt: true, ..Self::new() };
+    pub const COMMAND_ALT: Self = Self {
+        command: true,
+        alt: true,
+        ..Self::new()
+    };
 
     /// The concrete modifier mask this spec means on the platform in hand.
     pub fn mask(self) -> Modifiers {
         let macos = cfg!(target_os = "macos");
         let mut mask = Modifiers::empty();
         if self.command {
-            mask |= if macos { Modifiers::LOGO } else { Modifiers::CTRL };
+            mask |= if macos {
+                Modifiers::LOGO
+            } else {
+                Modifiers::CTRL
+            };
         }
         if self.jump {
-            mask |= if macos { Modifiers::ALT } else { Modifiers::CTRL };
+            mask |= if macos {
+                Modifiers::ALT
+            } else {
+                Modifiers::CTRL
+            };
         }
         if self.control {
             mask |= Modifiers::CTRL;
@@ -126,8 +152,7 @@ impl Chord {
         physical_key: key::Physical,
         modifiers: Modifiers,
     ) -> bool {
-        self.mods.matches(modifiers)
-            && self.trigger.matches(key, physical_key)
+        self.mods.matches(modifiers) && self.trigger.matches(key, physical_key)
     }
 }
 
@@ -149,7 +174,10 @@ pub const DEFAULT_KEYS: &[(Action, &[Chord])] = &[
     (Action::SaveFile, &[latin(Mods::COMMAND, 's')]),
     (Action::SaveFileAs, &[latin(Mods::COMMAND_SHIFT, 's')]),
     (Action::CloseActiveTab, &[latin(Mods::COMMAND, 'w')]),
-    (Action::SelectPreviousTab, &[latin(Mods::COMMAND_SHIFT, '[')]),
+    (
+        Action::SelectPreviousTab,
+        &[latin(Mods::COMMAND_SHIFT, '[')],
+    ),
     (Action::SelectNextTab, &[latin(Mods::COMMAND_SHIFT, ']')]),
     // Ctrl on every platform, Cmd nowhere - the one binding that means the
     // physical Ctrl key rather than "the platform's accelerator".
@@ -247,7 +275,11 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    fn press(key: Key, code: key::Code, modifiers: Modifiers) -> Option<Action> {
+    fn press(
+        key: Key,
+        code: key::Code,
+        modifiers: Modifiers,
+    ) -> Option<Action> {
         action_for(
             &key,
             key::Physical::Code(code),
@@ -471,7 +503,12 @@ mod tests {
             ('f', key::Code::KeyF, cmd, Action::Find),
             ('g', key::Code::KeyG, cmd, Action::FindNext),
             ('g', key::Code::KeyG, shift, Action::FindPrevious),
-            ('[', key::Code::BracketLeft, shift, Action::SelectPreviousTab),
+            (
+                '[',
+                key::Code::BracketLeft,
+                shift,
+                Action::SelectPreviousTab,
+            ),
             (']', key::Code::BracketRight, shift, Action::SelectNextTab),
         ] {
             assert_eq!(

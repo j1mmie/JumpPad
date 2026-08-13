@@ -68,7 +68,12 @@ impl Tab {
         }
     }
 
-    pub fn from_file(id: u64, path: PathBuf, text: &str, factory: &EditorFactory) -> Self {
+    pub fn from_file(
+        id: u64,
+        path: PathBuf,
+        text: &str,
+        factory: &EditorFactory,
+    ) -> Self {
         let extension = path.extension().and_then(|ext| ext.to_str());
         let editor = factory(text, extension);
         Self {

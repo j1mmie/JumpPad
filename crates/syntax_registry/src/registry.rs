@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use tree_sitter::{wasmtime, Language, Query};
+use tree_sitter::{Language, Query, wasmtime};
 
 use crate::grammar::Grammar;
 use crate::loader;
@@ -72,7 +72,8 @@ impl SyntaxRegistry {
     /// is configured, the returned `Handle` just reports `Unavailable`
     /// forever. Drop the `Handle` to release the reservation.
     pub fn acquire(self: &Arc<Self>, extension: &str) -> Handle {
-        let Some(grammar) = self.extension_to_grammar.get(extension).cloned() else {
+        let Some(grammar) = self.extension_to_grammar.get(extension).cloned()
+        else {
             return Handle {
                 registry: self.clone(),
                 grammar: None,
@@ -95,7 +96,9 @@ impl SyntaxRegistry {
                 *refcount += 1;
             }
             None => {
-                eprintln!("syntax_registry: {grammar_name}: no cached entry, spawning load");
+                eprintln!(
+                    "syntax_registry: {grammar_name}: no cached entry, spawning load"
+                );
                 state.insert(grammar_name.to_owned(), (Entry::Loading, 1));
                 drop(state);
 
@@ -120,7 +123,8 @@ impl SyntaxRegistry {
             });
 
         let result = result.map(|(language, parser)| {
-            let (injections, injected) = self.load_injections(grammar_name, &language);
+            let (injections, injected) =
+                self.load_injections(grammar_name, &language);
             Grammar::new(language, parser, injections, injected)
         });
 
@@ -134,7 +138,9 @@ impl SyntaxRegistry {
             }
             *entry = match result {
                 Ok(grammar) => {
-                    eprintln!("syntax_registry: {grammar_name}: loaded successfully");
+                    eprintln!(
+                        "syntax_registry: {grammar_name}: loaded successfully"
+                    );
                     Entry::Loaded(Arc::new(grammar))
                 }
                 Err(reason) => {
@@ -160,7 +166,9 @@ impl SyntaxRegistry {
         grammar_name: &str,
         language: &Language,
     ) -> (Option<Query>, HashMap<String, Handle>) {
-        let Some(source) = loader::find_injections_source(&self.search_dirs, grammar_name) else {
+        let Some(source) =
+            loader::find_injections_source(&self.search_dirs, grammar_name)
+        else {
             return (None, HashMap::new());
         };
 
@@ -199,7 +207,9 @@ impl SyntaxRegistry {
     fn poll(&self, grammar_name: &str) -> PollResult {
         match self.state.lock().unwrap().get(grammar_name) {
             Some((Entry::Loading, _)) | None => PollResult::Loading,
-            Some((Entry::Loaded(grammar), _)) => PollResult::Ready(grammar.clone()),
+            Some((Entry::Loaded(grammar), _)) => {
+                PollResult::Ready(grammar.clone())
+            }
             Some((Entry::Unavailable(_), _)) => PollResult::Unavailable,
         }
     }
@@ -215,9 +225,13 @@ impl SyntaxRegistry {
                 return;
             };
             *refcount -= 1;
-            eprintln!("syntax_registry: {grammar_name}: released (refcount -> {refcount})");
+            eprintln!(
+                "syntax_registry: {grammar_name}: released (refcount -> {refcount})"
+            );
             if *refcount == 0 {
-                eprintln!("syntax_registry: {grammar_name}: evicting, no tabs left using it");
+                eprintln!(
+                    "syntax_registry: {grammar_name}: evicting, no tabs left using it"
+                );
                 state.remove(grammar_name)
             } else {
                 None

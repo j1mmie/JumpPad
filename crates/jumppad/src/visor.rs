@@ -38,8 +38,9 @@ impl Animation {
     /// the slide starts fast and settles gently instead of stopping
     /// abruptly.
     pub fn current_y(&self) -> f32 {
-        let t = (self.start.elapsed().as_secs_f32() / ANIMATION_DURATION.as_secs_f32())
-            .clamp(0.0, 1.0);
+        let t = (self.start.elapsed().as_secs_f32()
+            / ANIMATION_DURATION.as_secs_f32())
+        .clamp(0.0, 1.0);
         let eased = 1.0 - (1.0 - t).powi(3);
         self.from_y + (self.to_y - self.from_y) * eased
     }

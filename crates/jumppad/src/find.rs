@@ -52,7 +52,9 @@ impl FindState {
     /// touching it - which is where selecting a match leaves the cursor.
     pub fn index_at(&self, position: (usize, usize)) -> Option<usize> {
         self.matches.iter().position(|found| {
-            position.0 == found.line && position.1 >= found.start && position.1 <= found.end
+            position.0 == found.line
+                && position.1 >= found.start
+                && position.1 <= found.end
         })
     }
 
@@ -65,7 +67,9 @@ impl FindState {
         }
         let count = self.matches.len() as isize;
         self.current = Some(match self.current {
-            Some(current) => (current as isize + delta).rem_euclid(count) as usize,
+            Some(current) => {
+                (current as isize + delta).rem_euclid(count) as usize
+            }
             None => self.first_at_or_after(self.origin).unwrap_or(0),
         });
     }
@@ -138,10 +142,18 @@ mod tests {
         state.step(1);
         assert_eq!(state.current, Some(2));
         state.step(1);
-        assert_eq!(state.current, Some(0), "next past the last wraps to the first");
+        assert_eq!(
+            state.current,
+            Some(0),
+            "next past the last wraps to the first"
+        );
 
         state.step(-1);
-        assert_eq!(state.current, Some(2), "previous before the first wraps to the last");
+        assert_eq!(
+            state.current,
+            Some(2),
+            "previous before the first wraps to the last"
+        );
     }
 
     #[test]
@@ -169,7 +181,14 @@ mod tests {
         state.step(1);
         assert_eq!(state.counter().as_deref(), Some("2 of 3"));
 
-        assert_eq!(searched("text", "zebra").counter().as_deref(), Some("No results"));
-        assert_eq!(searched("text", "").counter(), None, "an empty query shows no counter");
+        assert_eq!(
+            searched("text", "zebra").counter().as_deref(),
+            Some("No results")
+        );
+        assert_eq!(
+            searched("text", "").counter(),
+            None,
+            "an empty query shows no counter"
+        );
     }
 }
