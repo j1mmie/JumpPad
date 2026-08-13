@@ -5,11 +5,13 @@
 use iced::window::raw_window_handle::RawWindowHandle;
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DwmEnableBlurBehindWindow, DwmSetWindowAttribute, DWMSBT_NONE, DWMWA_SYSTEMBACKDROP_TYPE,
-    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND,
+    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE,
+    DWMWA_SYSTEMBACKDROP_TYPE, DwmEnableBlurBehindWindow,
+    DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    CreateRectRgn, DeleteObject, FillRect, GetDC, GetStockObject, ReleaseDC, BLACK_BRUSH,
+    BLACK_BRUSH, CreateRectRgn, DeleteObject, FillRect, GetDC, GetStockObject,
+    ReleaseDC,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -70,7 +72,9 @@ pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
     };
 
     if result < 0 {
-        log::debug!("jumppad: no system-backdrop control on this Windows build (0x{result:X})");
+        log::debug!(
+            "jumppad: no system-backdrop control on this Windows build (0x{result:X})"
+        );
     } else {
         log::debug!("jumppad: disabled the window's system backdrop");
     }
@@ -142,7 +146,9 @@ pub fn reset_redirection_surface(window: &dyn iced::window::Window) {
         DeleteObject(region as _);
 
         if result < 0 {
-            log::warn!("jumppad: could not re-arm per-pixel alpha (0x{result:X})");
+            log::warn!(
+                "jumppad: could not re-arm per-pixel alpha (0x{result:X})"
+            );
         } else {
             log::debug!("jumppad: reset the window's redirection surface");
         }

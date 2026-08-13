@@ -143,7 +143,6 @@ pub struct CapturedView {
     cursor_row: f32,
 }
 
-
 /// Where the view sits, in lines from the top of the document, or `None` if it
 /// has no line height to measure against yet. Fractional: `scroll.vertical` is
 /// a pixel offset into the wrapped rows of the line at `scroll.line`.
@@ -227,7 +226,9 @@ fn shape_and_reveal(
 
     match pending {
         None => {}
-        Some(PendingView::Edited { scrolled_to: before }) => {
+        Some(PendingView::Edited {
+            scrolled_to: before,
+        }) => {
             if let Some(lines) = reveal_scroll(editor, before, text_bounds) {
                 scroll(editor, lines);
             }
@@ -300,8 +301,7 @@ fn restore_pixels(
         None => before.scroll_line as f32 - now.line as f32,
     };
 
-    lines * buffer.metrics().line_height + before.scroll_vertical
-        - now.vertical
+    lines * buffer.metrics().line_height + before.scroll_vertical - now.vertical
 }
 
 /// The scroll an edit still owes the view, in lines, measured against where
@@ -341,9 +341,7 @@ fn reveal_offset(
 
     if scrolled_after < scrolled_before && area.on_first_row(cursor_row) {
         Some(-area.inset_line_count())
-    } else if scrolled_after > scrolled_before
-        && area.on_last_row(cursor_row)
-    {
+    } else if scrolled_after > scrolled_before && area.on_last_row(cursor_row) {
         Some(area.inset_line_count())
     } else {
         None
@@ -559,7 +557,10 @@ where
     ///
     /// Optional: with no handler set, scrolling falls back to whole lines
     /// through `on_action`, which is how upstream behaves.
-    pub fn on_scroll(mut self, on_scroll: impl Fn(f32) -> Message + 'a) -> Self {
+    pub fn on_scroll(
+        mut self,
+        on_scroll: impl Fn(f32) -> Message + 'a,
+    ) -> Self {
         self.on_scroll = Some(Box::new(on_scroll));
         self
     }
@@ -1021,7 +1022,8 @@ impl<Highlighter, Message, Theme, Renderer>
 where
     Highlighter: text::Highlighter,
     Theme: Catalog,
-    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
+    Renderer:
+        text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     /// One line's height in pixels, which is what turns a scroll measured in
     /// lines into one measured in pixels.
@@ -1034,12 +1036,21 @@ where
     }
 
     /// The scrollbar's geometry against the widget's laid-out bounds.
-    fn scrollbar(&self, layout: Layout<'_>, width: f32) -> Option<scrollbar::Layout> {
+    fn scrollbar(
+        &self,
+        layout: Layout<'_>,
+        width: f32,
+    ) -> Option<scrollbar::Layout> {
         let text_bounds = layout.bounds().shrink(self.padding);
         scrollbar_layout(&self.content.0.borrow().editor, text_bounds, width)
     }
 
-    fn is_over_thumb(&self, layout: Layout<'_>, cursor: mouse::Cursor, width: f32) -> bool {
+    fn is_over_thumb(
+        &self,
+        layout: Layout<'_>,
+        cursor: mouse::Cursor,
+        width: f32,
+    ) -> bool {
         let Some(position) = cursor.position() else {
             return false;
         };
@@ -1057,7 +1068,8 @@ impl<Highlighter, Message, Theme, Renderer> Widget<Message, Theme, Renderer>
 where
     Highlighter: text::Highlighter,
     Theme: Catalog,
-    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
+    Renderer:
+        text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     fn tag(&self) -> widget::tree::Tag {
         widget::tree::Tag::of::<State<Highlighter>>()
@@ -1136,7 +1148,12 @@ where
         };
 
         let pending_view = internal.pending_view.take();
-        shape_and_reveal(&mut internal.editor, pending_view, text_bounds, shape);
+        shape_and_reveal(
+            &mut internal.editor,
+            pending_view,
+            text_bounds,
+            shape,
+        );
         internal.shaped = true;
 
         match self.height {
@@ -1246,14 +1263,11 @@ where
             }
             Event::Mouse(mouse::Event::CursorMoved { .. }) => {
                 if state.scrollbar.is_dragging() {
-                    let lines =
-                        scrollbar.zip(cursor.position()).and_then(
-                            |(scrollbar, position)| {
-                                state
-                                    .scrollbar
-                                    .drag_to(position, scrollbar, now)
-                            },
-                        );
+                    let lines = scrollbar.zip(cursor.position()).and_then(
+                        |(scrollbar, position)| {
+                            state.scrollbar.drag_to(position, scrollbar, now)
+                        },
+                    );
 
                     if let Some(lines) = lines {
                         if let Some(on_scroll) = self.on_scroll.as_ref() {
@@ -1272,10 +1286,7 @@ where
                 }
 
                 let hovered = cursor.position().is_some_and(|position| {
-                    scrollbar::Layout::is_in_reveal_strip(
-                        text_bounds,
-                        position,
-                    )
+                    scrollbar::Layout::is_in_reveal_strip(text_bounds, position)
                 });
 
                 if state.scrollbar.set_hovered(hovered, now) {
@@ -1342,7 +1353,8 @@ where
                         // so the view can land between two lines. No
                         // accumulator, because nothing is being rounded off -
                         // a tenth of a line scrolls a tenth of a line.
-                        let pixels = lines * self.absolute_line_height(renderer);
+                        let pixels =
+                            lines * self.absolute_line_height(renderer);
 
                         if pixels != 0.0 {
                             shell.publish(on_scroll(pixels));
@@ -1690,7 +1702,9 @@ where
 
         // An I-beam over the thumb would suggest the text underneath is what
         // the click lands on, and it isn't.
-        if state.scrollbar.is_dragging() || self.is_over_thumb(layout, cursor, width) {
+        if state.scrollbar.is_dragging()
+            || self.is_over_thumb(layout, cursor, width)
+        {
             return mouse::Interaction::Idle;
         }
 
@@ -1725,7 +1739,8 @@ where
     Highlighter: text::Highlighter,
     Message: 'a,
     Theme: Catalog + 'a,
-    Renderer: text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
+    Renderer:
+        text::Renderer<Font = iced_core::Font, Editor = graphics::text::Editor>,
 {
     fn from(
         text_editor: TextEditor<'a, Highlighter, Message, Theme, Renderer>,
@@ -1939,7 +1954,10 @@ impl<Message> Update<Message> {
                 mouse::Event::WheelScrolled { delta }
                     if cursor.is_over(bounds) =>
                 {
-                    Some(Update::Scroll(wheel_lines(*delta, scroll_sensitivity)))
+                    Some(Update::Scroll(wheel_lines(
+                        *delta,
+                        scroll_sensitivity,
+                    )))
                 }
                 _ => None,
             },
@@ -2181,11 +2199,7 @@ mod tests {
 
     /// Edits the way the widget does: the scroll goes on record before the
     /// edit, and the reveal rides along with the next shape.
-    fn perform(
-        editor: &mut graphics::text::Editor,
-        bounds: Size,
-        edit: Edit,
-    ) {
+    fn perform(editor: &mut graphics::text::Editor, bounds: Size, edit: Edit) {
         let pending = scrolled_to(editor)
             .map(|scrolled_to| PendingView::Edited { scrolled_to });
 
@@ -2812,14 +2826,15 @@ mod tests {
     /// `lines` back over it, then that line moved down one - the way a line
     /// command rebuilds. Returns the view and cursor row either side.
     #[allow(clippy::type_complexity)]
-    fn wrapped_line_move(
-        lines: i32,
-    ) -> ((usize, f32), f32, (usize, f32), f32) {
+    fn wrapped_line_move(lines: i32) -> ((usize, f32), f32, (usize, f32), f32) {
         let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
         let mut editor = graphics::text::Editor::with_text(&wrapped_text());
         shape_wrapped(&mut editor, bounds);
         editor.move_to(Cursor {
-            position: Position { line: 100, column: 0 },
+            position: Position {
+                line: 100,
+                column: 0,
+            },
             selection: None,
         });
         shape_wrapped(&mut editor, bounds);
@@ -2832,7 +2847,10 @@ mod tests {
 
         let mut rebuilt = graphics::text::Editor::with_text(&wrapped_text());
         rebuilt.move_to(Cursor {
-            position: Position { line: 101, column: 0 },
+            position: Position {
+                line: 101,
+                column: 0,
+            },
             selection: None,
         });
         shape_and_reveal(&mut rebuilt, pending, bounds, |editor| {
@@ -2871,7 +2889,11 @@ mod tests {
         reveal: bool,
     ) -> ((usize, f32), f32, (usize, f32), f32) {
         let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
-        let text = if wrap { wrapped_text() } else { document_text() };
+        let text = if wrap {
+            wrapped_text()
+        } else {
+            document_text()
+        };
         let lay_out = |e: &mut graphics::text::Editor, bounds| {
             if wrap {
                 shape_wrapped(e, bounds);
@@ -2883,7 +2905,10 @@ mod tests {
         let mut editor = graphics::text::Editor::with_text(&text);
         lay_out(&mut editor, bounds);
         editor.move_to(Cursor {
-            position: Position { line: 100, column: 0 },
+            position: Position {
+                line: 100,
+                column: 0,
+            },
             selection: None,
         });
         lay_out(&mut editor, bounds);
@@ -2947,7 +2972,10 @@ mod tests {
             }
         }
 
-        assert!(checked >= 10, "only {checked} cases landed in the safe area");
+        assert!(
+            checked >= 10,
+            "only {checked} cases landed in the safe area"
+        );
     }
 
     #[test]

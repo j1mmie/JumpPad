@@ -46,7 +46,9 @@ impl Config {
 
     /// Extension (lowercased) -> comment style, for toggle-comment; a later
     /// entry wins an extension.
-    pub fn comment_styles_by_extension(&self) -> HashMap<String, CommentSyntax> {
+    pub fn comment_styles_by_extension(
+        &self,
+    ) -> HashMap<String, CommentSyntax> {
         let mut map = HashMap::new();
         for language in &self.languages {
             let Some(comment) = &language.comment else {
@@ -120,10 +122,14 @@ impl TryFrom<RawCommentSyntax> for CommentSyntax {
 impl From<CommentSyntax> for RawCommentSyntax {
     fn from(comment: CommentSyntax) -> Self {
         match comment {
-            CommentSyntax::Single(prefix) => Self { single: Some(prefix), multi: None },
-            CommentSyntax::Multi { left, right } => {
-                Self { single: None, multi: Some(RawMultiComment { left, right }) }
-            }
+            CommentSyntax::Single(prefix) => Self {
+                single: Some(prefix),
+                multi: None,
+            },
+            CommentSyntax::Multi { left, right } => Self {
+                single: None,
+                multi: Some(RawMultiComment { left, right }),
+            },
         }
     }
 }
@@ -201,7 +207,9 @@ pub struct FilesConfig {
 
 /// What a save does when the file changed on disk since JumpPad last read
 /// it. Mirrors VS Code's `files.saveConflictResolution`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum SaveConflictResolution {
     /// Prompt before overwriting someone else's changes.
@@ -251,10 +259,10 @@ impl KeybindsConfig {
 /// `./config.toml` (a `cargo run` convenience).
 fn config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("config.toml"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        paths.push(dir.join("config.toml"));
     }
     paths.push(PathBuf::from("config.toml"));
     paths
@@ -325,14 +333,17 @@ pub fn try_load_keybinds() -> Result<KeybindsConfig, ReloadError> {
     try_parse(&keybind_paths())
 }
 
-fn try_parse<T: serde::de::DeserializeOwned>(paths: &[PathBuf]) -> Result<T, ReloadError> {
+fn try_parse<T: serde::de::DeserializeOwned>(
+    paths: &[PathBuf],
+) -> Result<T, ReloadError> {
     for path in paths {
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
             Err(err) => return Err(ReloadError::Io(err.kind())),
         };
-        return toml::from_str(&text).map_err(|err| ReloadError::Parse(err.to_string()));
+        return toml::from_str(&text)
+            .map_err(|err| ReloadError::Parse(err.to_string()));
     }
     Err(ReloadError::Missing)
 }
@@ -382,7 +393,10 @@ fn write_default(path: &std::path::Path, config: &Config) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("jumppad_config: couldn't create {}: {err}", parent.display());
+        eprintln!(
+            "jumppad_config: couldn't create {}: {err}",
+            parent.display()
+        );
         return;
     }
     match toml::to_string_pretty(config) {
@@ -394,17 +408,19 @@ fn write_default(path: &std::path::Path, config: &Config) {
                 );
             }
         }
-        Err(err) => eprintln!("jumppad_config: couldn't serialize default config: {err}"),
+        Err(err) => eprintln!(
+            "jumppad_config: couldn't serialize default config: {err}"
+        ),
     }
 }
 
 /// Where `keybinds.toml` is looked for - same search order as `config_paths()`.
 fn keybind_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            paths.push(dir.join("keybinds.toml"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        paths.push(dir.join("keybinds.toml"));
     }
     paths.push(PathBuf::from("keybinds.toml"));
     paths
@@ -452,7 +468,10 @@ fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!("jumppad_config: couldn't create {}: {err}", parent.display());
+        eprintln!(
+            "jumppad_config: couldn't create {}: {err}",
+            parent.display()
+        );
         return;
     }
     match toml::to_string_pretty(keybinds) {
@@ -464,7 +483,9 @@ fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
                 );
             }
         }
-        Err(err) => eprintln!("jumppad_config: couldn't serialize default keybinds: {err}"),
+        Err(err) => eprintln!(
+            "jumppad_config: couldn't serialize default keybinds: {err}"
+        ),
     }
 }
 
@@ -474,7 +495,8 @@ mod tests {
 
     #[test]
     fn keybinds_toml_with_no_overrides_table_parses_as_empty() {
-        let keybinds: KeybindsConfig = toml::from_str(r#"toggle = "control+Backquote""#).unwrap();
+        let keybinds: KeybindsConfig =
+            toml::from_str(r#"toggle = "control+Backquote""#).unwrap();
         assert!(keybinds.overrides.is_empty());
     }
 
@@ -496,7 +518,8 @@ mod tests {
         assert_eq!(
             resolved.get("new_tab"),
             Some(&ResolvedKeybind {
-                modifiers: iced_core::keyboard::Modifiers::CTRL | iced_core::keyboard::Modifiers::ALT,
+                modifiers: iced_core::keyboard::Modifiers::CTRL
+                    | iced_core::keyboard::Modifiers::ALT,
                 code: iced_core::keyboard::key::Code::KeyN,
             })
         );
@@ -533,7 +556,8 @@ mod tests {
 
     impl TempFile {
         fn with_contents(name: &str, contents: &str) -> Self {
-            let path = std::env::temp_dir().join(format!("jumppad_config_test_{name}"));
+            let path = std::env::temp_dir()
+                .join(format!("jumppad_config_test_{name}"));
             std::fs::write(&path, contents).unwrap();
             Self(path)
         }
@@ -547,7 +571,8 @@ mod tests {
 
     #[test]
     fn try_parse_reads_the_first_existing_candidate() {
-        let file = TempFile::with_contents("valid.toml", r#"theme = "Dracula""#);
+        let file =
+            TempFile::with_contents("valid.toml", r#"theme = "Dracula""#);
         let missing = PathBuf::from("does_not_exist/config.toml");
         let config: Config = try_parse(&[missing, file.0.clone()]).unwrap();
         assert_eq!(config.theme, "Dracula");
@@ -555,7 +580,8 @@ mod tests {
 
     #[test]
     fn try_parse_with_no_existing_candidate_is_missing() {
-        let result: Result<Config, _> = try_parse(&[PathBuf::from("does_not_exist/config.toml")]);
+        let result: Result<Config, _> =
+            try_parse(&[PathBuf::from("does_not_exist/config.toml")]);
         assert!(matches!(result, Err(ReloadError::Missing)));
     }
 
@@ -564,7 +590,8 @@ mod tests {
     #[test]
     fn try_parse_surfaces_a_parse_error_instead_of_defaulting() {
         let file = TempFile::with_contents("broken.toml", "theme = ");
-        let result: Result<Config, _> = try_parse(std::slice::from_ref(&file.0));
+        let result: Result<Config, _> =
+            try_parse(std::slice::from_ref(&file.0));
         assert!(matches!(result, Err(ReloadError::Parse(_))));
     }
 
@@ -579,13 +606,20 @@ mod tests {
             new_tab = "not a real chord"
             "#,
         );
-        let result: Result<KeybindsConfig, _> = try_parse(std::slice::from_ref(&file.0));
+        let result: Result<KeybindsConfig, _> =
+            try_parse(std::slice::from_ref(&file.0));
         assert!(matches!(result, Err(ReloadError::Parse(_))));
     }
 
     #[test]
     fn default_alpha_is_fully_solid() {
-        assert_eq!(AlphaConfig::default(), AlphaConfig { background: 1.0, foreground: 1.0 });
+        assert_eq!(
+            AlphaConfig::default(),
+            AlphaConfig {
+                background: 1.0,
+                foreground: 1.0
+            }
+        );
     }
 
     #[test]
@@ -614,13 +648,25 @@ mod tests {
     fn config_toml_with_no_languages_keeps_the_builtin_defaults() {
         let config: Config = toml::from_str(r#"theme = "Light""#).unwrap();
         let styles = config.comment_styles_by_extension();
-        assert_eq!(styles.get("yaml"), Some(&CommentSyntax::Single("# ".to_string())));
-        assert_eq!(styles.get("yml"), Some(&CommentSyntax::Single("# ".to_string())));
+        assert_eq!(
+            styles.get("yaml"),
+            Some(&CommentSyntax::Single("# ".to_string()))
+        );
+        assert_eq!(
+            styles.get("yml"),
+            Some(&CommentSyntax::Single("# ".to_string()))
+        );
         assert_eq!(
             styles.get("html"),
-            Some(&CommentSyntax::Multi { left: "<!--".to_string(), right: "-->".to_string() })
+            Some(&CommentSyntax::Multi {
+                left: "<!--".to_string(),
+                right: "-->".to_string()
+            })
         );
-        assert_eq!(config.extension_to_grammar().get("yml").map(String::as_str), Some("yaml"));
+        assert_eq!(
+            config.extension_to_grammar().get("yml").map(String::as_str),
+            Some("yaml")
+        );
     }
 
     #[test]
@@ -638,7 +684,10 @@ mod tests {
         )
         .unwrap();
         let styles = config.comment_styles_by_extension();
-        assert_eq!(styles.get("toml"), Some(&CommentSyntax::Single("// ".to_string())));
+        assert_eq!(
+            styles.get("toml"),
+            Some(&CommentSyntax::Single("// ".to_string()))
+        );
         assert_eq!(styles.get("yaml"), None, "built-in defaults are gone");
         assert_eq!(config.extension_to_grammar().len(), 1);
     }
@@ -703,7 +752,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             config.languages[0].comment,
-            Some(CommentSyntax::Multi { left: "<!--".to_string(), right: "-->".to_string() })
+            Some(CommentSyntax::Multi {
+                left: "<!--".to_string(),
+                right: "-->".to_string()
+            })
         );
     }
 
@@ -727,8 +779,14 @@ mod tests {
             ..Default::default()
         };
         let styles = config.comment_styles_by_extension();
-        assert_eq!(styles.get("cpp"), Some(&CommentSyntax::Single("# ".to_string())));
-        assert_eq!(styles.get("hpp"), Some(&CommentSyntax::Single("// ".to_string())));
+        assert_eq!(
+            styles.get("cpp"),
+            Some(&CommentSyntax::Single("# ".to_string()))
+        );
+        assert_eq!(
+            styles.get("hpp"),
+            Some(&CommentSyntax::Single("// ".to_string()))
+        );
         // The grammar map keeps configured casing and skips syntax-less entries.
         let grammars = config.extension_to_grammar();
         assert_eq!(grammars.get("cpp").map(String::as_str), Some("cpp"));
@@ -772,10 +830,13 @@ mod tests {
     #[test]
     fn the_sample_files_parse() {
         let config: Config =
-            toml::from_str(include_str!("../../../config/config.sample.toml")).unwrap();
+            toml::from_str(include_str!("../../../config/config.sample.toml"))
+                .unwrap();
         assert!(!config.languages.is_empty());
-        let _: KeybindsConfig =
-            toml::from_str(include_str!("../../../config/keybinds.sample.toml")).unwrap();
+        let _: KeybindsConfig = toml::from_str(include_str!(
+            "../../../config/keybinds.sample.toml"
+        ))
+        .unwrap();
     }
 
     #[test]
@@ -878,7 +939,13 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.alpha, AlphaConfig { background: 0.7, foreground: 0.9 });
+        assert_eq!(
+            config.alpha,
+            AlphaConfig {
+                background: 0.7,
+                foreground: 0.9
+            }
+        );
     }
 
     #[test]
@@ -892,6 +959,12 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.alpha, AlphaConfig { background: 0.5, foreground: 1.0 });
+        assert_eq!(
+            config.alpha,
+            AlphaConfig {
+                background: 0.5,
+                foreground: 1.0
+            }
+        );
     }
 }

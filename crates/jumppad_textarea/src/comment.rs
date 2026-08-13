@@ -27,7 +27,10 @@ pub struct ToggledLines {
 
 /// Uncomments `lines` when the coverage is already commented in `style`,
 /// else comments it. `None` = nothing to do.
-pub fn toggle_comment(lines: &[&str], style: &CommentStyle) -> Option<ToggledLines> {
+pub fn toggle_comment(
+    lines: &[&str],
+    style: &CommentStyle,
+) -> Option<ToggledLines> {
     match style {
         CommentStyle::Single(prefix) => toggle_single(lines, prefix),
         CommentStyle::Multi { left, right } => toggle_multi(lines, left, right),
@@ -71,7 +74,10 @@ fn single_comment(lines: &[&str], prefix: &str) -> ToggledLines {
         .min()
         .unwrap_or(0);
 
-    let mut toggled = ToggledLines { lines: Vec::new(), edits: Vec::new() };
+    let mut toggled = ToggledLines {
+        lines: Vec::new(),
+        edits: Vec::new(),
+    };
     for line in lines {
         if blank(line) {
             toggled.lines.push(line.to_string());
@@ -89,13 +95,19 @@ fn single_comment(lines: &[&str], prefix: &str) -> ToggledLines {
         commented.push_str(prefix);
         commented.push_str(&line[column..]);
         toggled.lines.push(commented);
-        toggled.edits.push(vec![LineEdit { column, delta: prefix.len() as isize }]);
+        toggled.edits.push(vec![LineEdit {
+            column,
+            delta: prefix.len() as isize,
+        }]);
     }
     toggled
 }
 
 fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> ToggledLines {
-    let mut toggled = ToggledLines { lines: Vec::new(), edits: Vec::new() };
+    let mut toggled = ToggledLines {
+        lines: Vec::new(),
+        edits: Vec::new(),
+    };
     for line in lines {
         if blank(line) {
             toggled.lines.push(line.to_string());
@@ -115,7 +127,10 @@ fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> ToggledLines {
         uncommented.push_str(&line[..column]);
         uncommented.push_str(&line[column + removed..]);
         toggled.lines.push(uncommented);
-        toggled.edits.push(vec![LineEdit { column, delta: -(removed as isize) }]);
+        toggled.edits.push(vec![LineEdit {
+            column,
+            delta: -(removed as isize),
+        }]);
     }
     toggled
 }
@@ -123,7 +138,11 @@ fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> ToggledLines {
 /// Multi-line style: `left` goes after the first non-blank line's leading
 /// whitespace, `right` at the last one's very end - trailing whitespace
 /// included in the comment. Lines in between are untouched content.
-fn toggle_multi(lines: &[&str], left: &str, right: &str) -> Option<ToggledLines> {
+fn toggle_multi(
+    lines: &[&str],
+    left: &str,
+    right: &str,
+) -> Option<ToggledLines> {
     let left_token = left.trim_end();
     let right_token = right.trim_start();
     if left_token.is_empty() || right_token.is_empty() {
@@ -132,8 +151,22 @@ fn toggle_multi(lines: &[&str], left: &str, right: &str) -> Option<ToggledLines>
     let first = lines.iter().position(|line| !blank(line))?;
     let last = lines.iter().rposition(|line| !blank(line))?;
 
-    let toggled = if is_wrapped(lines[first], lines[last], first == last, left_token, right_token) {
-        multi_uncomment(lines, first, last, left, right, left_token, right_token)
+    let toggled = if is_wrapped(
+        lines[first],
+        lines[last],
+        first == last,
+        left_token,
+        right_token,
+    ) {
+        multi_uncomment(
+            lines,
+            first,
+            last,
+            left,
+            right,
+            left_token,
+            right_token,
+        )
     } else {
         multi_comment(lines, first, last, left, right)
     };
@@ -162,15 +195,27 @@ fn is_wrapped(
     trimmed.len() - right_token.len() >= left_end
 }
 
-fn multi_comment(lines: &[&str], first: usize, last: usize, left: &str, right: &str) -> ToggledLines {
-    let mut toggled = ToggledLines { lines: Vec::new(), edits: Vec::new() };
+fn multi_comment(
+    lines: &[&str],
+    first: usize,
+    last: usize,
+    left: &str,
+    right: &str,
+) -> ToggledLines {
+    let mut toggled = ToggledLines {
+        lines: Vec::new(),
+        edits: Vec::new(),
+    };
     for (index, line) in lines.iter().enumerate() {
         let mut text = line.to_string();
         let mut edits = Vec::new();
         if index == first {
             let column = leading_whitespace_len(line);
             text.insert_str(column, left);
-            edits.push(LineEdit { column, delta: left.len() as isize });
+            edits.push(LineEdit {
+                column,
+                delta: left.len() as isize,
+            });
         }
         if index == last {
             // Appended after trailing whitespace, with no edit recorded: an
@@ -192,7 +237,10 @@ fn multi_uncomment(
     left_token: &str,
     right_token: &str,
 ) -> ToggledLines {
-    let mut toggled = ToggledLines { lines: Vec::new(), edits: Vec::new() };
+    let mut toggled = ToggledLines {
+        lines: Vec::new(),
+        edits: Vec::new(),
+    };
     for (index, line) in lines.iter().enumerate() {
         let left_span = (index == first).then(|| {
             let column = leading_whitespace_len(line);
@@ -209,8 +257,12 @@ fn multi_uncomment(
             let mut start = line.trim_end().len() - right_token.len();
             let mut removed = right_token.len();
             // The space-eat may not reach into (or past) the left removal.
-            let floor = left_span.map_or(0, |(column, removed)| column + removed);
-            if right.starts_with(' ') && start > floor && line.as_bytes()[start - 1] == b' ' {
+            let floor =
+                left_span.map_or(0, |(column, removed)| column + removed);
+            if right.starts_with(' ')
+                && start > floor
+                && line.as_bytes()[start - 1] == b' '
+            {
                 start -= 1;
                 removed += 1;
             }
@@ -227,10 +279,16 @@ fn multi_uncomment(
 
         let mut edits = Vec::new();
         if let Some((column, removed)) = left_span {
-            edits.push(LineEdit { column, delta: -(removed as isize) });
+            edits.push(LineEdit {
+                column,
+                delta: -(removed as isize),
+            });
         }
         if let Some((start, removed)) = right_span {
-            edits.push(LineEdit { column: start, delta: -(removed as isize) });
+            edits.push(LineEdit {
+                column: start,
+                delta: -(removed as isize),
+            });
         }
         toggled.lines.push(text);
         toggled.edits.push(edits);
@@ -247,7 +305,9 @@ pub fn shift_position(
     edits: &[Vec<LineEdit>],
 ) -> (usize, usize) {
     let (line, column) = pos;
-    let Some(line_edits) = line.checked_sub(first_line).and_then(|i| edits.get(i)) else {
+    let Some(line_edits) =
+        line.checked_sub(first_line).and_then(|i| edits.get(i))
+    else {
         return pos;
     };
     let mut shifted = column as isize;
@@ -277,7 +337,10 @@ mod tests {
     }
 
     fn html_multi() -> CommentStyle {
-        CommentStyle::Multi { left: "<!--".to_string(), right: "-->".to_string() }
+        CommentStyle::Multi {
+            left: "<!--".to_string(),
+            right: "-->".to_string(),
+        }
     }
 
     fn toggle(lines: &[&str]) -> ToggledLines {
@@ -292,24 +355,43 @@ mod tests {
     fn comments_a_single_line() {
         let toggled = toggle(&["fn main() {}"]);
         assert_eq!(toggled.lines, vec!["// fn main() {}"]);
-        assert_eq!(toggled.edits, vec![vec![LineEdit { column: 0, delta: 3 }]]);
+        assert_eq!(
+            toggled.edits,
+            vec![vec![LineEdit {
+                column: 0,
+                delta: 3
+            }]]
+        );
     }
 
     #[test]
     fn toggling_twice_round_trips() {
         let toggled = toggle(&["    let x = 1;"]);
         assert_eq!(toggled.lines, vec!["    // let x = 1;"]);
-        let refs: Vec<&str> = toggled.lines.iter().map(String::as_str).collect();
+        let refs: Vec<&str> =
+            toggled.lines.iter().map(String::as_str).collect();
         let back = toggle(&refs);
         assert_eq!(back.lines, vec!["    let x = 1;"]);
-        assert_eq!(back.edits, vec![vec![LineEdit { column: 4, delta: -3 }]]);
+        assert_eq!(
+            back.edits,
+            vec![vec![LineEdit {
+                column: 4,
+                delta: -3
+            }]]
+        );
     }
 
     #[test]
     fn uncomments_a_prefix_without_the_space() {
         let toggled = toggle(&["//fn"]);
         assert_eq!(toggled.lines, vec!["fn"]);
-        assert_eq!(toggled.edits, vec![vec![LineEdit { column: 0, delta: -2 }]]);
+        assert_eq!(
+            toggled.edits,
+            vec![vec![LineEdit {
+                column: 0,
+                delta: -2
+            }]]
+        );
     }
 
     #[test]
@@ -322,10 +404,16 @@ mod tests {
     fn inserts_uniformly_at_the_minimum_indent() {
         // The user-facing spec example: deeper lines get the prefix at the
         // shallowest line's column, keeping the block aligned.
-        let toggled = toggle(&["            if (a > b) {", "                return false"]);
+        let toggled = toggle(&[
+            "            if (a > b) {",
+            "                return false",
+        ]);
         assert_eq!(
             toggled.lines,
-            vec!["            // if (a > b) {", "            //     return false"]
+            vec![
+                "            // if (a > b) {",
+                "            //     return false"
+            ]
         );
     }
 
@@ -358,9 +446,15 @@ mod tests {
 
     #[test]
     fn empty_multi_delimiters_are_a_no_op() {
-        let style = CommentStyle::Multi { left: "  ".to_string(), right: "-->".to_string() };
+        let style = CommentStyle::Multi {
+            left: "  ".to_string(),
+            right: "-->".to_string(),
+        };
         assert!(toggle_comment(&["text"], &style).is_none());
-        let style = CommentStyle::Multi { left: "<!--".to_string(), right: String::new() };
+        let style = CommentStyle::Multi {
+            left: "<!--".to_string(),
+            right: String::new(),
+        };
         assert!(toggle_comment(&["text"], &style).is_none());
     }
 
@@ -394,19 +488,38 @@ mod tests {
                 "        <li>Is anti-virus software or a firewall preventing ROBLOX from accessing the Internet?</li>     -->",
             ]
         );
-        assert_eq!(toggled.edits[0], vec![LineEdit { column: 8, delta: 4 }]);
+        assert_eq!(
+            toggled.edits[0],
+            vec![LineEdit {
+                column: 8,
+                delta: 4
+            }]
+        );
         assert!(toggled.edits[1].is_empty(), "an EOL append moves no caret");
         // The selection's ends keep covering the same characters.
         assert_eq!(shift_position((0, 24), 0, &toggled.edits), (0, 28));
         assert_eq!(shift_position((1, 25), 0, &toggled.edits), (1, 25));
 
         // And the second toggle returns everything exactly.
-        let refs: Vec<&str> = toggled.lines.iter().map(String::as_str).collect();
+        let refs: Vec<&str> =
+            toggled.lines.iter().map(String::as_str).collect();
         let back = toggle_html(&refs);
         assert_eq!(back.lines.as_slice(), &lines);
-        assert_eq!(back.edits[0], vec![LineEdit { column: 8, delta: -4 }]);
+        assert_eq!(
+            back.edits[0],
+            vec![LineEdit {
+                column: 8,
+                delta: -4
+            }]
+        );
         let right_start = toggled.lines[1].len() - 3;
-        assert_eq!(back.edits[1], vec![LineEdit { column: right_start, delta: -3 }]);
+        assert_eq!(
+            back.edits[1],
+            vec![LineEdit {
+                column: right_start,
+                delta: -3
+            }]
+        );
         assert_eq!(shift_position((0, 28), 0, &back.edits), (0, 24));
         assert_eq!(shift_position((1, 25), 0, &back.edits), (1, 25));
     }
@@ -415,7 +528,13 @@ mod tests {
     fn multi_toggle_on_one_line_round_trips() {
         let toggled = toggle_html(&["    foo"]);
         assert_eq!(toggled.lines, vec!["    <!--foo-->"]);
-        assert_eq!(toggled.edits, vec![vec![LineEdit { column: 4, delta: 4 }]]);
+        assert_eq!(
+            toggled.edits,
+            vec![vec![LineEdit {
+                column: 4,
+                delta: 4
+            }]]
+        );
         // A caret at the old EOL lands right before the appended `-->`.
         assert_eq!(shift_position((0, 7), 0, &toggled.edits), (0, 11));
 
@@ -424,8 +543,14 @@ mod tests {
         assert_eq!(
             back.edits,
             vec![vec![
-                LineEdit { column: 4, delta: -4 },
-                LineEdit { column: 11, delta: -3 },
+                LineEdit {
+                    column: 4,
+                    delta: -4
+                },
+                LineEdit {
+                    column: 11,
+                    delta: -3
+                },
             ]]
         );
         assert_eq!(shift_position((0, 11), 0, &back.edits), (0, 7));
@@ -442,7 +567,11 @@ mod tests {
     #[test]
     fn multi_uncomment_strips_right_before_trailing_whitespace() {
         let toggled = toggle_html(&["<!--foo-->   "]);
-        assert_eq!(toggled.lines, vec!["foo   "], "whitespace after --> survives");
+        assert_eq!(
+            toggled.lines,
+            vec!["foo   "],
+            "whitespace after --> survives"
+        );
     }
 
     #[test]
@@ -464,7 +593,10 @@ mod tests {
 
     #[test]
     fn multi_spaced_delimiters_eat_one_space_back() {
-        let style = CommentStyle::Multi { left: "<!-- ".to_string(), right: " -->".to_string() };
+        let style = CommentStyle::Multi {
+            left: "<!-- ".to_string(),
+            right: " -->".to_string(),
+        };
         let toggled = toggle_comment(&["foo"], &style).unwrap();
         assert_eq!(toggled.lines, vec!["<!-- foo -->"]);
         let back = toggle_comment(&["<!-- foo -->"], &style).unwrap();
@@ -476,17 +608,31 @@ mod tests {
 
     #[test]
     fn shift_position_moves_only_columns_at_or_after_the_edit() {
-        let edits = [vec![LineEdit { column: 4, delta: 3 }]];
-        assert_eq!(shift_position((0, 2), 0, &edits), (0, 2), "before the edit");
+        let edits = [vec![LineEdit {
+            column: 4,
+            delta: 3,
+        }]];
+        assert_eq!(
+            shift_position((0, 2), 0, &edits),
+            (0, 2),
+            "before the edit"
+        );
         assert_eq!(shift_position((0, 4), 0, &edits), (0, 7), "at the edit");
-        assert_eq!(shift_position((0, 9), 0, &edits), (0, 12), "after the edit");
+        assert_eq!(
+            shift_position((0, 9), 0, &edits),
+            (0, 12),
+            "after the edit"
+        );
         assert_eq!(shift_position((5, 9), 0, &edits), (5, 9), "uncovered line");
     }
 
     #[test]
     fn shift_position_clamps_a_caret_inside_a_removed_prefix() {
         // Caret sat on the second slash of a removed "// " (delta -3).
-        let edits = [vec![LineEdit { column: 4, delta: -3 }]];
+        let edits = [vec![LineEdit {
+            column: 4,
+            delta: -3,
+        }]];
         assert_eq!(shift_position((0, 5), 0, &edits), (0, 4));
     }
 
@@ -494,14 +640,36 @@ mod tests {
     fn shift_position_compounds_two_removals_on_one_line() {
         // "    <!--foo-->" uncommenting: left [4,8), right [11,14).
         let edits = [vec![
-            LineEdit { column: 4, delta: -4 },
-            LineEdit { column: 11, delta: -3 },
+            LineEdit {
+                column: 4,
+                delta: -4,
+            },
+            LineEdit {
+                column: 11,
+                delta: -3,
+            },
         ]];
         assert_eq!(shift_position((0, 2), 0, &edits), (0, 2), "before both");
-        assert_eq!(shift_position((0, 4), 0, &edits), (0, 4), "at left span start");
-        assert_eq!(shift_position((0, 6), 0, &edits), (0, 4), "inside left span");
-        assert_eq!(shift_position((0, 9), 0, &edits), (0, 5), "between the spans");
-        assert_eq!(shift_position((0, 12), 0, &edits), (0, 7), "inside right span");
+        assert_eq!(
+            shift_position((0, 4), 0, &edits),
+            (0, 4),
+            "at left span start"
+        );
+        assert_eq!(
+            shift_position((0, 6), 0, &edits),
+            (0, 4),
+            "inside left span"
+        );
+        assert_eq!(
+            shift_position((0, 9), 0, &edits),
+            (0, 5),
+            "between the spans"
+        );
+        assert_eq!(
+            shift_position((0, 12), 0, &edits),
+            (0, 7),
+            "inside right span"
+        );
         assert_eq!(shift_position((0, 14), 0, &edits), (0, 7), "at old EOL");
     }
 }

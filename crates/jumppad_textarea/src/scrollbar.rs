@@ -137,7 +137,8 @@ impl State {
             // Back-date the ramp so it picks up from however visible the thumb
             // already is: catching it mid-fade-out continues upward from there
             // rather than restarting at nothing or snapping to full.
-            self.revealed_at = now.checked_sub(FADE_IN.mul_f32(shown)).or(Some(now));
+            self.revealed_at =
+                now.checked_sub(FADE_IN.mul_f32(shown)).or(Some(now));
         }
         self.active_at = Some(now);
     }
@@ -163,12 +164,20 @@ impl State {
     /// `THUMB_WIDTH_IDLE` first.
     fn sync_width(&mut self, now: Instant) {
         let wide = self.hovered || self.drag.is_some();
-        let target = if wide { THUMB_WIDTH_HOVERED } else { THUMB_WIDTH_IDLE };
+        let target = if wide {
+            THUMB_WIDTH_HOVERED
+        } else {
+            THUMB_WIDTH_IDLE
+        };
         if self.width_ramp.is_some_and(|ramp| ramp.to == target) {
             return;
         }
         let current = self.width(now);
-        self.width_ramp = Some(WidthRamp { started_at: now, from: current, to: target });
+        self.width_ramp = Some(WidthRamp {
+            started_at: now,
+            from: current,
+            to: target,
+        });
     }
 
     /// The animated thumb/track width right now, in pixels.
@@ -176,7 +185,9 @@ impl State {
         let Some(ramp) = self.width_ramp else {
             return THUMB_WIDTH_IDLE;
         };
-        let t = ratio(now.saturating_duration_since(ramp.started_at), WIDTH_RAMP).clamp(0.0, 1.0);
+        let t =
+            ratio(now.saturating_duration_since(ramp.started_at), WIDTH_RAMP)
+                .clamp(0.0, 1.0);
         ramp.from + (ramp.to - ramp.from) * t
     }
 
@@ -194,7 +205,9 @@ impl State {
 
     /// How visible the thumb should be right now, 0.0 (hidden) to 1.0.
     pub fn opacity(&self, now: Instant) -> f32 {
-        let (Some(revealed_at), Some(active_at)) = (self.revealed_at, self.active_at) else {
+        let (Some(revealed_at), Some(active_at)) =
+            (self.revealed_at, self.active_at)
+        else {
             return 0.0;
         };
         let faded_in =
@@ -203,7 +216,9 @@ impl State {
         if self.hovered || self.drag.is_some() {
             return faded_in;
         }
-        let Some(fading) = now.saturating_duration_since(active_at).checked_sub(HOLD) else {
+        let Some(fading) =
+            now.saturating_duration_since(active_at).checked_sub(HOLD)
+        else {
             return faded_in;
         };
         (faded_in - ratio(fading, FADE_OUT)).max(0.0)
@@ -219,7 +234,9 @@ impl State {
     }
 
     fn opacity_next_redraw(&self, now: Instant) -> Option<Instant> {
-        let (Some(revealed_at), Some(active_at)) = (self.revealed_at, self.active_at) else {
+        let (Some(revealed_at), Some(active_at)) =
+            (self.revealed_at, self.active_at)
+        else {
             return None;
         };
         if now.saturating_duration_since(revealed_at) < FADE_IN {
@@ -238,11 +255,17 @@ impl State {
 
     fn width_next_redraw(&self, now: Instant) -> Option<Instant> {
         let ramp = self.width_ramp?;
-        (now.saturating_duration_since(ramp.started_at) < WIDTH_RAMP).then_some(now)
+        (now.saturating_duration_since(ramp.started_at) < WIDTH_RAMP)
+            .then_some(now)
     }
 
     /// Grabs the thumb, if `position` is on it. Returns whether it took hold.
-    pub fn press(&mut self, position: Point, layout: Layout, now: Instant) -> bool {
+    pub fn press(
+        &mut self,
+        position: Point,
+        layout: Layout,
+        now: Instant,
+    ) -> bool {
         let Some(thumb) = layout.thumb else {
             return false;
         };
@@ -274,7 +297,12 @@ impl State {
     /// Idempotent against repeated calls for the same `position` - calling
     /// this again before the document has caught up to a previous call must
     /// not ask for more (see `Drag::requested`).
-    pub fn drag_to(&mut self, position: Point, layout: Layout, now: Instant) -> Option<f32> {
+    pub fn drag_to(
+        &mut self,
+        position: Point,
+        layout: Layout,
+        now: Instant,
+    ) -> Option<f32> {
         // Only the hold clock: the ramp is already running from the press.
         self.active_at = Some(now);
         let drag = self.drag.as_mut()?;
@@ -283,7 +311,8 @@ impl State {
         // The thumb's travel is shorter than the track by its own height.
         let travel = layout.track.height - thumb.height;
         let target = if travel > 0.0 {
-            ((position.y - drag.grab_offset - layout.track.y) / travel).clamp(0.0, 1.0)
+            ((position.y - drag.grab_offset - layout.track.y) / travel)
+                .clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -313,22 +342,28 @@ impl Layout {
             height: (bounds.height - INSET * 2.0).max(0.0),
         };
 
-        let thumb = (metrics.max_position() > 0.0 && track.height > 0.0).then(|| {
-            let proportional = track.height * (metrics.viewport / metrics.content);
-            let height = proportional
-                .clamp(MIN_THUMB_HEIGHT, track.height * MAX_THUMB_FRACTION)
-                // A track too short for the minimum still gets a thumb, just
-                // the whole track's height rather than one hanging off the end.
-                .min(track.height);
+        let thumb =
+            (metrics.max_position() > 0.0 && track.height > 0.0).then(|| {
+                let proportional =
+                    track.height * (metrics.viewport / metrics.content);
+                let height = proportional
+                    .clamp(MIN_THUMB_HEIGHT, track.height * MAX_THUMB_FRACTION)
+                    // A track too short for the minimum still gets a thumb, just
+                    // the whole track's height rather than one hanging off the end.
+                    .min(track.height);
 
-            Rectangle {
-                y: track.y + (track.height - height) * metrics.progress(),
-                height,
-                ..track
-            }
-        });
+                Rectangle {
+                    y: track.y + (track.height - height) * metrics.progress(),
+                    height,
+                    ..track
+                }
+            });
 
-        Self { track, thumb, metrics }
+        Self {
+            track,
+            thumb,
+            metrics,
+        }
     }
 
     /// Whether `position` is close enough to the right edge to reveal the
@@ -401,7 +436,11 @@ mod tests {
     };
 
     fn metrics(position: f32, content: f32, viewport: f32) -> Metrics {
-        Metrics { position, content, viewport }
+        Metrics {
+            position,
+            content,
+            viewport,
+        }
     }
 
     /// An arbitrary fixed width for tests that don't care about the width
@@ -436,9 +475,10 @@ mod tests {
     fn thumb_respects_the_minimum_and_maximum() {
         let track = scrollable().track;
 
-        let huge = Layout::new(BOUNDS, metrics(0.0, 100_000.0, 20.0), TEST_WIDTH)
-            .thumb
-            .unwrap();
+        let huge =
+            Layout::new(BOUNDS, metrics(0.0, 100_000.0, 20.0), TEST_WIDTH)
+                .thumb
+                .unwrap();
         assert_eq!(huge.height, MIN_THUMB_HEIGHT);
 
         // 20 of 21 lines visible would otherwise fill almost the whole track.
@@ -457,18 +497,20 @@ mod tests {
             .unwrap();
         assert_eq!(top.y, track.y);
 
-        let bottom = Layout::new(BOUNDS, metrics(980.0, 1000.0, 20.0), TEST_WIDTH)
-            .thumb
-            .unwrap();
+        let bottom =
+            Layout::new(BOUNDS, metrics(980.0, 1000.0, 20.0), TEST_WIDTH)
+                .thumb
+                .unwrap();
         assert_eq!(bottom.y + bottom.height, track.y + track.height);
     }
 
     #[test]
     fn thumb_stays_inside_the_track_when_scrolled_past_the_end() {
         let track = scrollable().track;
-        let thumb = Layout::new(BOUNDS, metrics(5000.0, 1000.0, 20.0), TEST_WIDTH)
-            .thumb
-            .unwrap();
+        let thumb =
+            Layout::new(BOUNDS, metrics(5000.0, 1000.0, 20.0), TEST_WIDTH)
+                .thumb
+                .unwrap();
         assert!(thumb.y + thumb.height <= track.y + track.height);
     }
 
@@ -495,7 +537,10 @@ mod tests {
 
     #[test]
     fn reveal_strip_never_exceeds_a_narrow_editor() {
-        let narrow = Rectangle { width: 40.0, ..BOUNDS };
+        let narrow = Rectangle {
+            width: 40.0,
+            ..BOUNDS
+        };
         assert!(Layout::is_in_reveal_strip(narrow, Point::new(1.0, 10.0)));
         assert!(!Layout::is_in_reveal_strip(narrow, Point::new(-1.0, 10.0)));
     }
@@ -606,7 +651,8 @@ mod tests {
         state.set_hovered(true, start);
 
         assert_eq!(state.width(start), THUMB_WIDTH_IDLE);
-        let midpoint = THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
+        let midpoint =
+            THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
         assert!((state.width(start + WIDTH_RAMP / 2) - midpoint).abs() < 0.01);
         assert_eq!(state.width(start + WIDTH_RAMP), THUMB_WIDTH_HOVERED);
         // Holds wide indefinitely while still hovered - no shrink while the
@@ -628,7 +674,8 @@ mod tests {
         // Unlike opacity, there's no hold phase for width - it starts
         // shrinking the instant the pointer leaves the reveal strip.
         assert_eq!(state.width(left), THUMB_WIDTH_HOVERED);
-        let midpoint = THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
+        let midpoint =
+            THUMB_WIDTH_IDLE + (THUMB_WIDTH_HOVERED - THUMB_WIDTH_IDLE) * 0.5;
         assert!((state.width(left + WIDTH_RAMP / 2) - midpoint).abs() < 0.01);
         assert_eq!(state.width(left + WIDTH_RAMP), THUMB_WIDTH_IDLE);
     }
@@ -661,7 +708,11 @@ mod tests {
         assert!(!state.press(Point::new(10.0, 10.0), layout, now));
         assert!(!state.is_dragging());
         // Below the thumb, but still in the track.
-        assert!(!state.press(Point::new(layout.track.center_x(), 190.0), layout, now));
+        assert!(!state.press(
+            Point::new(layout.track.center_x(), 190.0),
+            layout,
+            now
+        ));
         assert!(!state.is_dragging());
     }
 
@@ -675,12 +726,17 @@ mod tests {
         let grab = Point::new(thumb.center_x(), thumb.y + 4.0);
         assert!(state.press(grab, layout, now));
 
-        let lines = state.drag_to(Point::new(grab.x, grab.y + 20.0), layout, now).unwrap();
+        let lines = state
+            .drag_to(Point::new(grab.x, grab.y + 20.0), layout, now)
+            .unwrap();
         assert!(lines > 0.0);
 
         state.release(now);
         assert!(!state.is_dragging());
-        assert_eq!(state.drag_to(Point::new(grab.x, grab.y + 40.0), layout, now), None);
+        assert_eq!(
+            state.drag_to(Point::new(grab.x, grab.y + 40.0), layout, now),
+            None
+        );
     }
 
     #[test]
@@ -691,12 +747,15 @@ mod tests {
         let mut state = State::default();
 
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
-        let lines = state.drag_to(Point::new(thumb.center_x(), 10_000.0), layout, now).unwrap();
+        let lines = state
+            .drag_to(Point::new(thumb.center_x(), 10_000.0), layout, now)
+            .unwrap();
         assert_eq!(lines, layout.metrics.max_position());
     }
 
     #[test]
-    fn drag_to_is_idempotent_when_called_again_before_the_document_catches_up() {
+    fn drag_to_is_idempotent_when_called_again_before_the_document_catches_up()
+    {
         // Several `CursorMoved` events can land in the same input batch and
         // each call `drag_to` before the first one's `Action::Scroll` has
         // actually reached the document - so `layout` (built from the
@@ -736,7 +795,9 @@ mod tests {
         let grab = Point::new(thumb.center_x(), thumb.y);
         state.press(grab, layout, now);
 
-        let first = state.drag_to(Point::new(grab.x, grab.y + 0.4), layout, now).unwrap();
+        let first = state
+            .drag_to(Point::new(grab.x, grab.y + 0.4), layout, now)
+            .unwrap();
         assert!(first > 0.0 && first < 1.0, "{first}");
 
         // And they still accumulate against `requested`, so the run below
@@ -765,7 +826,11 @@ mod tests {
 
         for _ in 0..20 {
             now += Duration::from_millis(8);
-            state.drag_to(Point::new(thumb.center_x(), thumb.y + 1.0), layout, now);
+            state.drag_to(
+                Point::new(thumb.center_x(), thumb.y + 1.0),
+                layout,
+                now,
+            );
             assert_eq!(state.opacity(now), 1.0);
         }
 

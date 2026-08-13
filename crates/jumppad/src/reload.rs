@@ -105,11 +105,20 @@ impl ConfigWatch {
         )
     }
 
-    fn seeded(config: Option<Fingerprint>, keybinds: Option<Fingerprint>) -> Self {
+    fn seeded(
+        config: Option<Fingerprint>,
+        keybinds: Option<Fingerprint>,
+    ) -> Self {
         Self {
             debounce: Debounce::new(RELOAD_DEBOUNCE),
-            config: FileState { fingerprint: config, dirty: false },
-            keybinds: FileState { fingerprint: keybinds, dirty: false },
+            config: FileState {
+                fingerprint: config,
+                dirty: false,
+            },
+            keybinds: FileState {
+                fingerprint: keybinds,
+                dirty: false,
+            },
         }
     }
 
@@ -126,7 +135,10 @@ impl ConfigWatch {
         // The saved path is absolute (it came from a dialog or a restored
         // tab); the effective candidate can be the relative `config.toml`.
         // Both exist right now, so canonicalizing both makes them comparable.
-        let same = match (std::fs::canonicalize(path), std::fs::canonicalize(&effective)) {
+        let same = match (
+            std::fs::canonicalize(path),
+            std::fs::canonicalize(&effective),
+        ) {
             (Ok(saved), Ok(effective)) => saved == effective,
             _ => false,
         };
@@ -221,14 +233,17 @@ pub fn subscription() -> Subscription<Message> {
 }
 
 fn watch_events() -> impl iced::futures::Stream<Item = WatchedFile> {
-    iced::stream::channel(16, |output: iced::futures::channel::mpsc::Sender<WatchedFile>| async move {
-        // Held across the pending() so the OS registration lives as long
-        // as the app; the callback inside is what delivers events. If the
-        // watcher couldn't start, the stream stays open but silent - saves
-        // and focus checks still trigger reloads.
-        let _watcher = start_watcher(output);
-        std::future::pending::<()>().await
-    })
+    iced::stream::channel(
+        16,
+        |output: iced::futures::channel::mpsc::Sender<WatchedFile>| async move {
+            // Held across the pending() so the OS registration lives as long
+            // as the app; the callback inside is what delivers events. If the
+            // watcher couldn't start, the stream stays open but silent - saves
+            // and focus checks still trigger reloads.
+            let _watcher = start_watcher(output);
+            std::future::pending::<()>().await
+        },
+    )
 }
 
 fn start_watcher(
@@ -261,7 +276,9 @@ fn start_watcher(
     // delete/rename dance editors use for atomic saves, where a file watch
     // is lost with the old inode on some platforms.
     for dir in jumppad_config::candidate_dirs() {
-        if let Err(err) = watcher.watch(&dir, notify::RecursiveMode::NonRecursive) {
+        if let Err(err) =
+            watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
+        {
             eprintln!(
                 "jumppad: couldn't watch {} for config changes: {err}",
                 dir.display()
@@ -275,11 +292,16 @@ fn start_watcher(
 mod tests {
     use super::*;
 
-    fn fingerprint_at(path: &str, mtime_secs: u64, len: u64) -> Option<Fingerprint> {
+    fn fingerprint_at(
+        path: &str,
+        mtime_secs: u64,
+        len: u64,
+    ) -> Option<Fingerprint> {
         Some(Fingerprint {
             path: PathBuf::from(path),
             stamp: DiskStamp {
-                mtime: std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(mtime_secs),
+                mtime: std::time::SystemTime::UNIX_EPOCH
+                    + Duration::from_secs(mtime_secs),
                 len,
             },
         })
@@ -291,22 +313,46 @@ mod tests {
 
     #[test]
     fn classify_matches_the_two_config_filenames_only() {
-        assert_eq!(classify(Path::new("/some/dir/config.toml")), Some(WatchedFile::Config));
-        assert_eq!(classify(Path::new("keybinds.toml")), Some(WatchedFile::Keybinds));
+        assert_eq!(
+            classify(Path::new("/some/dir/config.toml")),
+            Some(WatchedFile::Config)
+        );
+        assert_eq!(
+            classify(Path::new("keybinds.toml")),
+            Some(WatchedFile::Keybinds)
+        );
         assert_eq!(classify(Path::new("/some/dir/notes.txt")), None);
         assert_eq!(classify(Path::new("/some/dir/config.toml.bak")), None);
     }
 
     #[test]
     fn observe_reports_every_kind_of_movement_once() {
-        let mut state = FileState { fingerprint: fingerprint_at("config.toml", 1, 10), dirty: false };
+        let mut state = FileState {
+            fingerprint: fingerprint_at("config.toml", 1, 10),
+            dirty: false,
+        };
 
-        assert!(!state.observe(fingerprint_at("config.toml", 1, 10)), "unchanged");
-        assert!(state.observe(fingerprint_at("config.toml", 2, 10)), "mtime moved");
-        assert!(state.observe(fingerprint_at("config.toml", 2, 11)), "length moved");
-        assert!(state.observe(fingerprint_at("other/config.toml", 2, 11)), "candidate flipped");
+        assert!(
+            !state.observe(fingerprint_at("config.toml", 1, 10)),
+            "unchanged"
+        );
+        assert!(
+            state.observe(fingerprint_at("config.toml", 2, 10)),
+            "mtime moved"
+        );
+        assert!(
+            state.observe(fingerprint_at("config.toml", 2, 11)),
+            "length moved"
+        );
+        assert!(
+            state.observe(fingerprint_at("other/config.toml", 2, 11)),
+            "candidate flipped"
+        );
         assert!(state.observe(None), "disappeared");
-        assert!(state.observe(fingerprint_at("config.toml", 3, 5)), "appeared");
+        assert!(
+            state.observe(fingerprint_at("config.toml", 3, 5)),
+            "appeared"
+        );
         // Observation recorded the new state each time - a repeat is quiet.
         assert!(!state.observe(fingerprint_at("config.toml", 3, 5)));
     }
@@ -324,7 +370,11 @@ mod tests {
             vec![WatchedFile::Config, WatchedFile::Keybinds]
         );
         assert!(!watch.pending());
-        assert!(watch.settled_with(None, None, start + beyond_debounce() * 2).is_empty());
+        assert!(
+            watch
+                .settled_with(None, None, start + beyond_debounce() * 2)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -332,7 +382,11 @@ mod tests {
         let mut watch = ConfigWatch::seeded(None, None);
         let start = Instant::now();
         watch.note_event(WatchedFile::Config, start);
-        assert!(watch.settled_with(None, None, start + RELOAD_DEBOUNCE / 2).is_empty());
+        assert!(
+            watch
+                .settled_with(None, None, start + RELOAD_DEBOUNCE / 2)
+                .is_empty()
+        );
         assert!(watch.pending(), "the burst is still waiting");
     }
 

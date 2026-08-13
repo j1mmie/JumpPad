@@ -28,10 +28,10 @@ const MANIFEST_FILE: &str = "session.toml";
 /// executable, then `./drafts` (a `cargo run` convenience).
 pub fn candidate_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            dirs.push(dir.join("drafts"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("drafts"));
     }
     dirs.push(PathBuf::from("drafts"));
     dirs
@@ -91,7 +91,9 @@ pub fn write_manifest_sync(dir: &Path, manifest: &SessionManifest) {
                 eprintln!("jumppad: couldn't write session manifest: {err}");
             }
         }
-        Err(err) => eprintln!("jumppad: couldn't serialize session manifest: {err}"),
+        Err(err) => {
+            eprintln!("jumppad: couldn't serialize session manifest: {err}")
+        }
     }
 
     prune_orphaned_drafts(dir, manifest);
@@ -118,10 +120,11 @@ fn prune_orphaned_drafts(dir: &Path, manifest: &SessionManifest) {
             .and_then(|stem| stem.to_str())
             .and_then(|stem| stem.parse::<u64>().ok())
             .is_some_and(|id| live_ids.contains(&id));
-        if !is_live {
-            if let Err(err) = std::fs::remove_file(&path) {
-                eprintln!("jumppad: couldn't remove stale draft {}: {err}", path.display());
-            }
+        if !is_live && let Err(err) = std::fs::remove_file(&path) {
+            eprintln!(
+                "jumppad: couldn't remove stale draft {}: {err}",
+                path.display()
+            );
         }
     }
 }
@@ -130,14 +133,21 @@ fn prune_orphaned_drafts(dir: &Path, manifest: &SessionManifest) {
 /// `(id, generation, text)`.
 pub fn stale_tabs(tabs: &[Tab]) -> Vec<(u64, u64, String)> {
     tabs.iter()
-        .filter(|tab| tab.dirty && tab.draft_generation != tab.flushed_generation)
+        .filter(|tab| {
+            tab.dirty && tab.draft_generation != tab.flushed_generation
+        })
         .map(|tab| (tab.id, tab.draft_generation, tab.editor.text()))
         .collect()
 }
 
 /// Writes one tab's draft content asynchronously. Best-effort: errors are
 /// logged, not surfaced. Returns `(id, generation)` for the caller to mark flushed.
-pub async fn flush_draft_async(dir: PathBuf, id: u64, generation: u64, text: String) -> (u64, u64) {
+pub async fn flush_draft_async(
+    dir: PathBuf,
+    id: u64,
+    generation: u64,
+    text: String,
+) -> (u64, u64) {
     if let Err(err) = tokio::fs::create_dir_all(&dir).await {
         eprintln!("jumppad: couldn't create {}: {err}", dir.display());
         return (id, generation);
@@ -155,7 +165,9 @@ pub fn flush_on_exit(dir: &Path, tabs: &[Tab], active: usize) {
     write_manifest_sync(dir, &manifest);
     for (id, _generation, text) in stale_tabs(tabs) {
         if let Err(err) = std::fs::write(draft_path(dir, id), text) {
-            eprintln!("jumppad: couldn't write draft for tab {id} on exit: {err}");
+            eprintln!(
+                "jumppad: couldn't write draft for tab {id} on exit: {err}"
+            );
         }
     }
 }
@@ -220,10 +232,8 @@ mod tests {
     fn scratch_dir() -> PathBuf {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "jumppad-session-test-{}-{id}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir()
+            .join(format!("jumppad-session-test-{}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
@@ -234,7 +244,13 @@ mod tests {
         let factory = stub_factory();
 
         let untitled_dirty = Tab::restored(0, None, "hello", true, &factory);
-        let clean_file = Tab::restored(1, Some(PathBuf::from("/tmp/file.txt")), "", false, &factory);
+        let clean_file = Tab::restored(
+            1,
+            Some(PathBuf::from("/tmp/file.txt")),
+            "",
+            false,
+            &factory,
+        );
         let dirty_file = Tab::restored(
             2,
             Some(PathBuf::from("/tmp/file2.txt")),
@@ -251,7 +267,8 @@ mod tests {
         std::fs::write(draft_path(&dir, 0), "hello").unwrap();
         std::fs::write(draft_path(&dir, 2), "edited").unwrap();
 
-        let loaded = load_manifest(std::slice::from_ref(&dir)).expect("manifest should parse back");
+        let loaded = load_manifest(std::slice::from_ref(&dir))
+            .expect("manifest should parse back");
         assert_eq!(loaded.active, 2);
         assert_eq!(loaded.tabs.len(), 3);
         assert_eq!(loaded.tabs[0].id, 0);
@@ -318,8 +335,14 @@ mod tests {
         };
         write_manifest_sync(&dir, &manifest);
 
-        assert!(!draft_path(&dir, 42).exists(), "orphaned draft should be pruned");
-        assert!(draft_path(&dir, 7).exists(), "still-referenced draft should survive");
+        assert!(
+            !draft_path(&dir, 42).exists(),
+            "orphaned draft should be pruned"
+        );
+        assert!(
+            draft_path(&dir, 7).exists(),
+            "still-referenced draft should survive"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

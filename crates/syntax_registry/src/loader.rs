@@ -1,9 +1,12 @@
 use std::path::{Path, PathBuf};
 
-use tree_sitter::{wasmtime, Language, Parser, WasmStore};
+use tree_sitter::{Language, Parser, WasmStore, wasmtime};
 
 /// Finds `<grammar_name>.wasm` in the first search directory that has it.
-pub(crate) fn find_wasm(dirs: &[PathBuf], grammar_name: &str) -> Option<PathBuf> {
+pub(crate) fn find_wasm(
+    dirs: &[PathBuf],
+    grammar_name: &str,
+) -> Option<PathBuf> {
     dirs.iter()
         .map(|dir| dir.join(format!("{grammar_name}.wasm")))
         .find(|path| path.is_file())
@@ -11,7 +14,10 @@ pub(crate) fn find_wasm(dirs: &[PathBuf], grammar_name: &str) -> Option<PathBuf>
 
 /// Finds and reads `<grammar_name>.injections.scm` in the first search
 /// directory that has it, if any. Most grammars won't have one.
-pub(crate) fn find_injections_source(dirs: &[PathBuf], grammar_name: &str) -> Option<String> {
+pub(crate) fn find_injections_source(
+    dirs: &[PathBuf],
+    grammar_name: &str,
+) -> Option<String> {
     let path = dirs
         .iter()
         .map(|dir| dir.join(format!("{grammar_name}.injections.scm")))
@@ -33,12 +39,14 @@ pub(crate) fn load(
     path: &Path,
     name: &str,
 ) -> Result<(Language, Parser), String> {
-    let bytes = std::fs::read(path).map_err(|err| format!("reading {}: {err}", path.display()))?;
+    let bytes = std::fs::read(path)
+        .map_err(|err| format!("reading {}: {err}", path.display()))?;
 
-    let mut store = WasmStore::new(engine).map_err(|err| format!("creating wasm store: {err}"))?;
-    let language = store
-        .load_language(name, &bytes)
-        .map_err(|err| format!("loading language {name:?} from {}: {err}", path.display()))?;
+    let mut store = WasmStore::new(engine)
+        .map_err(|err| format!("creating wasm store: {err}"))?;
+    let language = store.load_language(name, &bytes).map_err(|err| {
+        format!("loading language {name:?} from {}: {err}", path.display())
+    })?;
 
     let mut parser = Parser::new();
     parser

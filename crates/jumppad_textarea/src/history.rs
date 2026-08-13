@@ -62,7 +62,12 @@ impl History {
         self.record_before_edit_at(text, cursor, Instant::now());
     }
 
-    fn record_before_edit_at(&mut self, text: &str, cursor: CursorState, now: Instant) {
+    fn record_before_edit_at(
+        &mut self,
+        text: &str,
+        cursor: CursorState,
+        now: Instant,
+    ) {
         if self.burst.poke(now) {
             self.undo.push(Snapshot {
                 text: text.to_string(),
@@ -131,11 +136,18 @@ mod tests {
 
     /// A caret with nothing selected - what most of these tests care about.
     fn caret(line: usize, column: usize) -> CursorState {
-        CursorState { position: (line, column), selection: None }
+        CursorState {
+            position: (line, column),
+            selection: None,
+        }
     }
 
     /// A caret at `cursor` with a selection anchored at `anchor`.
-    fn selected(anchor: (usize, usize), cursor: (usize, usize), kind: SelectionKind) -> CursorState {
+    fn selected(
+        anchor: (usize, usize),
+        cursor: (usize, usize),
+        kind: SelectionKind,
+    ) -> CursorState {
         CursorState {
             position: cursor,
             selection: Some(SavedSelection { anchor, kind }),
@@ -186,8 +198,16 @@ mod tests {
         let mut history = History::new();
         let t0 = Instant::now();
         history.record_before_edit_at("a", caret(0, 1), t0);
-        history.record_before_edit_at("ab", caret(0, 2), t0 + Duration::from_millis(100));
-        history.record_before_edit_at("abc", caret(0, 3), t0 + Duration::from_millis(200));
+        history.record_before_edit_at(
+            "ab",
+            caret(0, 2),
+            t0 + Duration::from_millis(100),
+        );
+        history.record_before_edit_at(
+            "abc",
+            caret(0, 3),
+            t0 + Duration::from_millis(200),
+        );
 
         // One undo step should skip straight back to before the whole burst.
         let restored = history.undo("abcd", caret(0, 4));
@@ -243,7 +263,8 @@ mod tests {
         let mut history = History::new();
         let t0 = Instant::now();
         for i in 0..MAX_DEPTH + 10 {
-            let gap = t0 + (COALESCE_WINDOW + Duration::from_millis(1)) * i as u32;
+            let gap =
+                t0 + (COALESCE_WINDOW + Duration::from_millis(1)) * i as u32;
             history.record_before_edit_at(&i.to_string(), caret(0, 0), gap);
         }
         assert_eq!(history.undo.len(), MAX_DEPTH);
@@ -264,12 +285,20 @@ mod tests {
         // Guards the `SavedSelection` shape: a word/line selection carries its
         // bounds in the kind, not in an anchor-to-cursor span, so flattening
         // the snapshot back to a bare pair of positions would lose them.
-        for kind in [SelectionKind::Range, SelectionKind::Word, SelectionKind::Line] {
+        for kind in [
+            SelectionKind::Range,
+            SelectionKind::Word,
+            SelectionKind::Line,
+        ] {
             let mut history = History::new();
             let before = selected((0, 2), (0, 2), kind);
             history.record_before_edit("hello", before);
             let restored = history.undo("h", caret(0, 1));
-            assert_eq!(restored, Some(("hello".to_string(), before)), "kind: {kind:?}");
+            assert_eq!(
+                restored,
+                Some(("hello".to_string(), before)),
+                "kind: {kind:?}"
+            );
         }
     }
 
@@ -290,8 +319,16 @@ mod tests {
         let t0 = Instant::now();
         let before = selected((0, 0), (0, 5), SelectionKind::Range);
         history.record_before_edit_at("hello world", before, t0);
-        history.record_before_edit_at("X world", caret(0, 1), t0 + Duration::from_millis(100));
-        history.record_before_edit_at("Xy world", caret(0, 2), t0 + Duration::from_millis(200));
+        history.record_before_edit_at(
+            "X world",
+            caret(0, 1),
+            t0 + Duration::from_millis(100),
+        );
+        history.record_before_edit_at(
+            "Xy world",
+            caret(0, 2),
+            t0 + Duration::from_millis(200),
+        );
 
         let restored = history.undo("Xyz world", caret(0, 3));
         assert_eq!(restored, Some(("hello world".to_string(), before)));

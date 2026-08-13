@@ -13,16 +13,20 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, RwLock};
 
 use editor_core::{
-    EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection, SelectionKind,
-    TextEditorWidget, scrollbar_wash,
+    EditorMessage, FindMatch, SCROLLBAR_THUMB_WASH, SavedSelection,
+    SelectionKind, TextEditorWidget, scrollbar_wash,
 };
 use history::{CursorState, History};
 use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
-use jumppad_actions::Action;
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
-use syntax_registry::{Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry};
-use text_editor::{Binding, Content, Cursor, Motion, Position, Status, text_editor};
+use jumppad_actions::Action;
+use syntax_registry::{
+    Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry,
+};
+use text_editor::{
+    Binding, Content, Cursor, Motion, Position, Status, text_editor,
+};
 
 /// Re-exported so the app can write the [`KeyResolver`] it hands down without
 /// naming the widget module.
@@ -60,7 +64,9 @@ pub struct SharedEditorConfig {
 impl SharedEditorConfig {
     pub fn new(background_alpha: f32, resolver: Arc<KeyResolver>) -> Arc<Self> {
         Arc::new(Self {
-            background_alpha: AtomicU32::new(background_alpha.clamp(0.0, 1.0).to_bits()),
+            background_alpha: AtomicU32::new(
+                background_alpha.clamp(0.0, 1.0).to_bits(),
+            ),
             scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
@@ -95,7 +101,8 @@ impl SharedEditorConfig {
     /// Routed through here so settings have one mutation API, but stored in
     /// `FOREGROUND_ALPHA` - see that static for why it's global.
     pub fn set_foreground_alpha(&self, alpha: f32) {
-        FOREGROUND_ALPHA.store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+        FOREGROUND_ALPHA
+            .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     pub fn set_resolver(&self, resolver: Arc<KeyResolver>) {
@@ -220,7 +227,10 @@ impl TextArea {
     /// The caret state to hand `History`: position plus whatever is selected,
     /// since undoing an edit that replaced a selection has to put it back.
     fn cursor_state(&self) -> CursorState {
-        CursorState { position: self.cursor_position(), selection: self.selection() }
+        CursorState {
+            position: self.cursor_position(),
+            selection: self.selection(),
+        }
     }
 
     fn grammar(&self) -> Option<Arc<Grammar>> {
@@ -236,7 +246,11 @@ impl TextArea {
     /// actually happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
-        op: impl FnOnce(&mut History, &str, CursorState) -> Option<(String, CursorState)>,
+        op: impl FnOnce(
+            &mut History,
+            &str,
+            CursorState,
+        ) -> Option<(String, CursorState)>,
     ) -> bool {
         let current = self.cursor_state();
         let Some((restored_text, restored)) =
@@ -250,8 +264,12 @@ impl TextArea {
         // undone edit had replaced. Neither branch changes text, so neither
         // needs a second `resync_source`.
         match restored.selection {
-            Some(selection) => self.restore_selection(selection, restored.position),
-            None => self.move_cursor_to(restored.position.0, restored.position.1),
+            Some(selection) => {
+                self.restore_selection(selection, restored.position)
+            }
+            None => {
+                self.move_cursor_to(restored.position.0, restored.position.1)
+            }
         }
         true
     }
@@ -276,7 +294,9 @@ impl TextArea {
     /// a single-line document has no separator to copy.
     fn document_line_ending(&self) -> text_editor::LineEnding {
         match self.content.line_ending() {
-            Some(text_editor::LineEnding::None) | None => text_editor::LineEnding::default(),
+            Some(text_editor::LineEnding::None) | None => {
+                text_editor::LineEnding::default()
+            }
             Some(ending) => ending,
         }
     }
@@ -287,7 +307,11 @@ impl TextArea {
     /// Each replacement inherits the ending of the line it stands in for,
     /// which is what keeps a line promoted into the last position (or copied
     /// past it) from converting a CRLF document to LF.
-    fn text_with_lines_spliced(&self, replaced: Range<usize>, replacements: &[String]) -> String {
+    fn text_with_lines_spliced(
+        &self,
+        replaced: Range<usize>,
+        replacements: &[String],
+    ) -> String {
         let line_count = self.content.line_count();
         let start = replaced.start.min(line_count);
         let end = replaced.end.clamp(start, line_count);
@@ -300,12 +324,16 @@ impl TextArea {
         };
         let mut displaced: Vec<text_editor::LineEnding> = Vec::new();
         let mut spliced_in = false;
-        let splice = |joiner: &mut LineJoiner, displaced: &[text_editor::LineEnding]| {
-            for (offset, replacement) in replacements.iter().enumerate() {
-                let inherited = displaced.get(offset).copied();
-                joiner.push(replacement, inherited.unwrap_or(text_editor::LineEnding::None));
-            }
-        };
+        let splice =
+            |joiner: &mut LineJoiner, displaced: &[text_editor::LineEnding]| {
+                for (offset, replacement) in replacements.iter().enumerate() {
+                    let inherited = displaced.get(offset).copied();
+                    joiner.push(
+                        replacement,
+                        inherited.unwrap_or(text_editor::LineEnding::None),
+                    );
+                }
+            };
 
         for (index, line) in self.content.lines().enumerate() {
             if (start..end).contains(&index) {
@@ -344,14 +372,19 @@ impl TextArea {
 
         // Its own undo step - a toggle shouldn't fold into a typing burst -
         // recorded only now that an edit is certain to happen.
-        self.history.record_isolated(&self.source, self.cursor_state());
-        let new_text = self.text_with_lines_spliced(first..last + 1, &toggled.lines);
+        self.history
+            .record_isolated(&self.source, self.cursor_state());
+        let new_text =
+            self.text_with_lines_spliced(first..last + 1, &toggled.lines);
         self.replace_document(&new_text);
 
         let shift = |pos| comment::shift_position(pos, first, &toggled.edits);
         match selection {
             Some(saved) => self.restore_selection(
-                SavedSelection { anchor: shift(saved.anchor), ..saved },
+                SavedSelection {
+                    anchor: shift(saved.anchor),
+                    ..saved
+                },
                 shift(cursor),
             ),
             None => {
@@ -365,7 +398,9 @@ impl TextArea {
     /// The covered lines' text, endings dropped - what the line transforms take.
     fn covered_text(&self, (first, last): (usize, usize)) -> Vec<String> {
         (first..=last)
-            .filter_map(|index| self.content.line(index).map(|line| line.text.into_owned()))
+            .filter_map(|index| {
+                self.content.line(index).map(|line| line.text.into_owned())
+            })
             .collect()
     }
 
@@ -391,14 +426,20 @@ impl TextArea {
     /// end of the document has no ending to swallow on its last line, and
     /// deleting one takes the newline in front of it instead, or it would
     /// leave a blank line behind.
-    fn splice_lines_in_place(&mut self, replaced: Range<usize>, replacements: &[String]) {
+    fn splice_lines_in_place(
+        &mut self,
+        replaced: Range<usize>,
+        replacements: &[String],
+    ) {
         let line_count = self.content.line_count();
         let start = replaced.start.min(line_count);
         let end = replaced.end.clamp(start, line_count);
         let at_document_end = end >= line_count;
 
         let displaced: Vec<text_editor::LineEnding> = (start..end)
-            .filter_map(|index| self.content.line(index).map(|line| line.ending))
+            .filter_map(|index| {
+                self.content.line(index).map(|line| line.ending)
+            })
             .collect();
         let fallback = self.document_line_ending();
 
@@ -422,19 +463,22 @@ impl TextArea {
             (false, _) => ((start, 0), (end, 0)),
             // Nothing is going back in and there is no ending to the right to
             // absorb, so the one to the left goes with it.
-            (true, true) if start > 0 => {
-                ((start - 1, line_end(start - 1)), (line_count - 1, line_end(line_count - 1)))
+            (true, true) if start > 0 => (
+                (start - 1, line_end(start - 1)),
+                (line_count - 1, line_end(line_count - 1)),
+            ),
+            (true, _) => {
+                ((start, 0), (line_count - 1, line_end(line_count - 1)))
             }
-            (true, _) => ((start, 0), (line_count - 1, line_end(line_count - 1))),
         };
 
         self.content.move_to(Cursor {
             position: clamp_position(&self.content, caret),
             selection: Some(clamp_position(&self.content, anchor)),
         });
-        self.content.perform(text_editor::Action::Edit(text_editor::Edit::Paste(
-            Arc::new(text),
-        )));
+        self.content.perform(text_editor::Action::Edit(
+            text_editor::Edit::Paste(Arc::new(text)),
+        ));
     }
 
     /// Writes a line command out: one isolated undo step - a line command
@@ -451,14 +495,19 @@ impl TextArea {
         self.resync_source();
 
         match splice.caret {
-            lines::Caret::Collapsed(line) => self.move_cursor_to(line, before.position.1),
+            lines::Caret::Collapsed(line) => {
+                self.move_cursor_to(line, before.position.1)
+            }
             lines::Caret::Shifted(rows) => {
                 let shift = |(line, column): (usize, usize)| {
                     (line.saturating_add_signed(rows), column)
                 };
                 match before.selection {
                     Some(saved) => self.restore_selection(
-                        SavedSelection { anchor: shift(saved.anchor), ..saved },
+                        SavedSelection {
+                            anchor: shift(saved.anchor),
+                            ..saved
+                        },
                         shift(before.position),
                     ),
                     None => {
@@ -487,10 +536,18 @@ impl TextArea {
     /// top of the document, where there is nothing to swap with.
     fn move_line_up(&mut self) -> bool {
         let covered = self.covered();
-        let Some(above) = covered.0.checked_sub(1).and_then(|index| self.line_text(index)) else {
+        let Some(above) = covered
+            .0
+            .checked_sub(1)
+            .and_then(|index| self.line_text(index))
+        else {
             return false;
         };
-        self.apply_line_splice(lines::move_up(covered, above, self.covered_text(covered)))
+        self.apply_line_splice(lines::move_up(
+            covered,
+            above,
+            self.covered_text(covered),
+        ))
     }
 
     /// Mirror of [`Self::move_line_up`], no-op at the end of the document.
@@ -499,14 +556,22 @@ impl TextArea {
         let Some(below) = self.line_text(covered.1 + 1) else {
             return false;
         };
-        self.apply_line_splice(lines::move_down(covered, below, self.covered_text(covered)))
+        self.apply_line_splice(lines::move_down(
+            covered,
+            below,
+            self.covered_text(covered),
+        ))
     }
 
     /// Duplicates the covered lines. Always an edit - a copy adds at least a
     /// line separator - so there is no no-op case to guard.
     fn copy_line(&mut self, downward: bool) -> bool {
         let covered = self.covered();
-        self.apply_line_splice(lines::copy(covered, self.covered_text(covered), downward))
+        self.apply_line_splice(lines::copy(
+            covered,
+            self.covered_text(covered),
+            downward,
+        ))
     }
 
     fn line_text(&self, index: usize) -> Option<String> {
@@ -536,12 +601,16 @@ impl TextEditorWidget for TextArea {
         let background_alpha = self.settings.background_alpha();
         let foreground_alpha = foreground_alpha();
         text_editor(&self.content)
-            .id(iced::advanced::widget::Id::new(editor_core::EDITOR_WIDGET_ID))
+            .id(iced::advanced::widget::Id::new(
+                editor_core::EDITOR_WIDGET_ID,
+            ))
             .placeholder("")
             .font(Font::MONOSPACE)
             .height(Fill)
             .scroll_sensitivity(self.settings.scroll_sensitivity())
-            .style(move |theme, status| editor_style(theme, status, background_alpha, foreground_alpha))
+            .style(move |theme, status| {
+                editor_style(theme, status, background_alpha, foreground_alpha)
+            })
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
             .key_binding(move |press| key_binding(press, resolve.as_ref()))
             .on_action(EditorMessage::Action)
@@ -562,7 +631,8 @@ impl TextEditorWidget for TextArea {
                     // The pre-edit text is already sitting in the cache. The
                     // caret goes with it so undo can re-select whatever this
                     // edit is about to replace.
-                    self.history.record_before_edit(&self.source, self.cursor_state());
+                    self.history
+                        .record_before_edit(&self.source, self.cursor_state());
                 }
                 self.content.perform(action);
                 if is_edit {
@@ -606,7 +676,8 @@ impl TextEditorWidget for TextArea {
         }
         // Isolated for the same reason a comment toggle is: the reload joins
         // neither the typing burst before it nor the keystroke after it.
-        self.history.record_isolated(&self.source, self.cursor_state());
+        self.history
+            .record_isolated(&self.source, self.cursor_state());
         let cursor = self.cursor_position();
         self.replace_document(text);
         self.move_cursor_to(cursor.0, cursor.1); // clamps if the file shrank
@@ -616,7 +687,8 @@ impl TextEditorWidget for TextArea {
         if !matches!(self.highlighting, Highlighting::Pending(_)) {
             return;
         }
-        let Highlighting::Pending(handle) = std::mem::replace(&mut self.highlighting, Highlighting::None)
+        let Highlighting::Pending(handle) =
+            std::mem::replace(&mut self.highlighting, Highlighting::None)
         else {
             unreachable!("just checked self.highlighting is Pending");
         };
@@ -649,13 +721,21 @@ impl TextEditorWidget for TextArea {
         // stale selection has to be dropped explicitly first. Any non-edge
         // `Move` collapses it (the cursor lands wherever `move_to` says next).
         if self.content.cursor().selection.is_some() {
-            self.content.perform(text_editor::Action::Move(Motion::Right));
+            self.content
+                .perform(text_editor::Action::Move(Motion::Right));
         }
         let position = clamp_position(&self.content, (line, column));
-        self.content.move_to(Cursor { position, selection: None });
+        self.content.move_to(Cursor {
+            position,
+            selection: None,
+        });
     }
 
-    fn set_find_matches(&mut self, matches: Vec<FindMatch>, current: Option<usize>) {
+    fn set_find_matches(
+        &mut self,
+        matches: Vec<FindMatch>,
+        current: Option<usize>,
+    ) {
         self.find_matches = Arc::new(matches);
         self.find_current = current;
     }
@@ -674,17 +754,26 @@ impl TextEditorWidget for TextArea {
         // selection) or a word/line selection from a double/triple click,
         // whose bounds live in the selection kind rather than the cursor
         // pair. The selected text tells the cases apart - and which kind.
-        let selected = self.content.selection().filter(|text| !text.is_empty())?;
+        let selected =
+            self.content.selection().filter(|text| !text.is_empty())?;
         let line = self.content.line(anchor.line)?;
-        let kind = if selected.trim_end_matches(['\r', '\n']) == line.text.as_ref() {
-            SelectionKind::Line
-        } else {
-            SelectionKind::Word
-        };
-        Some(SavedSelection { anchor: anchor_position, kind })
+        let kind =
+            if selected.trim_end_matches(['\r', '\n']) == line.text.as_ref() {
+                SelectionKind::Line
+            } else {
+                SelectionKind::Word
+            };
+        Some(SavedSelection {
+            anchor: anchor_position,
+            kind,
+        })
     }
 
-    fn restore_selection(&mut self, selection: SavedSelection, cursor: (usize, usize)) {
+    fn restore_selection(
+        &mut self,
+        selection: SavedSelection,
+        cursor: (usize, usize),
+    ) {
         let anchor = clamp_position(&self.content, selection.anchor);
         match selection.kind {
             SelectionKind::Range => {
@@ -694,11 +783,17 @@ impl TextEditorWidget for TextArea {
                 });
             }
             SelectionKind::Word => {
-                self.content.move_to(Cursor { position: anchor, selection: None });
+                self.content.move_to(Cursor {
+                    position: anchor,
+                    selection: None,
+                });
                 self.content.perform(text_editor::Action::SelectWord);
             }
             SelectionKind::Line => {
-                self.content.move_to(Cursor { position: anchor, selection: None });
+                self.content.move_to(Cursor {
+                    position: anchor,
+                    selection: None,
+                });
                 self.content.perform(text_editor::Action::SelectLine);
             }
         }
@@ -735,9 +830,15 @@ impl LineJoiner {
 /// checking of its own. `column` is a byte index within the line (matching
 /// what `Content::cursor` reports), so it's also backed up to a `char`
 /// boundary.
-fn clamp_position(content: &Content, (line, column): (usize, usize)) -> Position {
+fn clamp_position(
+    content: &Content,
+    (line, column): (usize, usize),
+) -> Position {
     let line = line.min(content.line_count().saturating_sub(1));
-    let text = content.line(line).map(|l| l.text.into_owned()).unwrap_or_default();
+    let text = content
+        .line(line)
+        .map(|l| l.text.into_owned())
+        .unwrap_or_default();
     let mut column = column.min(text.len());
     while !text.is_char_boundary(column) {
         column -= 1;
@@ -956,11 +1057,17 @@ fn base_color_for(highlighted: Highlighted) -> iced::Color {
 }
 
 fn word_delete_backward() -> Binding<EditorMessage> {
-    Binding::Sequence(vec![Binding::Select(Motion::Left.widen()), Binding::Backspace])
+    Binding::Sequence(vec![
+        Binding::Select(Motion::Left.widen()),
+        Binding::Backspace,
+    ])
 }
 
 fn word_delete_forward() -> Binding<EditorMessage> {
-    Binding::Sequence(vec![Binding::Select(Motion::Right.widen()), Binding::Delete])
+    Binding::Sequence(vec![
+        Binding::Select(Motion::Right.widen()),
+        Binding::Delete,
+    ])
 }
 
 /// How this crate performs an [`Action`], or `None` for one it doesn't own -
@@ -1073,7 +1180,11 @@ mod tests {
 
     use super::*;
 
-    fn press(modifiers: keyboard::Modifiers, physical: key::Code, key: keyboard::Key) -> KeyPress {
+    fn press(
+        modifiers: keyboard::Modifiers,
+        physical: key::Code,
+        key: keyboard::Key,
+    ) -> KeyPress {
         press_with_text(modifiers, physical, key, None)
     }
 
@@ -1121,7 +1232,9 @@ mod tests {
     fn a_new_editor_starts_with_a_synced_source() {
         // Covers the line-ending shapes where seeding the cache from the
         // input `&str` rather than from `Content` could have diverged.
-        for doc in ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"] {
+        for doc in
+            ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"]
+        {
             let editor = plain_editor(doc);
             assert_source_is_synced(&editor);
             assert_eq!(editor.text(), editor.content.text(), "doc: {doc:?}");
@@ -1140,7 +1253,10 @@ mod tests {
             Arc::ptr_eq(&first.source, &second.source),
             "a redraw must not rebuild the document string"
         );
-        assert!(first == second, "unchanged settings must not re-run the highlighter");
+        assert!(
+            first == second,
+            "unchanged settings must not re-run the highlighter"
+        );
     }
 
     #[test]
@@ -1197,9 +1313,9 @@ mod tests {
         editor.move_cursor_to(0, 5);
         let before = editor.source.clone();
 
-        let edited = editor.update(EditorMessage::Action(text_editor::Action::Edit(
-            text_editor::Edit::Insert('!'),
-        )));
+        let edited = editor.update(EditorMessage::Action(
+            text_editor::Action::Edit(text_editor::Edit::Insert('!')),
+        ));
 
         assert!(edited);
         assert!(
@@ -1291,7 +1407,10 @@ mod tests {
     fn editor_with_hello_selected() -> TextArea {
         let mut editor = plain_editor("hello world");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range,
+            },
             (0, 5),
         );
         assert_eq!(editor.content.selection().as_deref(), Some("hello"));
@@ -1302,9 +1421,14 @@ mod tests {
         EditorMessage::Action(text_editor::Action::Edit(edit))
     }
 
-    fn editor_with_style(text: &str, extension: &str, style: CommentStyle) -> TextArea {
+    fn editor_with_style(
+        text: &str,
+        extension: &str,
+        style: CommentStyle,
+    ) -> TextArea {
         let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
-        let settings = SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
+        let settings =
+            SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
         settings.set_comment_styles([(extension.to_string(), style)].into());
         TextArea::new(text, &registry, Some(extension), settings)
     }
@@ -1319,7 +1443,10 @@ mod tests {
         editor_with_style(
             text,
             "html",
-            CommentStyle::Multi { left: "<!--".to_string(), right: "-->".to_string() },
+            CommentStyle::Multi {
+                left: "<!--".to_string(),
+                right: "-->".to_string(),
+            },
         )
     }
 
@@ -1343,7 +1470,10 @@ mod tests {
     fn toggle_comment_covers_a_multi_line_selection_and_keeps_it() {
         let mut editor = rust_editor("aaa\nbbb");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range,
+            },
             (1, 2),
         );
 
@@ -1351,7 +1481,10 @@ mod tests {
         assert_eq!(editor.text(), "// aaa\n// bbb");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (0, 4), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 4),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (1, 5));
         assert_source_is_synced(&editor);
@@ -1361,7 +1494,10 @@ mod tests {
     fn a_selection_ending_at_column_zero_leaves_that_line_alone() {
         let mut editor = rust_editor("aaa\nbbb\nccc");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range,
+            },
             (2, 0),
         );
         assert!(editor.update(EditorMessage::ToggleComment));
@@ -1373,7 +1509,10 @@ mod tests {
         let mut editor = plain_editor("text");
         assert!(!editor.update(EditorMessage::ToggleComment));
         assert_eq!(editor.text(), "text");
-        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+        assert!(
+            !editor.update(EditorMessage::Undo),
+            "no phantom history entry"
+        );
     }
 
     #[test]
@@ -1399,7 +1538,10 @@ mod tests {
     fn undo_of_a_selection_toggle_restores_the_selection() {
         let mut editor = rust_editor("aaa\nbbb");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range,
+            },
             (1, 2),
         );
         assert!(editor.update(EditorMessage::ToggleComment));
@@ -1408,7 +1550,10 @@ mod tests {
         assert_eq!(editor.text(), "aaa\nbbb");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (1, 2));
     }
@@ -1433,7 +1578,10 @@ mod tests {
                     \x20   </ul>";
         let mut editor = html_editor(text);
         editor.restore_selection(
-            SavedSelection { anchor: (1, 24), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (1, 24),
+                kind: SelectionKind::Range,
+            },
             (2, 25),
         );
         let selected_before = editor.content.selection();
@@ -1448,17 +1596,27 @@ mod tests {
         );
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (1, 28), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (1, 28),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (2, 25));
-        assert_eq!(editor.content.selection(), selected_before, "same characters selected");
+        assert_eq!(
+            editor.content.selection(),
+            selected_before,
+            "same characters selected"
+        );
         assert_source_is_synced(&editor);
 
         assert!(editor.update(EditorMessage::ToggleComment));
         assert_eq!(editor.text(), text);
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (1, 24), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (1, 24),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (2, 25));
         assert_source_is_synced(&editor);
@@ -1482,7 +1640,10 @@ mod tests {
     fn undo_of_a_multi_toggle_restores_text_and_selection() {
         let mut editor = html_editor("aaa\nbbb");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 1), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range,
+            },
             (1, 2),
         );
         assert!(editor.update(EditorMessage::ToggleComment));
@@ -1492,7 +1653,10 @@ mod tests {
         assert_eq!(editor.text(), "aaa\nbbb");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (1, 2));
     }
@@ -1501,7 +1665,10 @@ mod tests {
     fn crlf_survives_a_multi_toggle_round_trip() {
         let mut editor = html_editor("aaa\r\nbbb\r\nccc");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range,
+            },
             (1, 3),
         );
         assert!(editor.update(EditorMessage::ToggleComment));
@@ -1513,9 +1680,16 @@ mod tests {
 
     /// Selects `anchor` through `cursor` as a plain range, the shape a
     /// shift+arrow or a mouse drag leaves behind.
-    fn select_range(editor: &mut TextArea, anchor: (usize, usize), cursor: (usize, usize)) {
+    fn select_range(
+        editor: &mut TextArea,
+        anchor: (usize, usize),
+        cursor: (usize, usize),
+    ) {
         editor.restore_selection(
-            SavedSelection { anchor, kind: SelectionKind::Range },
+            SavedSelection {
+                anchor,
+                kind: SelectionKind::Range,
+            },
             cursor,
         );
     }
@@ -1525,11 +1699,17 @@ mod tests {
         // The splice helper's contract, over the same line-ending shapes
         // `a_new_editor_starts_with_a_synced_source` covers: swapping lines
         // for copies of themselves has to be byte-identical.
-        for doc in ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"] {
+        for doc in
+            ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"]
+        {
             let editor = plain_editor(doc);
             let count = editor.content.line_count();
             let same = editor.covered_text((0, count - 1));
-            assert_eq!(editor.text_with_lines_spliced(0..count, &same), editor.text(), "{doc:?}");
+            assert_eq!(
+                editor.text_with_lines_spliced(0..count, &same),
+                editor.text(),
+                "{doc:?}"
+            );
         }
     }
 
@@ -1540,7 +1720,10 @@ mod tests {
         // lone LF into a CRLF document.
         let editor = plain_editor("aaa\r\nbbb");
         let doubled = vec!["bbb".to_string(), "bbb".to_string()];
-        assert_eq!(editor.text_with_lines_spliced(1..2, &doubled), "aaa\r\nbbb\r\nbbb");
+        assert_eq!(
+            editor.text_with_lines_spliced(1..2, &doubled),
+            "aaa\r\nbbb\r\nbbb"
+        );
     }
 
     #[test]
@@ -1589,7 +1772,10 @@ mod tests {
     fn delete_line_on_an_empty_document_records_nothing() {
         let mut editor = plain_editor("");
         assert!(!editor.update(EditorMessage::DeleteLine));
-        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+        assert!(
+            !editor.update(EditorMessage::Undo),
+            "no phantom history entry"
+        );
     }
 
     #[test]
@@ -1627,7 +1813,10 @@ mod tests {
         editor.move_cursor_to(0, 1);
         assert!(!editor.update(EditorMessage::MoveLineUp));
         assert_eq!(editor.text(), "aaa\nbbb");
-        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+        assert!(
+            !editor.update(EditorMessage::Undo),
+            "no phantom history entry"
+        );
     }
 
     #[test]
@@ -1636,7 +1825,10 @@ mod tests {
         editor.move_cursor_to(1, 1);
         assert!(!editor.update(EditorMessage::MoveLineDown));
         assert_eq!(editor.text(), "aaa\nbbb");
-        assert!(!editor.update(EditorMessage::Undo), "no phantom history entry");
+        assert!(
+            !editor.update(EditorMessage::Undo),
+            "no phantom history entry"
+        );
     }
 
     #[test]
@@ -1660,7 +1852,10 @@ mod tests {
         assert_eq!(editor.text(), "bbb\nccc\naaa\nddd");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (0, 1), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 1),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (1, 2));
         assert_eq!(editor.content.selection().as_deref(), Some("bb\ncc"));
@@ -1708,7 +1903,10 @@ mod tests {
         assert_eq!(editor.text(), "aaa\nbbb\nccc");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (1, 0), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (1, 0),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (1, 3));
         assert_source_is_synced(&editor);
@@ -1742,7 +1940,10 @@ mod tests {
         assert_eq!(editor.text(), "aaa\nbbb\naaa\nbbb\nccc");
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (2, 1), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (2, 1),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (3, 2));
         assert_source_is_synced(&editor);
@@ -1799,7 +2000,10 @@ mod tests {
         assert_eq!(editor.content.selection().as_deref(), Some("hello"));
         assert_eq!(
             editor.selection(),
-            Some(SavedSelection { anchor: (0, 0), kind: SelectionKind::Range })
+            Some(SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range
+            })
         );
         assert_eq!(editor.cursor_position(), (0, 5));
     }
@@ -1807,7 +2011,9 @@ mod tests {
     #[test]
     fn undo_of_a_paste_over_a_selection_reselects_the_replaced_text() {
         let mut editor = editor_with_hello_selected();
-        assert!(editor.update(edit(text_editor::Edit::Paste(Arc::new("bye".to_string())))));
+        assert!(editor.update(edit(text_editor::Edit::Paste(Arc::new(
+            "bye".to_string()
+        )))));
         assert_eq!(editor.text(), "bye world");
 
         assert!(editor.update(EditorMessage::Undo));
@@ -1855,7 +2061,10 @@ mod tests {
         assert!(editor.update(EditorMessage::Undo));
         assert_eq!(editor.text(), "hello world");
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
-        assert_eq!(editor.selection().map(|s| s.kind), Some(SelectionKind::Word));
+        assert_eq!(
+            editor.selection().map(|s| s.kind),
+            Some(SelectionKind::Word)
+        );
     }
 
     #[test]
@@ -1868,7 +2077,10 @@ mod tests {
         assert!(editor.update(EditorMessage::Undo));
         assert_eq!(editor.text(), "first line\nsecond line");
         assert_eq!(editor.content.selection().as_deref(), Some("second line"));
-        assert_eq!(editor.selection().map(|s| s.kind), Some(SelectionKind::Line));
+        assert_eq!(
+            editor.selection().map(|s| s.kind),
+            Some(SelectionKind::Line)
+        );
     }
 
     #[test]
@@ -1895,9 +2107,9 @@ mod tests {
         // a cut and the alternative is an atomic word-delete command.
         let mut editor = plain_editor("hello world");
         editor.move_cursor_to(0, 11);
-        assert!(!editor.update(EditorMessage::Action(text_editor::Action::Select(
-            Motion::Left.widen()
-        ))));
+        assert!(!editor.update(EditorMessage::Action(
+            text_editor::Action::Select(Motion::Left.widen())
+        )));
         assert!(editor.update(edit(text_editor::Edit::Backspace)));
         assert_eq!(editor.text(), "hello ");
 
@@ -1917,7 +2129,10 @@ mod tests {
 
         editor.update(EditorMessage::Undo);
         assert_source_is_synced(&editor);
-        assert!(!Arc::ptr_eq(&after_edit, &editor.source), "undo changed the text");
+        assert!(
+            !Arc::ptr_eq(&after_edit, &editor.source),
+            "undo changed the text"
+        );
     }
 
     #[test]
@@ -1942,7 +2157,10 @@ mod tests {
     #[test]
     fn range_selection_round_trips_through_save_and_restore() {
         let mut editor = plain_editor("hello\nworld");
-        let saved = SavedSelection { anchor: (0, 2), kind: SelectionKind::Range };
+        let saved = SavedSelection {
+            anchor: (0, 2),
+            kind: SelectionKind::Range,
+        };
         editor.restore_selection(saved, (1, 4));
         assert_eq!(editor.selection(), Some(saved));
         assert_eq!(editor.cursor_position(), (1, 4));
@@ -1957,7 +2175,13 @@ mod tests {
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
 
         let saved = editor.selection().expect("word selection should save");
-        assert_eq!(saved, SavedSelection { anchor: (0, 8), kind: SelectionKind::Word });
+        assert_eq!(
+            saved,
+            SavedSelection {
+                anchor: (0, 8),
+                kind: SelectionKind::Word
+            }
+        );
 
         // Simulate the tab going away and coming back: clear, then restore.
         editor.move_cursor_to(0, 0);
@@ -1992,7 +2216,10 @@ mod tests {
     fn move_cursor_to_clears_a_leftover_selection() {
         let mut editor = plain_editor("hello world");
         editor.restore_selection(
-            SavedSelection { anchor: (0, 0), kind: SelectionKind::Range },
+            SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range,
+            },
             (0, 5),
         );
         assert!(editor.selection().is_some());
@@ -2004,15 +2231,24 @@ mod tests {
     #[test]
     fn clamp_position_clamps_line_and_column_to_the_document() {
         let content = Content::with_text("hello\nhi");
-        assert_eq!(clamp_position(&content, (9, 9)), Position { line: 1, column: 2 });
-        assert_eq!(clamp_position(&content, (0, 3)), Position { line: 0, column: 3 });
+        assert_eq!(
+            clamp_position(&content, (9, 9)),
+            Position { line: 1, column: 2 }
+        );
+        assert_eq!(
+            clamp_position(&content, (0, 3)),
+            Position { line: 0, column: 3 }
+        );
     }
 
     #[test]
     fn clamp_position_backs_up_to_a_char_boundary() {
         // 'é' occupies bytes 1..3, so byte offset 2 is mid-character.
         let content = Content::with_text("héllo");
-        assert_eq!(clamp_position(&content, (0, 2)), Position { line: 0, column: 1 });
+        assert_eq!(
+            clamp_position(&content, (0, 2)),
+            Position { line: 0, column: 1 }
+        );
     }
 
     #[test]
@@ -2053,7 +2289,9 @@ mod tests {
     /// which actions is `jumppad_keybinds`' business and is tested there;
     /// what this crate owns is turning a resolved action into a binding, so
     /// these hand the answer over directly.
-    fn resolving(action: Option<Action>) -> impl Fn(&KeyPress) -> Option<Action> {
+    fn resolving(
+        action: Option<Action>,
+    ) -> impl Fn(&KeyPress) -> Option<Action> {
         move |_| action
     }
 
@@ -2147,7 +2385,8 @@ mod tests {
     }
 
     #[test]
-    fn editor_style_drops_its_background_when_translucent_but_keeps_the_value() {
+    fn editor_style_drops_its_background_when_translucent_but_keeps_the_value()
+    {
         let theme = Theme::ALL[0].clone();
         let default = text_editor::default(&theme, text_editor::Status::Active);
         let style = editor_style(&theme, text_editor::Status::Active, 0.5, 1.0);
@@ -2163,7 +2402,8 @@ mod tests {
     fn set_foreground_alpha_reaches_color_for() {
         // The only test that writes the global, restored at the end so the
         // parallel test threads never see a scaled alpha.
-        let settings = SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
+        let settings =
+            SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
         settings.set_foreground_alpha(0.25);
         let keyword = Highlighted::Syntax(HighlightCategory::Keyword);
         let color = color_for(keyword);
@@ -2176,7 +2416,8 @@ mod tests {
 
     #[test]
     fn shared_editor_config_round_trips_its_settings() {
-        let settings = SharedEditorConfig::new(0.8, Arc::new(|_: &KeyPress| None));
+        let settings =
+            SharedEditorConfig::new(0.8, Arc::new(|_: &KeyPress| None));
         assert_eq!(settings.background_alpha(), 0.8);
         settings.set_background_alpha(0.4);
         assert_eq!(settings.background_alpha(), 0.4);
@@ -2186,17 +2427,23 @@ mod tests {
 
         // The resolver is swappable so a `keybinds.toml` reload reaches tabs
         // that already exist.
-        assert_eq!((settings.resolver())(&press(
-            keyboard::Modifiers::CTRL,
-            key::Code::KeyZ,
-            keyboard::Key::Character("z".into()),
-        )), None);
+        assert_eq!(
+            (settings.resolver())(&press(
+                keyboard::Modifiers::CTRL,
+                key::Code::KeyZ,
+                keyboard::Key::Character("z".into()),
+            )),
+            None
+        );
         settings.set_resolver(Arc::new(|_: &KeyPress| Some(Action::Undo)));
-        assert_eq!((settings.resolver())(&press(
-            keyboard::Modifiers::CTRL,
-            key::Code::KeyZ,
-            keyboard::Key::Character("z".into()),
-        )), Some(Action::Undo));
+        assert_eq!(
+            (settings.resolver())(&press(
+                keyboard::Modifiers::CTRL,
+                key::Code::KeyZ,
+                keyboard::Key::Character("z".into()),
+            )),
+            Some(Action::Undo)
+        );
     }
 
     /// Builds a highlighter over `source` with `matches` already applied.
@@ -2219,8 +2466,16 @@ mod tests {
     fn highlight_line_emits_a_span_per_match_on_that_line() {
         let source = "find me\nand me";
         let matches = vec![
-            FindMatch { line: 0, start: 5, end: 7 },
-            FindMatch { line: 1, start: 4, end: 6 },
+            FindMatch {
+                line: 0,
+                start: 5,
+                end: 7,
+            },
+            FindMatch {
+                line: 1,
+                start: 4,
+                end: 6,
+            },
         ];
         let mut highlighter = highlighter_with(source, matches, Some(1));
 
@@ -2238,7 +2493,11 @@ mod tests {
         // covering a byte wins - so a match must be emitted last to be seen.
         let mut highlighter = highlighter_with(
             "keyword",
-            vec![FindMatch { line: 0, start: 0, end: 7 }],
+            vec![FindMatch {
+                line: 0,
+                start: 0,
+                end: 7,
+            }],
             None,
         );
         // Stand in for a grammar by injecting a syntax span directly.
@@ -2264,7 +2523,11 @@ mod tests {
         // Guards the hand-written `PartialEq`: iced re-runs the highlighter
         // only when settings compare unequal, so dropping the find fields
         // there would leave match coloring frozen on screen.
-        let matches = Arc::new(vec![FindMatch { line: 0, start: 0, end: 2 }]);
+        let matches = Arc::new(vec![FindMatch {
+            line: 0,
+            start: 0,
+            end: 2,
+        }]);
         let base = HighlighterSettings {
             source: Arc::new("ab".to_string()),
             grammar: None,
@@ -2284,7 +2547,11 @@ mod tests {
         assert!(base != moved_current, "a new current match must invalidate");
 
         let other_matches = HighlighterSettings {
-            matches: Arc::new(vec![FindMatch { line: 9, start: 1, end: 2 }]),
+            matches: Arc::new(vec![FindMatch {
+                line: 9,
+                start: 1,
+                end: 2,
+            }]),
             ..base.clone()
         };
         assert!(base != other_matches, "a new match list must invalidate");
@@ -2302,7 +2569,10 @@ mod tests {
             current_match: None,
             foreground_alpha: 1.0,
         };
-        let loaded_something = HighlighterSettings { revision: 1, ..base.clone() };
+        let loaded_something = HighlighterSettings {
+            revision: 1,
+            ..base.clone()
+        };
         assert!(base != loaded_something);
     }
 
@@ -2318,14 +2588,24 @@ mod tests {
             current_match: None,
             foreground_alpha: 1.0,
         };
-        let faded = HighlighterSettings { foreground_alpha: 0.5, ..base.clone() };
+        let faded = HighlighterSettings {
+            foreground_alpha: 0.5,
+            ..base.clone()
+        };
         assert!(base != faded);
     }
 
     #[test]
     fn set_find_matches_reaches_the_highlighter_settings() {
         let mut editor = plain_editor("find me");
-        editor.set_find_matches(vec![FindMatch { line: 0, start: 5, end: 7 }], Some(0));
+        editor.set_find_matches(
+            vec![FindMatch {
+                line: 0,
+                start: 5,
+                end: 7,
+            }],
+            Some(0),
+        );
         assert_eq!(editor.find_matches.len(), 1);
         assert_eq!(editor.find_current, Some(0));
 

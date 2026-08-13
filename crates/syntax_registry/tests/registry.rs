@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use syntax_registry::{HighlightCategory, PollResult, SyntaxRegistry};
@@ -25,9 +25,13 @@ fn wait_ready(rx: &mpsc::Receiver<()>) {
 #[test]
 fn reuses_already_loaded_grammar_and_unloads_when_last_tab_closes() {
     let (tx, rx) = mpsc::channel();
-    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("json", "json")]), move || {
-        let _ = tx.send(());
-    });
+    let registry = SyntaxRegistry::new(
+        fixtures_dir(),
+        map(&[("json", "json")]),
+        move || {
+            let _ = tx.send(());
+        },
+    );
 
     // First tab opens a .json file: nothing cached yet, triggers a load.
     let handle1 = registry.acquire("json");
@@ -110,9 +114,12 @@ fn multiple_extensions_mapped_to_one_grammar_share_a_single_load() {
 fn unconfigured_extension_is_unavailable_without_touching_disk_or_hanging() {
     // "md" is deliberately absent from the map - no grammar configured for
     // it at all, distinct from "configured but the file is missing".
-    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("json", "json")]), || {
-        panic!("on_ready should never fire - nothing should ever be loaded");
-    });
+    let registry =
+        SyntaxRegistry::new(fixtures_dir(), map(&[("json", "json")]), || {
+            panic!(
+                "on_ready should never fire - nothing should ever be loaded"
+            );
+        });
 
     let handle = registry.acquire("md");
     assert!(matches!(handle.poll(), PollResult::Unavailable));
@@ -139,9 +146,13 @@ fn configured_extension_with_missing_wasm_file_resolves_to_unavailable() {
 #[test]
 fn highlighting_parses_json_into_spans_and_caches_unchanged_text() {
     let (tx, rx) = mpsc::channel();
-    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("json", "json")]), move || {
-        let _ = tx.send(());
-    });
+    let registry = SyntaxRegistry::new(
+        fixtures_dir(),
+        map(&[("json", "json")]),
+        move || {
+            let _ = tx.send(());
+        },
+    );
     let handle = registry.acquire("json");
     wait_ready(&rx);
     let grammar = match handle.poll() {
@@ -171,9 +182,13 @@ fn highlighting_parses_xml_despite_pascal_case_node_kinds() {
     // Regression test: tree-sitter-xml names nodes in PascalCase, unlike
     // every other bundled grammar - see `classify`'s case-folding.
     let (tx, rx) = mpsc::channel();
-    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("xml", "xml")]), move || {
-        let _ = tx.send(());
-    });
+    let registry = SyntaxRegistry::new(
+        fixtures_dir(),
+        map(&[("xml", "xml")]),
+        move || {
+            let _ = tx.send(());
+        },
+    );
     let handle = registry.acquire("xml");
     wait_ready(&rx);
     let grammar = match handle.poll() {
@@ -184,15 +199,21 @@ fn highlighting_parses_xml_despite_pascal_case_node_kinds() {
     let source = r#"<!-- a comment --><a b="c"></a>"#;
     let spans = grammar.highlight(source);
     assert!(
-        spans.iter().any(|span| span.category == HighlightCategory::Comment),
+        spans
+            .iter()
+            .any(|span| span.category == HighlightCategory::Comment),
         "expected the XML comment to be classified as Comment: {spans:?}"
     );
     assert!(
-        spans.iter().any(|span| span.category == HighlightCategory::String),
+        spans
+            .iter()
+            .any(|span| span.category == HighlightCategory::String),
         "expected the quoted attribute value to be classified as String: {spans:?}"
     );
     assert!(
-        spans.iter().any(|span| span.category == HighlightCategory::Keyword),
+        spans
+            .iter()
+            .any(|span| span.category == HighlightCategory::Keyword),
         "expected the tag/attribute names to be classified as Keyword: {spans:?}"
     );
 }
@@ -224,7 +245,8 @@ fn static_injection_highlights_yaml_frontmatter_via_markdown() {
         if let PollResult::Ready(grammar) = handle.poll() {
             last_spans = grammar.highlight(source);
             let has_comment_in_frontmatter = last_spans.iter().any(|span| {
-                span.category == HighlightCategory::Comment && span.end <= frontmatter_end
+                span.category == HighlightCategory::Comment
+                    && span.end <= frontmatter_end
             });
             if has_comment_in_frontmatter {
                 return; // success
@@ -247,16 +269,21 @@ fn highlight_markdown_until(
     done: impl Fn(&[HighlightCategory], &[syntax_registry::HighlightSpan]) -> bool,
 ) -> Arc<Vec<syntax_registry::HighlightSpan>> {
     let (tx, rx) = mpsc::channel();
-    let registry = SyntaxRegistry::new(fixtures_dir(), map(&[("markdown", "markdown")]), move || {
-        let _ = tx.send(());
-    });
+    let registry = SyntaxRegistry::new(
+        fixtures_dir(),
+        map(&[("markdown", "markdown")]),
+        move || {
+            let _ = tx.send(());
+        },
+    );
     let handle = registry.acquire("markdown");
 
     let mut last_spans = Arc::new(Vec::new());
     for _ in 0..8 {
         if let PollResult::Ready(grammar) = handle.poll() {
             last_spans = grammar.highlight(source);
-            let categories: Vec<_> = last_spans.iter().map(|span| span.category).collect();
+            let categories: Vec<_> =
+                last_spans.iter().map(|span| span.category).collect();
             if done(&categories, &last_spans) {
                 break;
             }
@@ -276,7 +303,9 @@ fn inline_injection_colors_a_link_the_block_grammar_leaves_bare() {
         categories.contains(&HighlightCategory::Link)
     });
     assert!(
-        spans.iter().any(|span| span.category == HighlightCategory::Link),
+        spans
+            .iter()
+            .any(|span| span.category == HighlightCategory::Link),
         "expected markdown_inline to contribute a Link span: {spans:?}"
     );
 }
@@ -293,12 +322,16 @@ fn an_injection_only_overrides_the_bytes_it_actually_colors() {
         categories.contains(&HighlightCategory::Link)
     });
     assert!(
-        spans.iter().any(|span| span.category == HighlightCategory::Link),
+        spans
+            .iter()
+            .any(|span| span.category == HighlightCategory::Link),
         "the inline grammar never loaded, so this proves nothing: {spans:?}"
     );
     assert!(
         spans.iter().any(|span| {
-            span.category == HighlightCategory::Heading && span.start == 0 && span.end >= title_end
+            span.category == HighlightCategory::Heading
+                && span.start == 0
+                && span.end >= title_end
         }),
         "expected the heading span to still cover all of `# Title`: {spans:?}"
     );

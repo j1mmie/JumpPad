@@ -34,7 +34,9 @@ pub fn covered_lines(
     match selection.kind {
         // Word and Line selections report anchor == cursor and never span
         // lines - the real bounds live in the kind.
-        SelectionKind::Word | SelectionKind::Line => (selection.anchor.0, selection.anchor.0),
+        SelectionKind::Word | SelectionKind::Line => {
+            (selection.anchor.0, selection.anchor.0)
+        }
         SelectionKind::Range => {
             let (top, bottom) = if selection.anchor <= cursor {
                 (selection.anchor, cursor)
@@ -64,29 +66,53 @@ pub fn delete((first, last): (usize, usize)) -> LineSplice {
 
 /// The covered block one row higher, with `above` pushed underneath it. The
 /// caller only has an `above` when there is a row to move into.
-pub fn move_up((first, last): (usize, usize), above: String, block: Vec<String>) -> LineSplice {
+pub fn move_up(
+    (first, last): (usize, usize),
+    above: String,
+    block: Vec<String>,
+) -> LineSplice {
     let mut lines = block;
     lines.push(above);
-    LineSplice { replaced: first - 1..last + 1, lines, caret: Caret::Shifted(-1) }
+    LineSplice {
+        replaced: first - 1..last + 1,
+        lines,
+        caret: Caret::Shifted(-1),
+    }
 }
 
 /// Mirror of [`move_up`]: the covered block one row lower, `below` pulled
 /// above it.
-pub fn move_down((first, last): (usize, usize), below: String, block: Vec<String>) -> LineSplice {
+pub fn move_down(
+    (first, last): (usize, usize),
+    below: String,
+    block: Vec<String>,
+) -> LineSplice {
     let mut lines = vec![below];
     lines.extend(block);
-    LineSplice { replaced: first..last + 2, lines, caret: Caret::Shifted(1) }
+    LineSplice {
+        replaced: first..last + 2,
+        lines,
+        caret: Caret::Shifted(1),
+    }
 }
 
 /// The covered block duplicated in place. Both directions write the same
 /// document; only which copy keeps the caret differs, so repeating either
 /// grows the block away from where it started.
-pub fn copy((first, last): (usize, usize), block: Vec<String>, downward: bool) -> LineSplice {
+pub fn copy(
+    (first, last): (usize, usize),
+    block: Vec<String>,
+    downward: bool,
+) -> LineSplice {
     let height = block.len();
     let mut lines = block.clone();
     lines.extend(block);
     let shift = if downward { height as isize } else { 0 };
-    LineSplice { replaced: first..last + 1, lines, caret: Caret::Shifted(shift) }
+    LineSplice {
+        replaced: first..last + 1,
+        lines,
+        caret: Caret::Shifted(shift),
+    }
 }
 
 #[cfg(test)]
@@ -98,7 +124,10 @@ mod tests {
     }
 
     fn range(anchor: (usize, usize)) -> Option<SavedSelection> {
-        Some(SavedSelection { anchor, kind: SelectionKind::Range })
+        Some(SavedSelection {
+            anchor,
+            kind: SelectionKind::Range,
+        })
     }
 
     #[test]
@@ -123,7 +152,10 @@ mod tests {
     #[test]
     fn word_and_line_selections_cover_the_anchor_line_only() {
         for kind in [SelectionKind::Word, SelectionKind::Line] {
-            let selection = Some(SavedSelection { anchor: (2, 5), kind });
+            let selection = Some(SavedSelection {
+                anchor: (2, 5),
+                kind,
+            });
             assert_eq!(covered_lines((2, 5), selection), (2, 2));
         }
     }
@@ -146,7 +178,8 @@ mod tests {
 
     #[test]
     fn move_down_pulls_the_line_below_above_the_block() {
-        let splice = move_down((0, 1), "ccc".to_string(), block(&["aaa", "bbb"]));
+        let splice =
+            move_down((0, 1), "ccc".to_string(), block(&["aaa", "bbb"]));
         assert_eq!(splice.replaced, 0..3);
         assert_eq!(splice.lines, block(&["ccc", "aaa", "bbb"]));
         assert_eq!(splice.caret, Caret::Shifted(1));
@@ -164,7 +197,13 @@ mod tests {
 
     #[test]
     fn copy_down_lands_the_caret_a_block_below_and_copy_up_stays_put() {
-        assert_eq!(copy((0, 1), block(&["aaa", "bbb"]), true).caret, Caret::Shifted(2));
-        assert_eq!(copy((0, 1), block(&["aaa", "bbb"]), false).caret, Caret::Shifted(0));
+        assert_eq!(
+            copy((0, 1), block(&["aaa", "bbb"]), true).caret,
+            Caret::Shifted(2)
+        );
+        assert_eq!(
+            copy((0, 1), block(&["aaa", "bbb"]), false).caret,
+            Caret::Shifted(0)
+        );
     }
 }

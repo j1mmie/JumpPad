@@ -204,8 +204,9 @@ mod tests {
         for action in Action::ALL {
             let name = action.name();
             assert!(
-                name.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                name.chars().all(|c| c.is_ascii_lowercase()
+                    || c.is_ascii_digit()
+                    || c == '_'),
                 "{name} should be snake_case"
             );
             assert!(!action.label().is_empty(), "{name} has no label");

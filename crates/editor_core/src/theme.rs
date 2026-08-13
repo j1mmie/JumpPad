@@ -35,7 +35,10 @@ pub fn darkening_wash(theme: &Theme, amount: f32) -> Color {
     } else {
         0.0
     };
-    Color { a: alpha, ..Color::BLACK }
+    Color {
+        a: alpha,
+        ..Color::BLACK
+    }
 }
 
 /// The mirror of [`darkening_wash`] - a translucent white overlay, for themes
@@ -49,7 +52,10 @@ fn lightening_wash(theme: &Theme, amount: f32) -> Color {
     } else {
         0.0
     };
-    Color { a: alpha, ..Color::WHITE }
+    Color {
+        a: alpha,
+        ..Color::WHITE
+    }
 }
 
 /// The scrollbar thumb's wash: lightens a dark theme, darkens a light one, via

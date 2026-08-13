@@ -1,6 +1,6 @@
 use crate::{
-    AlphaConfig, CommentSyntax, Config, FilesConfig, LanguageConfig, ScrollConfig, VisorConfig,
-    WindowConfig,
+    AlphaConfig, CommentSyntax, Config, FilesConfig, LanguageConfig,
+    ScrollConfig, VisorConfig, WindowConfig,
 };
 
 fn lang(
@@ -22,7 +22,10 @@ fn single(prefix: &str) -> Option<CommentSyntax> {
 }
 
 fn multi(left: &str, right: &str) -> Option<CommentSyntax> {
-    Some(CommentSyntax::Multi { left: left.to_string(), right: right.to_string() })
+    Some(CommentSyntax::Multi {
+        left: left.to_string(),
+        right: right.to_string(),
+    })
 }
 
 /// Built-in defaults, written out as the config file on first run.
@@ -35,7 +38,12 @@ pub(crate) fn config() -> Config {
         lang("YAML", "yaml", &["yaml", "yml"], single("# ")),
         lang("TOML", "toml", &["toml"], single("# ")),
         lang("XML", "xml", &["xml"], multi("<!--", "-->")),
-        lang("HTML", "html", &["htm", "html", "xhtml"], multi("<!--", "-->")),
+        lang(
+            "HTML",
+            "html",
+            &["htm", "html", "xhtml"],
+            multi("<!--", "-->"),
+        ),
         lang("DTD", "dtd", &["dtd"], multi("<!--", "-->")),
         lang("Diff", "diff", &["diff", "patch"], None),
         lang("CSV", "csv", &["csv"], None),
@@ -45,8 +53,18 @@ pub(crate) fn config() -> Config {
         lang("Make", "make", &["mk"], single("# ")),
         lang("Rust", "rust", &["rs"], single("// ")),
         lang("C", "c", &["c", "h"], single("// ")),
-        lang("C++", "cpp", &["cpp", "hpp", "cc", "hh", "cxx"], single("// ")),
-        lang("JavaScript", "javascript", &["js", "mjs", "cjs", "jsx"], single("// ")),
+        lang(
+            "C++",
+            "cpp",
+            &["cpp", "hpp", "cc", "hh", "cxx"],
+            single("// "),
+        ),
+        lang(
+            "JavaScript",
+            "javascript",
+            &["js", "mjs", "cjs", "jsx"],
+            single("// "),
+        ),
         lang("TypeScript", "typescript", &["ts", "tsx"], single("// ")),
         lang("Java", "java", &["java"], single("// ")),
         lang("Go", "go", &["go"], single("// ")),
