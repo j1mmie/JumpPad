@@ -5,52 +5,40 @@ use editor_core::{Debounce, SavedSelection};
 
 use crate::edit_footprint::EditFootprint;
 
-/// Where the caret was and what was selected - the state undo has to put
-/// back, not just the cursor pair. Undoing an edit that replaced a
-/// selection (a cut, a paste, or typing over one) has to re-select it, or
-/// it leaves the document in a state that never existed.
+/// Where the caret was and what was selected. Undoing an edit that replaced
+/// a selection has to put the selection back too, not just the caret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorState {
     pub position: (usize, usize),
     pub selection: Option<SavedSelection>,
 }
 
-/// Undo steps kept when nothing says otherwise. The user-facing default
-/// lives in `jumppad_config`'s `HistoryConfig`; this is the fallback for a
-/// `History` no config has reached yet, and the two are meant to match.
+/// Fallback for a `History` no config has reached yet. Mirrors
+/// `HistoryConfig`'s default.
 pub const DEFAULT_DEPTH: usize = 200;
 
-/// Edits within this long of the previous one are folded into the same undo
-/// step, so a burst of typing undoes as one word/sentence instead of one
-/// keystroke at a time.
+/// Edits this close together fold into one step, so a burst of typing
+/// undoes as a word rather than a keystroke.
 const COALESCE_WINDOW: Duration = Duration::from_millis(750);
 
-/// A delta-based undo/redo stack, standing in for the undo history
-/// `iced::widget::text_editor::Content` doesn't provide. Each step holds
-/// only the lines its edit disturbed, which is what lets undo splice the
-/// change back in place instead of rebuilding the document around it.
+/// A delta-based undo/redo stack, standing in for the one
+/// `text_editor::Content` doesn't provide.
 pub struct History {
     undo: Vec<Step>,
     redo: Vec<Step>,
-    /// A burst of edits is one undo step - its leading edge is what opens
-    /// one.
     burst: Debounce,
     open: Option<BurstInProgress>,
     depth: usize,
 }
 
-/// One entry on either stack: the change to replay, and the caret state to
-/// put back alongside it.
+/// One entry on either stack.
 struct Step {
     footprint: EditFootprint,
     cursor: CursorState,
 }
 
-/// The typing burst still being folded into a single undo step. Held as the
-/// document from before the burst began - an `Arc` clone of the live source
-/// cache, so it costs a refcount rather than a copy - and sealed into one
-/// footprint once the burst ends. Keeping it open is what lets a burst undo
-/// as one step without storing anything per keystroke.
+/// A burst still being typed, held as the document from before it began.
+/// An `Arc` clone of the source cache, so it costs a refcount, not a copy.
 struct BurstInProgress {
     before: Arc<String>,
     cursor: CursorState,
@@ -67,23 +55,15 @@ impl History {
         }
     }
 
-    /// How many steps to keep. Clamped to at least one, so a nonsense
-    /// `config.toml` value can't quietly turn undo off.
+    /// Clamped to at least one, so `depth = 0` can't turn undo off.
     pub fn set_depth(&mut self, depth: usize) {
         self.depth = depth.max(1);
         self.trim();
     }
 
-    /// Call before performing an edit action, with the document's state as
-    /// it stood *before* that edit. Coalesces bursts of edits within
-    /// `COALESCE_WINDOW` of each other into a single undo step, and clears
-    /// the redo stack, since a fresh edit invalidates whatever future the
-    /// undone-then-redoable entries pointed at.
-    ///
-    /// Only the first edit of a burst is remembered, which is what makes the
-    /// step's `cursor` the state from before the whole burst - and so the
-    /// selection it carries the one the first keystroke replaced.
-    /// Selection-restoring undo depends on that.
+    /// Call before an edit, with the document as it stood before it. Only
+    /// the first edit of a burst is kept, so the step's cursor is the state
+    /// from before the whole burst.
     pub fn record_before_edit(
         &mut self,
         text: &Arc<String>,
@@ -99,9 +79,8 @@ impl History {
         now: Instant,
     ) {
         if self.burst.poke(now) {
-            // Whatever burst was open ended where this one starts, so the
-            // text arriving here is both its result and this one's origin.
-            self.seal(text);
+            // This text is both the last burst's result and this one's start.
+            self.close_open_burst(text);
             self.open = Some(BurstInProgress {
                 before: text.clone(),
                 cursor,
@@ -118,28 +97,21 @@ impl History {
         self.burst.reset();
     }
 
-    /// The change that walks the most recent step back, and the caret state
-    /// to put back with it. `None` if there's nothing to undo.
-    ///
-    /// The redo entry's caret is the state as it stands *now*, at undo time -
-    /// not as it stood when the edit was made. VS Code records the latter
-    /// (`afterCursorState`, captured at edit time), so redoing diverges from
-    /// it if the caret moved between the edit and the undo.
+    /// The delta that walks the most recent step back, and the caret to put
+    /// back with it. The redo entry's caret is the one live at undo time.
     pub fn undo(
         &mut self,
         current_text: &Arc<String>,
         current_cursor: CursorState,
     ) -> Option<(EditFootprint, CursorState)> {
-        self.seal(current_text);
+        self.close_open_burst(current_text);
         let step = self.undo.pop()?;
         let undoing = step.footprint.inverted();
         self.redo.push(Step {
             footprint: step.footprint,
             cursor: current_cursor,
         });
-        // The next edit should always start a fresh undo step rather than
-        // possibly coalescing with whatever came before the undo.
-        self.burst.reset();
+        self.burst.reset(); // the next edit starts a fresh step
         Some((undoing, step.cursor))
     }
 
@@ -149,7 +121,7 @@ impl History {
         current_text: &Arc<String>,
         current_cursor: CursorState,
     ) -> Option<(EditFootprint, CursorState)> {
-        self.seal(current_text);
+        self.close_open_burst(current_text);
         let step = self.redo.pop()?;
         let redoing = step.footprint.clone();
         self.undo.push(Step {
@@ -160,10 +132,9 @@ impl History {
         Some((redoing, step.cursor))
     }
 
-    /// Folds the open burst into one step against the document it left
-    /// behind. A burst that ended where it began - typed and deleted back -
-    /// leaves no step, rather than one that undoes nothing.
-    fn seal(&mut self, current_text: &str) {
+    /// Folds the open burst into one step. A burst that ended where it
+    /// began leaves no step.
+    fn close_open_burst(&mut self, current_text: &str) {
         let Some(open) = self.open.take() else {
             return;
         };

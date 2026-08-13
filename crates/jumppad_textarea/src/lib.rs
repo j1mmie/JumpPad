@@ -54,8 +54,6 @@ pub struct SharedEditorConfig {
     /// `f32` bits, same reason. Range-checked by the widget's
     /// `scroll_sensitivity` builder, not here.
     scroll_sensitivity: AtomicU32,
-    /// Undo steps to keep per tab. Read on every edit rather than at tab
-    /// construction, so a config reload reaches tabs that already exist.
     /// Clamped by `History::set_depth`, not here.
     undo_depth: AtomicUsize,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
@@ -105,8 +103,7 @@ impl SharedEditorConfig {
             .store(sensitivity.to_bits(), Ordering::Relaxed);
     }
 
-    /// How many undo steps each tab keeps. A step is a burst of typing, not
-    /// a keystroke.
+    /// Undo steps per tab. A step is a burst of typing, not a keystroke.
     pub fn undo_depth(&self) -> usize {
         self.undo_depth.load(Ordering::Relaxed)
     }
@@ -149,10 +146,8 @@ pub struct TextArea {
     /// `Arc` so handing it to [`HighlighterSettings`] is a refcount bump,
     /// and so that struct's `PartialEq` can compare pointers, not bytes.
     source: Arc<String>,
-    /// The first line the last text change touched, or `None` when the
-    /// change could have recolored anything (a fresh document, a reload).
-    /// Rides along in [`HighlighterSettings`] so a keystroke deep in a long
-    /// file recolors the lines around it instead of every line above it.
+    /// Where the last change starts, or `None` if it could have recolored
+    /// anything. Tells the highlighter which line to resume at.
     edited_from: Option<usize>,
     highlighting: Highlighting,
     /// Read for its load revision on every `view` - an injection target
@@ -247,10 +242,8 @@ impl TextArea {
         self.source = Arc::new(self.content.text());
     }
 
-    /// The topmost line the caret or its selection touches - where a change
-    /// made here can start recoloring from. Only ever a hint: iced reports
-    /// its own topmost changed line afterwards, and the lower of the two
-    /// wins.
+    /// A hint only - iced reports its own topmost changed line afterwards,
+    /// and the lower of the two wins.
     fn topmost_touched_line(&self) -> usize {
         let caret = self.content.caret_line();
         match self.selection() {
@@ -275,10 +268,8 @@ impl TextArea {
         }
     }
 
-    /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
-    /// caret to `op` and, if it returns a change to replay, splices it in
-    /// and puts the caret back. Returns whether an edit actually happened,
-    /// same contract `update` has for `Action`s.
+    /// Shared by `EditorMessage::Undo`/`Redo`. Returns whether an edit
+    /// happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
         op: impl FnOnce(
@@ -294,10 +285,8 @@ impl TextArea {
             return false;
         };
         let caret_was = self.apply_footprint(&footprint);
-        // Replaying the selection is the point: `move_cursor_to` clears one,
-        // so an undo that only moved the cursor would drop the selection the
-        // undone edit had replaced. Neither branch changes text, so neither
-        // needs a second source rebuild.
+        // `move_cursor_to` clears a selection, so a restored one needs the
+        // other branch. Neither changes text.
         match restored.selection {
             Some(selection) => {
                 self.restore_selection(selection, restored.position)
@@ -306,45 +295,26 @@ impl TextArea {
                 self.move_cursor_to(restored.position.0, restored.position.1)
             }
         }
-        // Last: the caret is where the undo leaves it, and nothing after this
-        // overwrites the record the next layout reads.
+        // Last, so nothing overwrites the record the next layout reads.
         if let Some(caret_was) = caret_was {
             self.content.reveal_caret_from(caret_was);
         }
         true
     }
 
-    /// Past this many lines a splice stops being the cheap way back: pasting
-    /// is quadratic in what it pastes, where a rebuild is linear in the
-    /// document. A footprint this big is a whole-file replacement - an
-    /// external reload being undone - rather than an edit.
-    ///
-    /// Measured into a 20K-line document (`what_an_undo_costs_on_a_long_document`,
-    /// release): a 1-line splice 1.0ms, 10 lines 4.7ms, 100 lines 45ms, 500
-    /// lines 233ms, 1000 lines 503ms, 5000 lines 1.79s. A rebuild of the same
-    /// document is 210-240ms across runs, and that is *before* the re-shape
-    /// it also forces, so 500 is
-    /// where splicing stops beating even that floor. Erring low is the safe
-    /// direction - past here the rebuild is linear where the splice is not.
+    /// Past this many lines a rebuild is cheaper: pasting is quadratic in
+    /// what it pastes. Measured - see AGENTS.md.
     const LINES_WORTH_SPLICING: usize = 500;
 
-    /// Replays a change onto the document in place, touching only the lines
-    /// it covers. Everything else keeps its shaped layout, its highlight
-    /// attributes, and the view it was sitting under.
-    ///
-    /// Returns the line the caret started on when it spliced, for the reveal
-    /// that has to happen once the caret has been put where the change
-    /// leaves it. `None` when it gave way to a rebuild instead, which
-    /// restores a captured view rather than revealing into the current one.
+    /// Replays a delta in place. Returns the caret's starting line for the
+    /// reveal that follows, or `None` if it rebuilt instead.
     fn apply_footprint(&mut self, footprint: &EditFootprint) -> Option<usize> {
-        if footprint.line_reach() > Self::LINES_WORTH_SPLICING {
+        if footprint.line_count() > Self::LINES_WORTH_SPLICING {
             let replaced = self.source_with(footprint);
             self.replace_document(&replaced);
             return None;
         }
-        // Read before the splice selects anything, since that moves the
-        // caret itself.
-        let caret_was = self.content.caret_line();
+        let caret_was = self.content.caret_line(); // the splice moves it
         self.paste_over_lines(
             footprint.replaced_lines(),
             footprint.replacement(),
@@ -354,8 +324,8 @@ impl TextArea {
         Some(caret_was)
     }
 
-    /// The source cache with `footprint` applied - one copy of the document,
-    /// against the per-line reassembly `Content::text()` would cost.
+    /// One copy of the document, against the per-line reassembly
+    /// `Content::text()` would cost.
     fn source_with(&self, footprint: &EditFootprint) -> String {
         let mut replaced = self.source.as_str().to_owned();
         replaced
@@ -363,9 +333,7 @@ impl TextArea {
         replaced
     }
 
-    /// Updates the source cache for a change already spliced into the
-    /// document. The counterpart to `resync_source` for the paths that know
-    /// what moved, and the reason an undo doesn't walk the whole document.
+    /// `resync_source` for paths that already know what moved.
     fn splice_source(&mut self, footprint: &EditFootprint) {
         self.source = Arc::new(self.source_with(footprint));
     }
@@ -417,9 +385,7 @@ impl TextArea {
         // recorded only now that an edit is certain to happen.
         self.history
             .record_isolated(&self.source, self.cursor_state());
-        // Read before the splice selects anything, since that moves the
-        // caret itself.
-        let caret_was = self.content.caret_line();
+        let caret_was = self.content.caret_line(); // the splice moves it
         self.splice_lines_in_place(first..last + 1, &toggled.lines);
         self.resync_source();
         self.edited_from = Some(first);
@@ -438,8 +404,7 @@ impl TextArea {
                 self.move_cursor_to(line, column);
             }
         }
-        // Last: the caret is where the toggle leaves it, and nothing after
-        // this overwrites the record the next layout reads.
+        // Last, so nothing overwrites the record the next layout reads.
         self.content.reveal_caret_from(caret_was);
         true
     }
@@ -518,17 +483,13 @@ impl TextArea {
         self.paste_over(anchor, caret, text);
     }
 
-    /// Replaces the lines in `replaced` with the exact bytes of `text`,
-    /// endings included - what an [`EditFootprint`] carries, where
-    /// [`Self::splice_lines_in_place`] takes bare lines and works the
-    /// endings out. Selecting a byte-exact span keeps a mixed-ending
-    /// document from being normalized on the way back through.
+    /// Replaces lines with the exact bytes of `text`, endings included -
+    /// what an [`EditFootprint`] carries. Keeps mixed endings intact.
     fn paste_over_lines(&mut self, replaced: Range<usize>, text: &str) {
         let line_count = self.content.line_count();
         let start = replaced.start.min(line_count);
         let end = replaced.end.clamp(start, line_count);
-        // The last line carries no ending, so a block running to it has no
-        // start-of-next-line to reach for; the span takes the document's end.
+        // The last line has no ending, so no start-of-next-line to reach for.
         let caret = if end < line_count {
             (end, 0)
         } else {
@@ -538,14 +499,8 @@ impl TextArea {
         self.paste_over((start, 0), caret, text.to_owned());
     }
 
-    /// Replaces everything between two positions by selecting exactly that
-    /// span and pasting over it.
-    ///
-    /// The alternative - splice the text, rebuild the whole `Content` -
-    /// costs a full re-shape of the document on every change: 2.16s against
-    /// 1.09ms for this, measured on 20K lines, because a fresh buffer is
-    /// laid out from placeholder metrics and re-shaped end to end. A change
-    /// touching two or three lines should cost two or three lines.
+    /// Selects a span and pastes over it. A change touching three lines
+    /// should cost three lines, not a rebuild of the document.
     fn paste_over(
         &mut self,
         anchor: (usize, usize),
@@ -713,8 +668,7 @@ impl TextEditorWidget for TextArea {
     }
 
     fn update(&mut self, message: EditorMessage) -> bool {
-        // Read live rather than at construction, so a `config.toml` reload
-        // reaches tabs that already exist without a hook of its own.
+        // Live, so a config reload reaches tabs that already exist.
         self.history.set_depth(self.settings.undo_depth());
         match message {
             EditorMessage::Action(action) => {
@@ -724,8 +678,7 @@ impl TextEditorWidget for TextArea {
                 // all of them - which is what keeps a selection drag, the
                 // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
-                // Read before the action moves the caret, and only for an
-                // edit - a selection drag must not pay for it either.
+                // Before the action moves the caret, and not on a drag.
                 let touched_before =
                     is_edit.then(|| self.topmost_touched_line());
                 if is_edit {
@@ -840,12 +793,8 @@ impl TextEditorWidget for TextArea {
         matches: Vec<FindMatch>,
         current: Option<usize>,
     ) {
-        // Keep the existing allocation when the matches haven't actually
-        // moved. A fresh `Arc` is what tells the highlighter its input
-        // changed, and the app pushes an empty list here after *every* edit
-        // while the find palette is closed - minting one each time would
-        // report a find change on every keystroke and recolor the document
-        // from the top.
+        // A fresh `Arc` tells the highlighter its input changed, and the app
+        // pushes an empty list here after every edit while find is closed.
         if self.find_matches.as_slice() != matches.as_slice() {
             self.find_matches = Arc::new(matches);
         }
@@ -955,18 +904,13 @@ struct HighlighterSettings {
     /// through `FOREGROUND_ALPHA` directly. It rides along so a config
     /// reload makes the settings compare unequal (see `PartialEq` below).
     foreground_alpha: f32,
-    /// The first line the edit behind this change touched, or `None` when
-    /// there was no edit behind it. Deliberately outside `PartialEq`: it
-    /// describes the change, not the state, and two settings that agree on
-    /// everything else describe the same document however it got there.
+    /// Outside `PartialEq`: it describes the change, not the state.
     edited_from: Option<usize>,
 }
 
 impl HighlighterSettings {
-    /// Whether the document text is the only thing that moved. A find
-    /// query, a grammar landing, or a config reload can change the color of
-    /// a line no edit went near, so those have to recolor from the top -
-    /// where an edit only has to recolor from where it landed.
+    /// Whether the text is the only thing that moved. Anything else can
+    /// recolor a line no edit went near.
     fn only_the_text_moved_since(&self, previous: &Self) -> bool {
         !Arc::ptr_eq(&self.source, &previous.source)
             && self.revision == previous.revision
@@ -1027,19 +971,13 @@ struct TreeSitterHighlighter {
     current_line: usize,
     matches: Arc<Vec<FindMatch>>,
     current_match: Option<usize>,
-    /// What the last update was built from, to work out how much of the
-    /// document this one can leave alone.
+    /// What the last update was built from.
     previous: Option<HighlighterSettings>,
 }
 
 impl TreeSitterHighlighter {
-    /// The first line iced has to recolor. Everything above it keeps the
-    /// attributes it already carries - which is what keeps a keystroke deep
-    /// in a long document from recoloring every line above it.
-    ///
-    /// Only an edit narrows this. A find query, a grammar landing or a
-    /// config reload can change the color of a line no edit went near, so
-    /// those start from the top.
+    /// The first line iced has to recolor; everything above keeps its
+    /// colors. Only an edit narrows this - see `only_the_text_moved_since`.
     fn resume_line(
         &self,
         settings: &HighlighterSettings,
@@ -1058,7 +996,6 @@ impl TreeSitterHighlighter {
         }
     }
 
-    /// The line `byte` falls on.
     fn line_at(&self, byte: usize) -> usize {
         self.line_starts
             .partition_point(|start| *start <= byte)
@@ -1066,10 +1003,8 @@ impl TreeSitterHighlighter {
     }
 }
 
-/// The first byte whose coloring could have moved between two parses.
-/// Typing a `*/` closes a comment opened far above and recolors everything
-/// back to where it began, so how far up an edit reaches cannot be read off
-/// the edit's own position - only off what the parse actually produced.
+/// The first byte whose coloring could have moved. A `*/` closes a comment
+/// opened far above, so this can't be read off the edit's own position.
 fn first_recolored_byte(
     before: &[syntax_registry::HighlightSpan],
     after: &[syntax_registry::HighlightSpan],
@@ -1079,8 +1014,7 @@ fn first_recolored_byte(
             return Some(was.start.min(now.start));
         }
     }
-    // One parse ran longer than the other; the first span past the shorter
-    // one is where they part.
+    // One parse ran longer; they part at the first span past the shorter.
     before
         .get(after.len())
         .or_else(|| after.get(before.len()))
@@ -1119,10 +1053,8 @@ impl Highlighter for TreeSitterHighlighter {
     }
 
     fn change_line(&mut self, line: usize) {
-        // Lowest wins. iced reports the topmost line its own edit moved,
-        // which is at or below where recoloring has to start: an edit that
-        // closes a construct opened far above changes the color of lines it
-        // never touched.
+        // Lowest wins - iced knows where its edit landed, not how far up
+        // the reparse reaches.
         self.current_line = self.current_line.min(line);
     }
 
@@ -1135,10 +1067,8 @@ impl Highlighter for TreeSitterHighlighter {
         };
         let end = start + line.len();
 
-        // Spans are ordered by start and never overlap, so the ones covering
-        // this line are one contiguous run - found by search rather than by
-        // rescanning the document's whole list on every line, which made
-        // colouring cost lines times spans.
+        // Spans are ordered and never overlap, so the ones on this line are
+        // one contiguous run. Scanning them all per line cost lines x spans.
         let from = self
             .spans
             .partition_point(|span| span.start < start)
@@ -1154,14 +1084,9 @@ impl Highlighter for TreeSitterHighlighter {
             })
             .collect();
 
-        // Appended *after* the syntax spans on purpose: iced feeds these to
-        // `AttrsList::add_span`, whose range map overwrites on overlap, so
-        // the last span covering a byte wins. Match coloring has to outrank
-        // syntax coloring to be visible at all.
-        //
-        // Match columns are already line-relative, so unlike the syntax
-        // spans above they need no offset arithmetic.
-        // Matches arrive grouped by line, so the same search applies.
+        // After the syntax spans on purpose: the last span covering a byte
+        // wins, and match coloring has to outrank syntax coloring. Columns
+        // are already line-relative. Matches group by line, so same search.
         let first_match = self
             .matches
             .partition_point(|found| found.line < line_index);
@@ -1545,10 +1470,8 @@ mod tests {
 
     #[test]
     fn undo_and_redo_round_trip_byte_exactly() {
-        // Undo splices a byte range back rather than rebuilding the
-        // document, so every shape where the endings are load-bearing has to
-        // survive the trip: the last line, which carries none, and CRLF,
-        // which is two bytes where the splice reasons in one.
+        // Every shape where endings are load-bearing: the last line, which
+        // carries none, and CRLF, which is two bytes.
         let cases: &[(&str, (usize, usize), text_editor::Edit)] = &[
             ("a\nb\nc", (1, 1), text_editor::Edit::Insert('X')),
             ("a\nb\nc", (0, 0), text_editor::Edit::Insert('X')),
@@ -1586,10 +1509,7 @@ mod tests {
 
     #[test]
     fn undo_carries_only_the_lines_the_edit_touched() {
-        // The whole point: the document around the change is left alone, so
-        // an undo costs the lines it changes rather than the file. A rebuild
-        // would reset the scroll, which is what `reveal_caret_from` records
-        // instead of the `restore_view` a rebuild needs.
+        // The whole point: an undo costs the lines it changes.
         let doc: String = (0..50).map(|i| format!("line {i}\n")).collect();
         let mut editor = plain_editor(&doc);
         editor.move_cursor_to(30, 4);
@@ -1604,9 +1524,7 @@ mod tests {
 
     #[test]
     fn an_edit_reports_the_topmost_line_it_touched() {
-        // A selection reaching up from the caret still recolors from its
-        // anchor - typing over it changes the first line of the selection,
-        // not the line the caret happened to sit on.
+        // Recoloring starts at the selection's anchor, not the caret.
         let mut editor = plain_editor("a\nb\nc\nd\ne");
         editor.restore_selection(
             SavedSelection {
@@ -1621,9 +1539,8 @@ mod tests {
 
     #[test]
     fn a_whole_document_undo_gives_way_to_a_rebuild() {
-        // Past `LINES_WORTH_SPLICING` a paste costs more than a rebuild, so
-        // the splice stands down. The text still has to come back, and the
-        // highlighter has to be told it can promise nothing about where.
+        // Past `LINES_WORTH_SPLICING` the splice stands down, but the text
+        // still has to come back.
         let long: String = (0..TextArea::LINES_WORTH_SPLICING + 10)
             .map(|i| format!("line {i}\n"))
             .collect();
@@ -1643,8 +1560,7 @@ mod tests {
 
     #[test]
     fn a_comment_toggle_undoes_byte_exactly() {
-        // Toggle-comment splices in place now rather than rebuilding, so it
-        // is on the same ending-preserving hook as everything else.
+        // Toggle-comment splices in place, so endings survive it too.
         for doc in ["a\nb\nc", "a\r\nb\r\nc", "last"] {
             let mut editor = rust_editor(doc);
             editor.move_cursor_to(0, 0);
@@ -1682,15 +1598,9 @@ mod tests {
         assert!(!editor.update(EditorMessage::Undo), "depth of 1 keeps one");
     }
 
-    /// The measurement behind splicing undo in place, and behind
-    /// `LINES_WORTH_SPLICING`. Not an assertion - run it by hand with
-    /// `cargo test --release -p jumppad_textarea -- --ignored --nocapture`.
-    ///
-    /// It sees the buffer work and not the shaping: nothing lays a headless
-    /// `Content` out, and re-shaping a rebuilt one end to end is most of
-    /// what a rebuild actually costs on screen. That only makes the numbers
-    /// conservative - the rebuild column is a floor, so the line count where
-    /// splicing stops winning is at least the one this prints.
+    /// The measurement behind `LINES_WORTH_SPLICING`. Run by hand:
+    /// `cargo test --release -- --ignored --nocapture`. Sees buffer work
+    /// only, not shaping, so every rebuild number it prints is a floor.
     #[test]
     #[ignore = "a measurement, not an assertion"]
     fn what_an_undo_costs_on_a_long_document() {
@@ -2771,10 +2681,8 @@ mod tests {
 
     #[test]
     fn an_ordinary_edit_reports_only_the_text_moving() {
-        // The app pushes an empty match list after *every* edit while the
-        // find palette is closed. Minting a fresh `Arc` for that would read
-        // as a find change and send the highlighter back to line 0 on every
-        // keystroke, which is the whole thing the resume point avoids.
+        // An empty list arrives after every edit while find is closed;
+        // minting a new `Arc` would read as a find change.
         let mut editor = plain_editor("a\nb\nc\nd");
         editor.set_find_matches(Vec::new(), None);
         let before = editor.highlighter_settings();
@@ -2790,8 +2698,7 @@ mod tests {
 
     #[test]
     fn an_edit_that_also_moves_the_find_matches_recolors_from_the_top() {
-        // Match coloring can land on a line no edit went near, so this one
-        // has to give up the resume point.
+        // Match coloring can land on a line no edit went near.
         let mut editor = plain_editor("a\nb\nc\nd");
         editor.set_find_matches(Vec::new(), None);
         let before = editor.highlighter_settings();

@@ -199,9 +199,8 @@ impl Default for ScrollConfig {
     }
 }
 
-/// Undo history. `depth` counts steps, and a step is a burst of typing
-/// rather than a keystroke - a word typed straight through undoes at once.
-/// Clamped where applied, not here, so a nonsense value can't turn undo off.
+/// Undo history. A step is a burst of typing, not a keystroke. Clamped
+/// where applied, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistoryConfig {

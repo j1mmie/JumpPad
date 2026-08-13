@@ -1210,8 +1210,7 @@ impl JumpPadApp {
                 .set_scroll_sensitivity(new.scroll.sensitivity);
         }
 
-        // No repaint either: tabs read the new depth on their next edit, and
-        // nothing on screen shows it.
+        // No repaint: tabs read the new depth on their next edit.
         if new.history.depth != current.history.depth {
             self.editor_config.set_undo_depth(new.history.depth);
         }

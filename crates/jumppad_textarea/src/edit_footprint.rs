@@ -1,36 +1,21 @@
 use std::ops::Range;
 
-/// The part of the document an edit disturbed, and both sides of it - the
-/// unit undo and redo replay instead of a whole document. Everything outside
-/// it keeps its shaped layout and its highlight attributes, so an undo costs
-/// the lines it changes rather than the file they sit in.
-///
-/// Boundaries are whole lines: that is the unit
-/// [`TextArea::paste_over_lines`] splices in, and it makes the line numbers
-/// the caller needs fall out of the byte offsets for free.
-///
-/// [`TextArea::paste_over_lines`]: crate::TextArea
+/// A delta: the block of lines an edit changed, plus the text on either side
+/// of it. Undo and redo replay these instead of whole documents.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditFootprint {
-    /// Lines this replaces, numbered in the document as it stands.
+    /// Lines replaced, in the document as it stands.
     replaced: Range<usize>,
-    /// Byte offset of `replaced.start`, so the source cache can be spliced
-    /// without walking the document to re-derive it.
+    /// Byte offset of `replaced.start`.
     replaced_at: usize,
-    /// Exactly what stands there now, line endings included. Byte-exact
-    /// rather than a list of lines, so restoring can't normalize an ending
-    /// the way re-joining split lines would.
+    /// What those lines say now, endings included.
     displaced: String,
-    /// Exactly what goes in its place.
+    /// What they will say.
     replacement: String,
 }
 
 impl EditFootprint {
-    /// The smallest whole-line replacement that turns `before` into `after`,
-    /// or `None` if they already match.
-    ///
-    /// Two memcmp-speed passes over the document, against the full rebuild
-    /// this exists to avoid.
+    /// The delta between two documents, or `None` if they match.
     pub fn between(before: &str, after: &str) -> Option<Self> {
         if before == after {
             return None;
@@ -43,8 +28,7 @@ impl EditFootprint {
             .zip(after.as_bytes())
             .take_while(|(a, b)| a == b)
             .count();
-        // Capped so the two runs can't claim the same bytes, which is what
-        // keeps the line boundaries below from crossing.
+        // Capped so the two runs can't claim the same bytes.
         let matching_suffix = before
             .as_bytes()
             .iter()
@@ -54,10 +38,8 @@ impl EditFootprint {
             .count()
             .min(overlap - matching_prefix);
 
-        // Byte searches, not `str` slicing: a matching run can end mid-
-        // codepoint, where slicing would panic. Every boundary these produce
-        // is a document start, an end, or just past a `\n` - all char
-        // boundaries, so the slices at the bottom are safe.
+        // Byte searches, not `str` slicing - a matching run can end
+        // mid-codepoint. The boundaries below all land on one.
         let starts_at = line_start_at_or_before(before, matching_prefix);
         let tail_before = before.len() - matching_suffix;
         let tail_after = after.len() - matching_suffix;
@@ -67,11 +49,9 @@ impl EditFootprint {
             after,
             tail_after,
         );
-        let ends_before = tail_before + advance;
-        let ends_after = tail_after + advance;
 
-        let displaced = before[starts_at..ends_before].to_owned();
-        let replacement = after[starts_at..ends_after].to_owned();
+        let displaced = before[starts_at..tail_before + advance].to_owned();
+        let replacement = after[starts_at..tail_after + advance].to_owned();
         let first_line = count_lines(&before.as_bytes()[..starts_at]);
 
         Some(Self {
@@ -82,8 +62,8 @@ impl EditFootprint {
         })
     }
 
-    /// The same change pointing the other way. One stored footprint serves
-    /// undo and redo alike, which is why nothing else has to be kept.
+    /// The same delta pointing the other way, so one record serves undo and
+    /// redo alike.
     pub fn inverted(&self) -> Self {
         Self {
             replaced: line_span(self.replaced.start, &self.replacement),
@@ -93,38 +73,32 @@ impl EditFootprint {
         }
     }
 
-    /// The lines to splice over, in the document as it stands.
     pub fn replaced_lines(&self) -> Range<usize> {
         self.replaced.clone()
     }
 
-    /// The bytes that go in, endings included.
     pub fn replacement(&self) -> &str {
         &self.replacement
     }
 
-    /// Where the change lands in the source cache, for a `replace_range`.
+    /// Byte range to overwrite in the source cache.
     pub fn source_range(&self) -> Range<usize> {
         self.replaced_at..self.replaced_at + self.displaced.len()
     }
 
-    /// The first line the change touches - the point highlighting has to
-    /// resume from, and everything above it keeps the colors it has.
+    /// Where highlighting has to resume from.
     pub fn first_line(&self) -> usize {
         self.replaced.start
     }
 
-    /// How many lines this moves, counting the wider of its two sides.
-    /// A footprint past a certain reach is a whole-file replacement rather
-    /// than an edit, and wants rebuilding rather than splicing.
-    pub fn line_reach(&self) -> usize {
+    /// Lines changed, counting the wider side.
+    pub fn line_count(&self) -> usize {
         let going_out = self.replaced.end - self.replaced.start;
         let coming_in = line_span(0, &self.replacement).end;
         going_out.max(coming_in)
     }
 }
 
-/// The start of the line containing `at`.
 fn line_start_at_or_before(text: &str, at: usize) -> usize {
     text.as_bytes()[..at]
         .iter()
@@ -132,16 +106,9 @@ fn line_start_at_or_before(text: &str, at: usize) -> usize {
         .map_or(0, |newline| newline + 1)
 }
 
-/// How far past the unchanged tail both documents must reach to end on a
-/// line boundary. One distance for both sides, not one each: the tail is the
-/// same bytes in each document, so advancing by the same amount leaves them
-/// the same length - which is what makes the two halves of a footprint
-/// describe a single change. Advancing them separately silently produces a
-/// footprint that replaces the wrong number of bytes.
-///
-/// Any advance past the first byte lands on the shared tail, where the two
-/// documents necessarily agree about where the lines break. Only standing
-/// still can disagree, so that case wants both sides already on a boundary.
+/// How far past the unchanged tail both documents reach to land on a line
+/// boundary. One distance for both: the tail is identical in each, so
+/// advancing them separately replaces the wrong number of bytes.
 fn shared_advance_to_line_start(
     before: &str,
     tail_before: usize,
@@ -157,15 +124,12 @@ fn shared_advance_to_line_start(
         .map_or(tail.len(), |newline| newline + 1)
 }
 
-/// Whether `at` is the start of a line - the top of the document, the end of
-/// it, or just past an ending.
 fn starts_a_line(text: &str, at: usize) -> bool {
     at == 0 || at == text.len() || text.as_bytes()[at - 1] == b'\n'
 }
 
-/// The line range `text` occupies when spliced in starting at `first`. A
-/// trailing ending is one the splice swallows; its absence means the block
-/// runs to the end of the document, where there is no ending to take.
+/// The lines `text` occupies when spliced in at `first`. No trailing ending
+/// means it runs to the end of the document.
 fn line_span(first: usize, text: &str) -> Range<usize> {
     let mut lines = count_lines(text.as_bytes());
     if !text.is_empty() && !text.ends_with('\n') {
@@ -284,10 +248,8 @@ mod tests {
 
     #[test]
     fn deleting_an_ending_reaches_past_the_line_that_lost_it() {
-        // The two documents disagree about where the line breaks sit at the
-        // point their tails meet - `a\n|x` against `a|x` - so the footprint
-        // has to reach to the end of both rather than stopping where only
-        // one of them has a boundary.
+        // The two documents disagree about the line break where their tails
+        // meet - `a\n|x` against `a|x` - so both ends have to reach further.
         let footprint =
             EditFootprint::between("a\nx", "ax").expect("an ending went");
         assert_eq!(footprint.replaced_lines(), 0..2);
@@ -296,10 +258,10 @@ mod tests {
     }
 
     #[test]
-    fn line_reach_counts_the_wider_side() {
+    fn line_count_counts_the_wider_side() {
         let grew = EditFootprint::between("a\nb\nc", "a\nb1\nb2\nb3\nc")
             .expect("one line became three");
-        assert_eq!(grew.line_reach(), 3);
-        assert_eq!(grew.inverted().line_reach(), 3);
+        assert_eq!(grew.line_count(), 3);
+        assert_eq!(grew.inverted().line_count(), 3);
     }
 }
