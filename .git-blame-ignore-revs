@@ -1,0 +1,9 @@
+# Revisions to skip when running `git blame`, so a mechanical reformat does
+# not stand in front of whoever actually wrote the line.
+#
+# GitHub reads this file on its own. Locally it has to be pointed at once:
+#
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+
+# Format the repo with rustfmt
+0520818982e1c2d24e1cb8a1a1331fbed38b5a4c
