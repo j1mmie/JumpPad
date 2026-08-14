@@ -1,9 +1,9 @@
 mod comment;
 mod history;
-mod line_delta;
 mod lines;
 mod safe_area;
 mod scrollbar;
+mod text_delta;
 pub mod text_editor;
 
 pub use comment::CommentStyle;
@@ -22,10 +22,10 @@ use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use jumppad_actions::Action;
-use line_delta::LineDelta;
 use syntax_registry::{
     Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry,
 };
+use text_delta::TextDelta;
 use text_editor::{
     Binding, Content, Cursor, Motion, Position, Status, text_editor,
 };
@@ -276,7 +276,7 @@ impl TextArea {
             &mut History,
             &Arc<String>,
             CursorState,
-        ) -> Option<(LineDelta, CursorState)>,
+        ) -> Option<(TextDelta, CursorState)>,
     ) -> bool {
         let current = self.cursor_state();
         let Some((delta, restored)) =
@@ -308,14 +308,19 @@ impl TextArea {
 
     /// Replays a delta in place. Returns the caret's starting line for the
     /// reveal that follows, or `None` if it rebuilt instead.
-    fn apply_delta(&mut self, delta: &LineDelta) -> Option<usize> {
+    fn apply_delta(&mut self, delta: &TextDelta) -> Option<usize> {
         if delta.line_count() > Self::LINES_WORTH_SPLICING {
             let replaced = self.source_with(delta);
             self.replace_document(&replaced);
             return None;
         }
         let caret_was = self.content.caret_line(); // the splice moves it
-        self.paste_over_lines(delta.replaced_lines(), delta.replacement());
+        let span = delta.source_range();
+        self.paste_over(
+            position_of(&self.source, span.start),
+            position_of(&self.source, span.end),
+            delta.replacement().to_owned(),
+        );
         self.splice_source(delta);
         self.edited_from = Some(delta.first_line());
         Some(caret_was)
@@ -323,14 +328,14 @@ impl TextArea {
 
     /// One copy of the document, against the per-line reassembly
     /// `Content::text()` would cost.
-    fn source_with(&self, delta: &LineDelta) -> String {
+    fn source_with(&self, delta: &TextDelta) -> String {
         let mut replaced = self.source.as_str().to_owned();
         replaced.replace_range(delta.source_range(), delta.replacement());
         replaced
     }
 
     /// `resync_source` for paths that already know what moved.
-    fn splice_source(&mut self, delta: &LineDelta) {
+    fn splice_source(&mut self, delta: &TextDelta) {
         self.source = Arc::new(self.source_with(delta));
     }
 
@@ -477,22 +482,6 @@ impl TextArea {
         };
 
         self.paste_over(anchor, caret, text);
-    }
-
-    /// Replaces lines with the exact bytes of `text`, endings included -
-    /// what a [`LineDelta`] carries. Keeps mixed endings intact.
-    fn paste_over_lines(&mut self, replaced: Range<usize>, text: &str) {
-        let line_count = self.content.line_count();
-        let start = replaced.start.min(line_count);
-        let end = replaced.end.clamp(start, line_count);
-        // The last line has no ending, so no start-of-next-line to reach for.
-        let caret = if end < line_count {
-            (end, 0)
-        } else {
-            self.document_end()
-        };
-
-        self.paste_over((start, 0), caret, text.to_owned());
     }
 
     /// Selects a span and pastes over it. A change touching three lines
@@ -674,6 +663,7 @@ impl TextEditorWidget for TextArea {
                 // all of them - which is what keeps a selection drag, the
                 // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
+                let ends_step = ends_undo_step(&action);
                 // Before the action moves the caret, and not on a drag.
                 let touched_before =
                     is_edit.then(|| self.topmost_touched_line());
@@ -689,6 +679,9 @@ impl TextEditorWidget for TextArea {
                     self.resync_source();
                     self.edited_from =
                         Some(touched_before.min(self.topmost_touched_line()));
+                }
+                if ends_step {
+                    self.history.end_burst();
                 }
                 is_edit
             }
@@ -862,6 +855,37 @@ impl TextEditorWidget for TextArea {
 /// checking of its own. `column` is a byte index within the line (matching
 /// what `Content::cursor` reports), so it's also backed up to a `char`
 /// boundary.
+/// What closes an undo step on top of the coalescing timer: finishing a
+/// word, and moving the caret somewhere else. The whitespace itself rides
+/// with the word it follows, so undo takes back `hello ` rather than `hello`.
+fn ends_undo_step(action: &text_editor::Action) -> bool {
+    use text_editor::{Action, Edit};
+    match action {
+        Action::Edit(Edit::Enter) => true,
+        Action::Edit(Edit::Insert(character)) => character.is_whitespace(),
+        Action::Move(_)
+        | Action::Select(_)
+        | Action::SelectWord
+        | Action::SelectLine
+        | Action::SelectAll
+        | Action::Click(_)
+        | Action::Drag(_) => true,
+        _ => false,
+    }
+}
+
+/// The `(line, column)` a byte offset falls on. Columns are byte offsets
+/// within their own line, which is what `Content` positions take.
+fn position_of(source: &str, offset: usize) -> (usize, usize) {
+    let head = &source.as_bytes()[..offset.min(source.len())];
+    let line = head.iter().filter(|byte| **byte == b'\n').count();
+    let line_start = head
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |n| n + 1);
+    (line, offset - line_start)
+}
+
 fn clamp_position(
     content: &Content,
     (line, column): (usize, usize),
@@ -1464,6 +1488,112 @@ mod tests {
         assert_source_is_synced(&editor);
     }
 
+    /// Types `text` a character at a time, the way a person would.
+    fn type_out(editor: &mut TextArea, text: &str) {
+        for character in text.chars() {
+            let action = if character == '\n' {
+                text_editor::Edit::Enter
+            } else {
+                text_editor::Edit::Insert(character)
+            };
+            editor.update(edit(action));
+        }
+    }
+
+    #[test]
+    fn each_typed_word_is_its_own_undo_step() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "Hello my name is Jimmie");
+
+        // The space rides with the word it follows.
+        for expected in [
+            "Hello my name is ",
+            "Hello my name ",
+            "Hello my ",
+            "Hello ",
+            "",
+        ] {
+            assert!(editor.update(EditorMessage::Undo), "{expected:?}");
+            assert_eq!(editor.text(), expected);
+            assert_source_is_synced(&editor);
+        }
+        assert!(!editor.update(EditorMessage::Undo));
+    }
+
+    #[test]
+    fn redo_walks_the_words_back_in() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "one two three");
+        while editor.update(EditorMessage::Undo) {}
+        assert_eq!(editor.text(), "");
+
+        for expected in ["one ", "one two ", "one two three"] {
+            assert!(editor.update(EditorMessage::Redo), "{expected:?}");
+            assert_eq!(editor.text(), expected);
+            assert_source_is_synced(&editor);
+        }
+    }
+
+    #[test]
+    fn enter_ends_an_undo_step() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "first\nsecond");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "first\n");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn moving_the_caret_ends_an_undo_step() {
+        // Typing here, clicking there, then typing again is two edits, not
+        // one - without this they fold into a single step.
+        let mut editor = plain_editor("ab");
+        editor.move_cursor_to(0, 2);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        editor.update(EditorMessage::Action(text_editor::Action::Move(
+            text_editor::Motion::Home,
+        )));
+        editor.update(edit(text_editor::Edit::Insert('Y')));
+        assert_eq!(editor.text(), "YabX");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "abX");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn a_run_of_deletes_still_coalesces_on_the_timer() {
+        // Backspace has no word boundary to break on, so the timer is what
+        // keeps a held key from becoming one enormous step.
+        let mut editor = plain_editor("abcdef");
+        editor.move_cursor_to(0, 6);
+        for _ in 0..3 {
+            editor.update(edit(text_editor::Edit::Backspace));
+        }
+        assert_eq!(editor.text(), "abc");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "abcdef");
+        assert!(!editor.update(EditorMessage::Undo));
+    }
+
+    #[test]
+    fn a_typed_word_stores_only_the_word() {
+        // With word-sized steps, a delta that rounded out to whole lines
+        // would carry the growing line on every keystroke.
+        let mut editor = plain_editor("Hello ");
+        editor.move_cursor_to(0, 6);
+        type_out(&mut editor, "my ");
+
+        let (delta, _) = editor
+            .history
+            .undo(&editor.source, editor.cursor_state())
+            .expect("a word to undo");
+        assert_eq!(delta.replacement(), "");
+        assert_eq!(delta.source_range(), 6..9);
+    }
+
     #[test]
     fn undo_and_redo_round_trip_byte_exactly() {
         // Every shape where endings are load-bearing: the last line, which
@@ -1622,7 +1752,7 @@ mod tests {
                 (0..reach).map(|i| format!("other {i}\n")).collect();
             let mut editor = plain_editor(&doc);
             let started = Instant::now();
-            editor.paste_over_lines(0..reach, &replacement);
+            editor.paste_over((0, 0), (reach, 0), replacement);
             println!(
                 "splice of {reach} lines into {LINES}: {:?}",
                 started.elapsed()

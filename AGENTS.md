@@ -467,14 +467,14 @@ would re-introduce the linear rebuild in dev builds, where it was worst
 ### Undo history
 
 `History` (`history.rs`) is a stack of deltas. Each step is an
-`LineDelta` - the block of lines an edit changed, plus the text on either
+`TextDelta` - the run of characters an edit changed, plus the text on either
 side - and a `CursorState` (caret position *and* selection) from just before
 the edit. `apply_history` splices the delta back in place and restores both.
 
 **A step costs the edit, not the document.** It used to hold a full copy of
 the document per step and rebuild `Content` wholesale, so undoing one
 character in a 20K-line file re-shaped 20,000 lines. Measured on 20K lines in
-release: a one-line undo is **730us**, against 210-240ms just to rebuild and
+release: a one-word undo is **430us**, against 160-240ms just to rebuild and
 reassemble the source - and that excludes the re-shape a rebuilt buffer forces
 (most of the 2.16s above). `what_an_undo_costs_on_a_long_document` is the
 `#[ignore]`d measurement.
@@ -493,21 +493,23 @@ word back *selected*. Two consequences that look odd but are the same rule:
 undoing Option/Ctrl+Backspace re-selects the deleted word, and a cut is
 indistinguishable from Delete with a selection.
 
-**Deltas are whole lines, byte-exact within them.** Whole lines because that
-is what `paste_over_lines` splices. Byte-exact because re-joining split lines
-would re-derive the endings, normalizing a mixed-ending document.
+**Deltas are character-precise, not line-rounded.** Typing `my ` stores
+`my `, not the line it landed in. Line-rounding used to be how the ends were
+made sliceable; with word-sized steps it meant every step carried the whole
+growing line - `N x W` bytes for a line of N characters typed in W words,
+which on a minified-JSON single line is megabytes per word.
 
-**`LineDelta::between` advances both ends by one shared distance.** The
-start backs up to the line containing the first difference; the end advances
-by a distance applied to *both* documents, not worked out per side. The
-unchanged tail is identical in each, so a shared advance keeps the two ends
-describing one change. Where they disagree about a line break there (`a\n|x`
-against `a|x`), advancing separately replaces the wrong number of bytes.
+**`TextDelta::between` advances both ends by one shared distance.** Both ends
+round out to a UTF-8 character boundary, because a matching run can end
+mid-codepoint. The end advances by a distance applied to *both* documents,
+never worked out per side - the unchanged tail is identical in each, and one
+shared advance is what keeps the two sides the same length, and so describing
+a single change.
 
 **Past `LINES_WORTH_SPLICING` (500), undo gives way to a rebuild.** Pasting is
 quadratic in what it pastes; a rebuild is linear in the document. Measured
-into 20K lines: 1.0ms at 1 line, 45ms at 100, 233ms at 500, 503ms at 1000,
-1.79s at 5000, against a 210-240ms rebuild floor. Err low when revisiting -
+into 20K lines: 0.6ms at 1 line, 38ms at 100, 173ms at 500, 371ms at 1000,
+1.50s at 5000, against a 160-240ms rebuild floor. Err low when revisiting -
 past the crossover the rebuild grows linearly and the splice does not.
 
 **Undo and redo reveal like a splice, not a rebuild.** They keep the buffer's
@@ -527,11 +529,18 @@ command that turns out to be a no-op must return `false` *before* recording -
 last line carries `LineEnding::None`, and `Content::text()` drops it, so a
 line promoted into the last position borrows `document_line_ending()` instead.
 Without it, moving the last line of a CRLF file splices in a lone LF. That is
-`splice_lines_in_place`'s job, not `paste_over_lines`'s - a delta already
-carries its endings.
+`splice_lines_in_place`'s job. A delta needs none of it - it carries exact
+bytes and splices by position.
 
-**Depth is `[history] depth` in `config.toml`, default 200.** A step is a
-burst of typing, not a keystroke. `TextArea::update` pushes the live value
+**A step ends at a word, a caret move, or the timer.** Whitespace and Enter
+close it (the space rides with the word it follows, so undoing `hello world`
+leaves `hello `), and so does any caret move - typing here, clicking there and
+typing again is two edits. `COALESCE_WINDOW` stays as the fallback for edits
+with no word boundary, or a held backspace becomes one enormous step.
+`ends_undo_step` decides; `History::end_burst` applies it.
+
+**Depth is `[history] depth` in `config.toml`, default 200.** A step is now
+roughly a word. `TextArea::update` pushes the live value
 into `History::set_depth` on every message, which is how a config reload
 reaches tabs that already exist. Clamped to at least one.
 

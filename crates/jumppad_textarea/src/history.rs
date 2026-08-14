@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use editor_core::{Debounce, SavedSelection};
 
-use crate::line_delta::LineDelta;
+use crate::text_delta::TextDelta;
 
 /// Where the caret was and what was selected. Undoing an edit that replaced
 /// a selection has to put the selection back too, not just the caret.
@@ -33,7 +33,7 @@ pub struct History {
 
 /// One entry on either stack.
 struct Step {
-    delta: LineDelta,
+    delta: TextDelta,
     cursor: CursorState,
 }
 
@@ -89,6 +89,12 @@ impl History {
         self.redo.clear();
     }
 
+    /// Ends the open burst, so the next edit starts a new step. What word
+    /// boundaries and caret moves call.
+    pub fn end_burst(&mut self) {
+        self.burst.reset();
+    }
+
     /// Records an undo step that stands alone: it neither joins the typing
     /// burst before it nor absorbs the edit after it.
     pub fn record_isolated(&mut self, text: &Arc<String>, cursor: CursorState) {
@@ -103,7 +109,7 @@ impl History {
         &mut self,
         current_text: &Arc<String>,
         current_cursor: CursorState,
-    ) -> Option<(LineDelta, CursorState)> {
+    ) -> Option<(TextDelta, CursorState)> {
         self.close_open_burst(current_text);
         let step = self.undo.pop()?;
         let undoing = step.delta.inverted();
@@ -120,7 +126,7 @@ impl History {
         &mut self,
         current_text: &Arc<String>,
         current_cursor: CursorState,
-    ) -> Option<(LineDelta, CursorState)> {
+    ) -> Option<(TextDelta, CursorState)> {
         self.close_open_burst(current_text);
         let step = self.redo.pop()?;
         let redoing = step.delta.clone();
@@ -138,7 +144,7 @@ impl History {
         let Some(open) = self.open.take() else {
             return;
         };
-        let Some(delta) = LineDelta::between(&open.before, current_text) else {
+        let Some(delta) = TextDelta::between(&open.before, current_text) else {
             return;
         };
         self.undo.push(Step {
@@ -184,7 +190,7 @@ mod tests {
         Arc::new(text.to_owned())
     }
 
-    fn replayed(text: &str, delta: &LineDelta) -> String {
+    fn replayed(text: &str, delta: &TextDelta) -> String {
         let mut applied = text.to_owned();
         applied.replace_range(delta.source_range(), delta.replacement());
         applied
@@ -376,9 +382,9 @@ mod tests {
     }
 
     #[test]
-    fn a_step_holds_only_the_lines_its_edit_disturbed() {
-        // The point of the whole exercise: undoing a one-line change in a
-        // long document carries that line, not the document.
+    fn a_step_holds_only_the_characters_its_edit_disturbed() {
+        // The point of the whole exercise: undoing a small change in a long
+        // document carries the change, not the line and not the document.
         let before: String =
             (0..500).map(|i| format!("line {i}\n")).collect::<String>();
         let after = before.replace("line 200\n", "line 200 edited\n");
@@ -389,8 +395,10 @@ mod tests {
             .undo(&Arc::new(after.clone()), caret(200, 15))
             .expect("something to undo");
 
-        assert_eq!(delta.replaced_lines(), 200..201);
-        assert_eq!(delta.replacement(), "line 200\n");
+        // Undoing takes the added text back out and puts nothing in.
+        assert_eq!(delta.replacement(), "");
+        assert_eq!(delta.source_range().len(), " edited".len());
+        assert_eq!(delta.first_line(), 200);
         assert_eq!(replayed(&after, &delta), before);
     }
 
