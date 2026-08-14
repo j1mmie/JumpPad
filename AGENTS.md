@@ -5,6 +5,15 @@ for the human-facing pitch; this file is the architecture map, the
 "why is it built this way," and the list of things that will bite you if
 you don't know about them going in.
 
+## Never edit README.md
+
+`README.md` is hand-maintained by the repository owner. Do not touch it -
+not to document a feature you added, not to fix a typo, not to keep it in
+sync with a change elsewhere. Edit it only when the owner asks for a README
+change in so many words.
+
+If a change you made makes the README wrong, say so and leave it alone.
+
 ## What this is, in one paragraph
 
 JumpPad is a lightweight plaintext editor built on `iced` (Rust, Elm-style
