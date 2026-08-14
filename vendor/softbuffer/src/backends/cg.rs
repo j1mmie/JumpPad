@@ -131,6 +131,25 @@ fn trace_age(age: u8, available: usize, held: usize) {
     }
 }
 
+/// Prints how long the caller spent drawing, for the frames `trace_age` covers.
+///
+/// Measured from `buffer_mut` returning to `present` being entered, which for
+/// `iced_tiny_skia` is its damage diff plus `renderer.draw`. That is the half
+/// of a frame `age` is supposed to shrink: a caret blink damages a 1px-wide
+/// quad, so a number here that tracks window area rather than the caret means
+/// the damage rectangles are still coming back full-window.
+fn trace_draw(elapsed: std::time::Duration) {
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+    let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
+    if frame < TRACED_FRAMES {
+        eprintln!(
+            "softbuffer: frame {frame} draw {:.2}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// Prints how long `present` took, for the same frames `trace_age` covers.
 ///
 /// This is what splits the per-frame cost in two. The caller has already
@@ -459,6 +478,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
         Ok(BufferImpl {
             buffer,
             age,
+            taken_at: age_tracing_enabled().then(std::time::Instant::now),
             imp: self,
         })
     }
@@ -470,6 +490,9 @@ pub struct BufferImpl<'a, D, W> {
     buffer: util::PixelBuffer,
     /// How many presents ago this buffer's pixels were last on screen.
     age: u8,
+    /// When `buffer_mut` handed this over, so `present` can report how long
+    /// the caller spent drawing. Only set while tracing.
+    taken_at: Option<std::time::Instant>,
 }
 
 impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_, D, W> {
@@ -511,6 +534,10 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
             // frame can draw over it rather than faulting in a fresh mapping.
             // Core Graphics may call this from any thread; the pool locks.
             pool.reclaim(pixels);
+        }
+
+        if let Some(taken_at) = self.taken_at {
+            trace_draw(taken_at.elapsed());
         }
 
         let started = age_tracing_enabled().then(std::time::Instant::now);
