@@ -1,0 +1,5 @@
+# rustfmt searches parent directories, so without this file the workspace's
+# `max_width = 80` reaches down here and reformats all of upstream softbuffer.
+# That would bury the one file this fork actually changes (`src/backends/cg.rs`)
+# under a whole-crate diff. Upstream uses rustfmt's defaults; so do we.
+edition = "2021"

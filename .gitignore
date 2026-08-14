@@ -2,4 +2,5 @@
 /target
 /syntaxes/output
 /syntaxes/node_modules
-
+/vendor/softbuffer/target
+/vendor/softbuffer/Cargo.lock
