@@ -70,8 +70,11 @@ jumppad_keybinds = { path = "crates/jumppad_keybinds" }
 # instead of allocating a fresh zeroed one per frame, so that `Buffer::age`
 # can report a real number. Upstream hardcodes `age() -> 0`, which tells
 # `iced_tiny_skia` the buffer contents are undefined and makes it repaint the
-# entire window for every frame - see AGENTS.md. Only `src/backends/cg.rs`
-# differs from crates.io; every other backend is untouched.
+# entire window for every frame - see AGENTS.md. `src/backends/cg.rs` is the
+# only code that differs from crates.io; every other backend is untouched.
+# `README.md` also has one doctest fence switched to `ignore`, which is an
+# upstream packaging bug rather than anything to do with this fork - the
+# comment above that fence says why.
 #
 # Vendored rather than a git fork (the way `iced` is, below) because it is one
 # file's worth of change and having it in-tree keeps it reviewable in the same

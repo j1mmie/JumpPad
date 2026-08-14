@@ -67,7 +67,16 @@ To run the Android-specific example on an Android phone: `cargo apk r --example 
 
 ## Example
 
-```rust,no_run
+<!--
+  `ignore`, not `no_run`, because this block does
+  `#[path = "../examples/utils/winit_app.rs"] mod winit_app;` and the published
+  package sets `exclude = ["examples"]` - the file is not there to compile
+  against. `no_run` still compiles, so `cargo test --doc` fails on a pristine
+  crates.io 0.4.8 too; this is not something JumpPad's fork broke. Restoring
+  `no_run` means vendoring the examples and their `winit` dev-dependency back.
+-->
+
+```rust,ignore
 use std::num::NonZeroU32;
 use std::rc::Rc;
 use winit::event::{Event, WindowEvent};

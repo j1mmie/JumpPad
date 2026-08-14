@@ -1012,11 +1012,20 @@ mechanism was already sitting unused in the upstream code - `CGDataProvider`'s
 callback. The fork passes a leaked `Arc<BufferPool>` reference there, and the
 callback reclaims it and returns the buffer to the pool.
 
-Only `src/backends/cg.rs` differs from crates.io 0.4.8. Every other backend is
-byte-identical (the vendor drop is its own commit, so `git log` shows the fork's
-delta on its own), and the crate is wired in through `[patch.crates-io]` in the
-root `Cargo.toml`, with `vendor/softbuffer` in the workspace's `exclude` list
-since it is a patch target and not a member.
+`src/backends/cg.rs` is the only *code* that differs from crates.io 0.4.8.
+Every other backend is byte-identical (the vendor drop is its own commit, so
+`git log` shows the fork's delta on its own), and the crate is wired in through
+`[patch.crates-io]` in the root `Cargo.toml`, with `vendor/softbuffer` in the
+workspace's `exclude` list since it is a patch target and not a member.
+
+**Gotcha - one `README.md` doctest is `ignore`, and must stay that way.** The
+crate's docs are `#![doc = include_str!("../README.md")]`, and the example
+block there does `#[path = "../examples/utils/winit_app.rs"] mod winit_app;`
+while the published package sets `exclude = ["examples"]`. The file is not in
+the package, so `cargo test --doc` fails on a **pristine crates.io 0.4.8** the
+same way - reproduced directly, so don't attribute it to this fork or "fix" it
+by restoring `no_run`. Undoing it means vendoring the examples and the `winit`
+dev-dependency they need.
 
 **The rotation settles at two buffers, so `age` settles at 2.** Core Graphics
 holds the frame on screen until the layer takes the next one, so a buffer is
