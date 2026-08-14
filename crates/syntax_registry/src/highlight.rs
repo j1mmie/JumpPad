@@ -15,7 +15,9 @@ pub enum HighlightCategory {
     Code,
 }
 
-#[derive(Debug, Clone, Copy)]
+/// A run of bytes to color. Ordered by `start` and never overlapping -
+/// consumers binary-search them per line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
@@ -25,6 +27,8 @@ pub struct HighlightSpan {
 pub fn walk(tree: &Tree) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     visit(tree.root_node(), &mut spans);
+    // The walk already emits these in order; sorting makes it a guarantee.
+    spans.sort_by_key(|span| span.start);
     spans
 }
 

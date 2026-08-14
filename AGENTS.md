@@ -370,8 +370,9 @@ The two variants of `PendingView` come at the same result from opposite ends:
 - `Edited` - an `Action` that edited in place. cosmic-text has already chased
   the cursor, but by the bare minimum, leaving it hard against the edge, so
   `reveal_offset` only adds the inset.
-- `Rebuilt` - undo/redo and the line commands, which replace `Content`
-  wholesale (see the undo history section). The fresh buffer starts at the top
+- `Rebuilt` - `reload_text` and an undo whose delta is too big to splice.
+  Undo, redo, toggle-comment and the line commands are `Spliced` instead. The
+  fresh buffer starts at the top
   of the document, so the first shape reveals the cursor from *there* - a view
   the user was never at. `layout` scrolls back to where the old `Content` had
   it and then places the cursor itself with `restore_offset`, since nothing is
@@ -407,12 +408,18 @@ which is where a real reveal - and nothing else - leaves it. The `Rebuilt`
 path has no such ambiguity: it measures the cursor's row against the restored
 view directly.
 
-**Don't route undo through `Action::Edit`.** Replacing the document with
-`SelectAll` + `Paste` would reuse the `Edited` path for free and keep the
-buffer's scroll, so it looks like the obvious simplification. It is quadratic:
-measured against `Content::with_text` on the same document, 2x slower at 10K
-lines, 17x at 50K, and 35x at 150K (237 seconds). `Content::with_text` plus a
-restored view is the cheap way.
+**Don't replace a whole document through `Action::Edit`.** Swapping the
+document with `SelectAll` + `Paste` would reuse the `Edited` path for free and
+keep the buffer's scroll, so it looks like the obvious simplification. It is
+quadratic in what it pastes: measured against `Content::with_text` on the same
+document, 2x slower at 10K lines, 17x at 50K, and 35x at 150K (237 seconds).
+For a *whole document*, `Content::with_text` plus a restored view is the cheap
+way.
+
+This is about size, not mechanism. Pasting over the handful of lines an edit
+touched is how undo, redo, toggle-comment and the line commands all work, and
+it is orders of magnitude cheaper than rebuilding. `LINES_WORTH_SPLICING` is
+where one turns into the other.
 
 ### The source cache
 
@@ -442,6 +449,12 @@ asymmetric: two equal-but-separately-allocated strings compare unequal and
 cost one redundant reparse, where a missed change would leave stale
 highlighting on screen.
 
+**A path that knows what it changed can splice the cache instead.**
+`splice_source` does one `replace_range` on a copy of the string, where
+`resync_source` reassembles line by line - one allocation per line, the 18ms
+above. Undo and redo use it; typing can't, since finding the delta would need
+the post-edit text `Content::text()` is what produces.
+
 **Add a `resync_source` call to any new code path that mutates the text.**
 The tests in `lib.rs` assert `source` matches `content.text()` after every
 mutating operation, so drift shows up as a failure rather than as
@@ -453,58 +466,86 @@ would re-introduce the linear rebuild in dev builds, where it was worst
 
 ### Undo history
 
-`History` (`history.rs`) is a snapshot stack: each entry is the whole document
-text plus a `CursorState` (caret position *and* selection) as of just before an
-edit. `TextArea::update` records one on any `Action` where `is_edit()`, and
-`apply_history` restores both halves - replaying the selection through
-`restore_selection` rather than `move_cursor_to`, which clears one.
+`History` (`history.rs`) is a stack of deltas. Each step is an
+`TextDelta` - the run of characters an edit changed, plus the text on either
+side - and a `CursorState` (caret position *and* selection) from just before
+the edit. `apply_history` splices the delta back in place and restores both.
 
-**Undo restores the selection, for every edit - typing included.** This is one
-uniform rule, deliberately, matching VS Code: Monaco's `EditStack` restores
-`beforeCursorState` on undo for all edit operations, not just cut and paste. So
-selecting a word, typing over it, and undoing brings the word back *selected*.
-Not a bug. Two things follow that look odd but are the same rule: undoing
-Option/Ctrl+Backspace re-selects the deleted word (`word_delete_backward` is a
-`Binding::Sequence`, so the `Select` half is already applied when the
-`Backspace` records its caret), and a cut is indistinguishable from pressing
-Delete with a selection - both publish `Edit::Delete`, so a cut-only variant of
-this rule was never expressible.
+**A step costs the edit, not the document.** It used to hold a full copy of
+the document per step and rebuild `Content` wholesale, so undoing one
+character in a 20K-line file re-shaped 20,000 lines. Measured on 20K lines in
+release: a one-word undo is **430us**, against 160-240ms just to rebuild and
+reassemble the source - and that excludes the re-shape a rebuilt buffer forces
+(most of the 2.16s above). `what_an_undo_costs_on_a_long_document` is the
+`#[ignore]`d measurement.
 
-**Coalescing keeps the *first* snapshot of a burst, not the last.** That is what
-makes the restored selection the one the first keystroke replaced; overwriting
-on each coalesced edit would destroy it, since keystrokes after the first have
-no selection to record.
+**A burst is held open, not snapshotted per keystroke.** `BurstInProgress`
+keeps an `Arc` clone of the source cache from before the burst - a refcount,
+not a copy - and `close_open_burst` turns it into one delta when the burst
+ends. Only the first edit of a burst is kept, so the step's cursor is the
+state from before the whole burst. A burst that ends where it began records
+nothing.
 
-**`apply_history` carries the view across, not just the caret.** The rebuilt
-`Content` starts at the top of the document, so without `restore_view` an undo
-of an edit already on screen would still jump the document around. See the
-reveal section above for what `layout` then does with it.
+**Undo restores the selection, for every edit - typing included.** Matches VS
+Code: Monaco's `EditStack` restores `beforeCursorState` for all edits, not
+just cut and paste. Selecting a word, typing over it, and undoing brings the
+word back *selected*. Two consequences that look odd but are the same rule:
+undoing Option/Ctrl+Backspace re-selects the deleted word, and a cut is
+indistinguishable from Delete with a selection.
 
-**Toggle-comment and the line commands ride the same replacement path.** The
-transforms are pure functions in `comment.rs` and `lines.rs` (testable without
-a window); `TextArea` applies them through `text_with_lines_spliced` +
-`replace_document` - the `Content::with_text` + `restore_view` tail shared
-with undo/redo, never SelectAll+Paste (see the quadratic warning above). Each
-records via `History::record_isolated`, which resets the coalescing burst on
-both sides so it neither joins the typing burst before it nor absorbs the
-keystroke after. A command that turns out to be a no-op (move-line at the top
-of the document, delete-line on an empty one) must return `false` *before*
-recording: `record_isolated` clears the redo stack unconditionally, so a
-phantom entry would silently throw a redo away.
+**Deltas are character-precise, not line-rounded.** Typing `my ` stores
+`my `, not the line it landed in. Line-rounding used to be how the ends were
+made sliceable; with word-sized steps it meant every step carried the whole
+growing line - `N x W` bytes for a line of N characters typed in W words,
+which on a minified-JSON single line is megabytes per word.
+
+**`TextDelta::between` advances both ends by one shared distance.** Both ends
+round out to a UTF-8 character boundary, because a matching run can end
+mid-codepoint. The end advances by a distance applied to *both* documents,
+never worked out per side - the unchanged tail is identical in each, and one
+shared advance is what keeps the two sides the same length, and so describing
+a single change.
+
+**Past `LINES_WORTH_SPLICING` (500), undo gives way to a rebuild.** Pasting is
+quadratic in what it pastes; a rebuild is linear in the document. Measured
+into 20K lines: 0.6ms at 1 line, 38ms at 100, 173ms at 500, 371ms at 1000,
+1.50s at 5000, against a 160-240ms rebuild floor. Err low when revisiting -
+past the crossover the rebuild grows linearly and the splice does not.
+
+**Undo and redo reveal like a splice, not a rebuild.** They keep the buffer's
+scroll and record `reveal_caret_from` (`PendingView::Spliced`), as the line
+commands do. `PendingView::Rebuilt` and `capture_view`/`restore_view` remain
+for `reload_text` and the oversized delta above.
+
+**Toggle-comment and the line commands ride the same in-place splice.** The
+transforms are pure functions in `comment.rs` and `lines.rs`; `TextArea`
+applies them through `splice_lines_in_place`, which works the endings out and
+hands off to the shared `paste_over`. Each records via
+`History::record_isolated`, which breaks the coalescing burst on both sides. A
+command that turns out to be a no-op must return `false` *before* recording -
+`record_isolated` clears the redo stack unconditionally.
 
 **A spliced-in line inherits the ending of the line it displaces.** Only the
-last line carries `LineEnding::None`, and `Content::text()` drops it - so a
-line promoted into the last position, or a copy landing past it, has nothing
-to inherit and borrows `document_line_ending()` instead. Without that, moving
-or duplicating the last line of a CRLF file quietly splices in a lone LF.
-`text_with_lines_spliced` also can't ask `lines.peek()` whether it's on the
-last line the way `Content::text()` does - the output line count differs from
-the input's - which is what `LineJoiner`'s up-front `total` is for.
+last line carries `LineEnding::None`, and `Content::text()` drops it, so a
+line promoted into the last position borrows `document_line_ending()` instead.
+Without it, moving the last line of a CRLF file splices in a lone LF. That is
+`splice_lines_in_place`'s job. A delta needs none of it - it carries exact
+bytes and splices by position.
 
-**Redo's caret is the state at undo time, not at edit time.** VS Code records an
-`afterCursorState` when the edit happens; JumpPad reuses whatever is live when
-you press undo. Only observable if the caret moved in between. Left as-is - the
-fix wants an `after` field on `Snapshot` and its own coalescing tests.
+**A step ends at a word, a caret move, or the timer.** Whitespace and Enter
+close it (the space rides with the word it follows, so undoing `hello world`
+leaves `hello `), and so does any caret move - typing here, clicking there and
+typing again is two edits. `COALESCE_WINDOW` stays as the fallback for edits
+with no word boundary, or a held backspace becomes one enormous step.
+`ends_undo_step` decides; `History::end_burst` applies it.
+
+**Depth is `[history] depth` in `config.toml`, default 200.** A step is now
+roughly a word. `TextArea::update` pushes the live value
+into `History::set_depth` on every message, which is how a config reload
+reaches tabs that already exist. Clamped to at least one.
+
+**Redo's caret is the state at undo time, not edit time.** Only observable if
+the caret moved in between. Left as-is.
 
 ## Syntax highlighting (`syntax_registry`)
 
@@ -563,6 +604,23 @@ fix wants an `after` field on `Snapshot` and its own coalescing tests.
   releasing its own mutex guard. Freeing it while still holding the lock
   self-deadlocks the moment any grammar with injections is evicted - also
   reproduced directly, not theoretical.
+- **Highlighting resumes where the change was, not at line 0.** iced colors
+  `lines[highlighter.current_line() ..= last_visible_line]`, so rewinding to 0
+  on every settings change recolors from the top of the document to the bottom
+  of the viewport - 19,000 lines per keystroke when scrolled deep.
+  `TreeSitterHighlighter::resume_line` picks the line instead. Only an *edit*
+  narrows it (`only_the_text_moved_since` is the gate); a find query, a grammar
+  landing or a config reload still start at 0. It is `min`-ed with
+  `first_recolored_byte`, the first byte where the new spans diverge from those
+  on screen - typing `*/` closes a comment opened far above, which cannot be
+  read off the edit's own position. `change_line` takes the lower of its
+  argument and the current value, since iced calls it afterwards knowing only
+  where its edit landed.
+- **`highlight_line` binary-searches the spans; it must not scan them.** It
+  runs once per line, so filtering the whole span list inside it cost lines
+  times spans. Spans are ordered by `start` and never overlap, so the ones on a
+  line are one contiguous run. Find matches group by line and get the same
+  treatment.
 - Highlight categories (`HighlightCategory`) are a small fixed set (String,
   Comment, Number, Keyword, Heading, Emphasis, Link, Quote, Code) chosen to
   cover both code-like and markup-like grammars without a full

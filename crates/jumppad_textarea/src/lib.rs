@@ -3,13 +3,14 @@ mod history;
 mod lines;
 mod safe_area;
 mod scrollbar;
+mod text_delta;
 pub mod text_editor;
 
 pub use comment::CommentStyle;
 
 use std::collections::HashMap;
 use std::ops::Range;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use editor_core::{
@@ -24,6 +25,7 @@ use jumppad_actions::Action;
 use syntax_registry::{
     Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry,
 };
+use text_delta::TextDelta;
 use text_editor::{
     Binding, Content, Cursor, Motion, Position, Status, text_editor,
 };
@@ -52,6 +54,8 @@ pub struct SharedEditorConfig {
     /// `f32` bits, same reason. Range-checked by the widget's
     /// `scroll_sensitivity` builder, not here.
     scroll_sensitivity: AtomicU32,
+    /// Clamped by `History::set_depth`, not here.
+    undo_depth: AtomicUsize,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole resolver. Swappable because a `keybinds.toml` reload
     /// has to reach tabs that already exist.
@@ -68,6 +72,7 @@ impl SharedEditorConfig {
                 background_alpha.clamp(0.0, 1.0).to_bits(),
             ),
             scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
+            undo_depth: AtomicUsize::new(history::DEFAULT_DEPTH),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
         })
@@ -96,6 +101,15 @@ impl SharedEditorConfig {
     pub fn set_scroll_sensitivity(&self, sensitivity: f32) {
         self.scroll_sensitivity
             .store(sensitivity.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Undo steps per tab. A step is a burst of typing, not a keystroke.
+    pub fn undo_depth(&self) -> usize {
+        self.undo_depth.load(Ordering::Relaxed)
+    }
+
+    pub fn set_undo_depth(&self, depth: usize) {
+        self.undo_depth.store(depth, Ordering::Relaxed);
     }
 
     /// Routed through here so settings have one mutation API, but stored in
@@ -132,6 +146,9 @@ pub struct TextArea {
     /// `Arc` so handing it to [`HighlighterSettings`] is a refcount bump,
     /// and so that struct's `PartialEq` can compare pointers, not bytes.
     source: Arc<String>,
+    /// Where the last change starts, or `None` if it could have recolored
+    /// anything. Tells the highlighter which line to resume at.
+    edited_from: Option<usize>,
     highlighting: Highlighting,
     /// Read for its load revision on every `view` - an injection target
     /// resolving is otherwise invisible to iced, which re-runs the
@@ -194,6 +211,7 @@ impl TextArea {
             // between the two would misalign every span after it.
             source: Arc::new(content.text()),
             content,
+            edited_from: None,
             highlighting,
             registry: registry.clone(),
             history: History::new(),
@@ -224,6 +242,16 @@ impl TextArea {
         self.source = Arc::new(self.content.text());
     }
 
+    /// A hint only - iced reports its own topmost changed line afterwards,
+    /// and the lower of the two wins.
+    fn topmost_touched_line(&self) -> usize {
+        let caret = self.content.caret_line();
+        match self.selection() {
+            Some(saved) => caret.min(saved.anchor.0),
+            None => caret,
+        }
+    }
+
     /// The caret state to hand `History`: position plus whatever is selected,
     /// since undoing an edit that replaced a selection has to put it back.
     fn cursor_state(&self) -> CursorState {
@@ -240,29 +268,25 @@ impl TextArea {
         }
     }
 
-    /// Shared by `EditorMessage::Undo`/`Redo`: hands the current text and
-    /// caret to `op` and, if it returns a state to restore, replaces the
-    /// content wholesale and puts the caret back. Returns whether an edit
-    /// actually happened, same contract `update` has for `Action`s.
+    /// Shared by `EditorMessage::Undo`/`Redo`. Returns whether an edit
+    /// happened, same contract `update` has for `Action`s.
     fn apply_history(
         &mut self,
         op: impl FnOnce(
             &mut History,
-            &str,
+            &Arc<String>,
             CursorState,
-        ) -> Option<(String, CursorState)>,
+        ) -> Option<(TextDelta, CursorState)>,
     ) -> bool {
         let current = self.cursor_state();
-        let Some((restored_text, restored)) =
-            op(&mut self.history, self.source.as_str(), current)
+        let Some((delta, restored)) =
+            op(&mut self.history, &self.source, current)
         else {
             return false;
         };
-        self.replace_document(&restored_text);
-        // Replaying the selection is the point: `move_cursor_to` clears one,
-        // so an undo that only moved the cursor would drop the selection the
-        // undone edit had replaced. Neither branch changes text, so neither
-        // needs a second `resync_source`.
+        let caret_was = self.apply_delta(&delta);
+        // `move_cursor_to` clears a selection, so a restored one needs the
+        // other branch. Neither changes text.
         match restored.selection {
             Some(selection) => {
                 self.restore_selection(selection, restored.position)
@@ -271,7 +295,48 @@ impl TextArea {
                 self.move_cursor_to(restored.position.0, restored.position.1)
             }
         }
+        // Last, so nothing overwrites the record the next layout reads.
+        if let Some(caret_was) = caret_was {
+            self.content.reveal_caret_from(caret_was);
+        }
         true
+    }
+
+    /// Past this many lines a rebuild is cheaper: pasting is quadratic in
+    /// what it pastes. Measured - see AGENTS.md.
+    const LINES_WORTH_SPLICING: usize = 500;
+
+    /// Replays a delta in place. Returns the caret's starting line for the
+    /// reveal that follows, or `None` if it rebuilt instead.
+    fn apply_delta(&mut self, delta: &TextDelta) -> Option<usize> {
+        if delta.line_count() > Self::LINES_WORTH_SPLICING {
+            let replaced = self.source_with(delta);
+            self.replace_document(&replaced);
+            return None;
+        }
+        let caret_was = self.content.caret_line(); // the splice moves it
+        let span = delta.source_range();
+        self.paste_over(
+            position_of(&self.source, span.start),
+            position_of(&self.source, span.end),
+            delta.replacement().to_owned(),
+        );
+        self.splice_source(delta);
+        self.edited_from = Some(delta.first_line());
+        Some(caret_was)
+    }
+
+    /// One copy of the document, against the per-line reassembly
+    /// `Content::text()` would cost.
+    fn source_with(&self, delta: &TextDelta) -> String {
+        let mut replaced = self.source.as_str().to_owned();
+        replaced.replace_range(delta.source_range(), delta.replacement());
+        replaced
+    }
+
+    /// `resync_source` for paths that already know what moved.
+    fn splice_source(&mut self, delta: &TextDelta) {
+        self.source = Arc::new(self.source_with(delta));
     }
 
     /// Replaces the whole document, carrying the view across - a rebuilt
@@ -281,6 +346,7 @@ impl TextArea {
         self.content = Content::with_text(text);
         self.content.restore_view(before);
         self.resync_source();
+        self.edited_from = None;
     }
 
     /// The comment style configured for this tab's file type.
@@ -299,60 +365,6 @@ impl TextArea {
             }
             Some(ending) => ending,
         }
-    }
-
-    /// The document with the lines in `replaced` swapped out for
-    /// `replacements` - any number of them, not just a 1:1 substitution -
-    /// joined exactly as `Content::text()` joins so the rest round-trips.
-    /// Each replacement inherits the ending of the line it stands in for,
-    /// which is what keeps a line promoted into the last position (or copied
-    /// past it) from converting a CRLF document to LF.
-    fn text_with_lines_spliced(
-        &self,
-        replaced: Range<usize>,
-        replacements: &[String],
-    ) -> String {
-        let line_count = self.content.line_count();
-        let start = replaced.start.min(line_count);
-        let end = replaced.end.clamp(start, line_count);
-
-        let mut joiner = LineJoiner {
-            text: String::with_capacity(self.source.len()),
-            written: 0,
-            total: line_count - (end - start) + replacements.len(),
-            fallback: self.document_line_ending(),
-        };
-        let mut displaced: Vec<text_editor::LineEnding> = Vec::new();
-        let mut spliced_in = false;
-        let splice =
-            |joiner: &mut LineJoiner, displaced: &[text_editor::LineEnding]| {
-                for (offset, replacement) in replacements.iter().enumerate() {
-                    let inherited = displaced.get(offset).copied();
-                    joiner.push(
-                        replacement,
-                        inherited.unwrap_or(text_editor::LineEnding::None),
-                    );
-                }
-            };
-
-        for (index, line) in self.content.lines().enumerate() {
-            if (start..end).contains(&index) {
-                displaced.push(line.ending);
-                continue;
-            }
-            // Every displaced ending is known by the time the walk leaves the
-            // replaced block, and the block is contiguous, so this is the one
-            // spot in the output the replacements can go.
-            if index >= end && !spliced_in {
-                splice(&mut joiner, &displaced);
-                spliced_in = true;
-            }
-            joiner.push(&line.text, line.ending);
-        }
-        if !spliced_in {
-            splice(&mut joiner, &displaced);
-        }
-        joiner.text
     }
 
     /// Comments or uncomments the covered lines with the file type's
@@ -374,9 +386,10 @@ impl TextArea {
         // recorded only now that an edit is certain to happen.
         self.history
             .record_isolated(&self.source, self.cursor_state());
-        let new_text =
-            self.text_with_lines_spliced(first..last + 1, &toggled.lines);
-        self.replace_document(&new_text);
+        let caret_was = self.content.caret_line(); // the splice moves it
+        self.splice_lines_in_place(first..last + 1, &toggled.lines);
+        self.resync_source();
+        self.edited_from = Some(first);
 
         let shift = |pos| comment::shift_position(pos, first, &toggled.edits);
         match selection {
@@ -392,6 +405,8 @@ impl TextArea {
                 self.move_cursor_to(line, column);
             }
         }
+        // Last, so nothing overwrites the record the next layout reads.
+        self.content.reveal_caret_from(caret_was);
         true
     }
 
@@ -456,22 +471,27 @@ impl TextArea {
             text.push_str(ending.as_str());
         }
 
-        let line_end = |line: usize| {
-            self.content.line(line).map(|l| l.text.len()).unwrap_or(0)
-        };
         let (anchor, caret) = match (at_document_end, replacements.is_empty()) {
             (false, _) => ((start, 0), (end, 0)),
             // Nothing is going back in and there is no ending to the right to
             // absorb, so the one to the left goes with it.
-            (true, true) if start > 0 => (
-                (start - 1, line_end(start - 1)),
-                (line_count - 1, line_end(line_count - 1)),
-            ),
-            (true, _) => {
-                ((start, 0), (line_count - 1, line_end(line_count - 1)))
+            (true, true) if start > 0 => {
+                ((start - 1, self.line_end(start - 1)), self.document_end())
             }
+            (true, _) => ((start, 0), self.document_end()),
         };
 
+        self.paste_over(anchor, caret, text);
+    }
+
+    /// Selects a span and pastes over it. A change touching three lines
+    /// should cost three lines, not a rebuild of the document.
+    fn paste_over(
+        &mut self,
+        anchor: (usize, usize),
+        caret: (usize, usize),
+        text: String,
+    ) {
         self.content.move_to(Cursor {
             position: clamp_position(&self.content, caret),
             selection: Some(clamp_position(&self.content, anchor)),
@@ -479,6 +499,17 @@ impl TextArea {
         self.content.perform(text_editor::Action::Edit(
             text_editor::Edit::Paste(Arc::new(text)),
         ));
+    }
+
+    /// Byte length of a line's text, its ending excluded.
+    fn line_end(&self, line: usize) -> usize {
+        self.content.line(line).map_or(0, |line| line.text.len())
+    }
+
+    /// The last position in the document.
+    fn document_end(&self) -> (usize, usize) {
+        let last = self.content.line_count().saturating_sub(1);
+        (last, self.line_end(last))
     }
 
     /// Writes a line command out: one isolated undo step - a line command
@@ -491,8 +522,10 @@ impl TextArea {
         // the splice selects anything, since that moves the caret itself.
         let caret_was = self.content.caret_line();
         self.history.record_isolated(&self.source, before);
+        let touched_from = splice.replaced.start;
         self.splice_lines_in_place(splice.replaced, &splice.lines);
         self.resync_source();
+        self.edited_from = Some(touched_from);
 
         match splice.caret {
             lines::Caret::Collapsed(line) => {
@@ -590,6 +623,7 @@ impl TextArea {
             matches: self.find_matches.clone(),
             current_match: self.find_current,
             foreground_alpha: foreground_alpha(),
+            edited_from: self.edited_from,
         }
     }
 }
@@ -619,6 +653,8 @@ impl TextEditorWidget for TextArea {
     }
 
     fn update(&mut self, message: EditorMessage) -> bool {
+        // Live, so a config reload reaches tabs that already exist.
+        self.history.set_depth(self.settings.undo_depth());
         match message {
             EditorMessage::Action(action) => {
                 // Only an `Edit` changes the document's text. `Move`,
@@ -627,6 +663,10 @@ impl TextEditorWidget for TextArea {
                 // all of them - which is what keeps a selection drag, the
                 // whole reason the cache exists, off the rebuild path.
                 let is_edit = action.is_edit();
+                let ends_step = ends_undo_step(&action);
+                // Before the action moves the caret, and not on a drag.
+                let touched_before =
+                    is_edit.then(|| self.topmost_touched_line());
                 if is_edit {
                     // The pre-edit text is already sitting in the cache. The
                     // caret goes with it so undo can re-select whatever this
@@ -635,8 +675,13 @@ impl TextEditorWidget for TextArea {
                         .record_before_edit(&self.source, self.cursor_state());
                 }
                 self.content.perform(action);
-                if is_edit {
+                if let Some(touched_before) = touched_before {
                     self.resync_source();
+                    self.edited_from =
+                        Some(touched_before.min(self.topmost_touched_line()));
+                }
+                if ends_step {
+                    self.history.end_burst();
                 }
                 is_edit
             }
@@ -676,6 +721,7 @@ impl TextEditorWidget for TextArea {
         }
         // Isolated for the same reason a comment toggle is: the reload joins
         // neither the typing burst before it nor the keystroke after it.
+        self.history.set_depth(self.settings.undo_depth());
         self.history
             .record_isolated(&self.source, self.cursor_state());
         let cursor = self.cursor_position();
@@ -736,7 +782,11 @@ impl TextEditorWidget for TextArea {
         matches: Vec<FindMatch>,
         current: Option<usize>,
     ) {
-        self.find_matches = Arc::new(matches);
+        // A fresh `Arc` tells the highlighter its input changed, and the app
+        // pushes an empty list here after every edit while find is closed.
+        if self.find_matches.as_slice() != matches.as_slice() {
+            self.find_matches = Arc::new(matches);
+        }
         self.find_current = current;
     }
 
@@ -800,36 +850,42 @@ impl TextEditorWidget for TextArea {
     }
 }
 
-/// Joins lines the way `Content::text()` does - each one followed by its own
-/// ending, except the last, which never carries one. `total` has to be known
-/// up front: a splice changes the line count, so "is this the last line" can
-/// no longer be read off the document being walked.
-struct LineJoiner {
-    text: String,
-    written: usize,
-    total: usize,
-    fallback: text_editor::LineEnding,
-}
-
-impl LineJoiner {
-    fn push(&mut self, line: &str, ending: text_editor::LineEnding) {
-        self.text.push_str(line);
-        self.written += 1;
-        if self.written < self.total {
-            let ending = match ending {
-                text_editor::LineEnding::None => self.fallback,
-                ending => ending,
-            };
-            self.text.push_str(ending.as_str());
-        }
-    }
-}
-
 /// Clamps a saved (line, column) to the nearest valid position, in case the
 /// document has since gotten shorter - `Content::move_to` does no bounds
 /// checking of its own. `column` is a byte index within the line (matching
 /// what `Content::cursor` reports), so it's also backed up to a `char`
 /// boundary.
+/// What closes an undo step on top of the coalescing timer: finishing a
+/// word, and moving the caret somewhere else. The whitespace itself rides
+/// with the word it follows, so undo takes back `hello ` rather than `hello`.
+fn ends_undo_step(action: &text_editor::Action) -> bool {
+    use text_editor::{Action, Edit};
+    match action {
+        Action::Edit(Edit::Enter) => true,
+        Action::Edit(Edit::Insert(character)) => character.is_whitespace(),
+        Action::Move(_)
+        | Action::Select(_)
+        | Action::SelectWord
+        | Action::SelectLine
+        | Action::SelectAll
+        | Action::Click(_)
+        | Action::Drag(_) => true,
+        _ => false,
+    }
+}
+
+/// The `(line, column)` a byte offset falls on. Columns are byte offsets
+/// within their own line, which is what `Content` positions take.
+fn position_of(source: &str, offset: usize) -> (usize, usize) {
+    let head = &source.as_bytes()[..offset.min(source.len())];
+    let line = head.iter().filter(|byte| **byte == b'\n').count();
+    let line_start = head
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |n| n + 1);
+    (line, offset - line_start)
+}
+
 fn clamp_position(
     content: &Content,
     (line, column): (usize, usize),
@@ -868,6 +924,25 @@ struct HighlighterSettings {
     /// through `FOREGROUND_ALPHA` directly. It rides along so a config
     /// reload makes the settings compare unequal (see `PartialEq` below).
     foreground_alpha: f32,
+    /// Outside `PartialEq`: it describes the change, not the state.
+    edited_from: Option<usize>,
+}
+
+impl HighlighterSettings {
+    /// Whether the text is the only thing that moved. Anything else can
+    /// recolor a line no edit went near.
+    fn only_the_text_moved_since(&self, previous: &Self) -> bool {
+        !Arc::ptr_eq(&self.source, &previous.source)
+            && self.revision == previous.revision
+            && self.foreground_alpha == previous.foreground_alpha
+            && self.current_match == previous.current_match
+            && Arc::ptr_eq(&self.matches, &previous.matches)
+            && match (&self.grammar, &previous.grammar) {
+                (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            }
+    }
 }
 
 impl PartialEq for HighlighterSettings {
@@ -916,6 +991,54 @@ struct TreeSitterHighlighter {
     current_line: usize,
     matches: Arc<Vec<FindMatch>>,
     current_match: Option<usize>,
+    /// What the last update was built from.
+    previous: Option<HighlighterSettings>,
+}
+
+impl TreeSitterHighlighter {
+    /// The first line iced has to recolor; everything above keeps its
+    /// colors. Only an edit narrows this - see `only_the_text_moved_since`.
+    fn resume_line(
+        &self,
+        settings: &HighlighterSettings,
+        spans: &[syntax_registry::HighlightSpan],
+    ) -> usize {
+        let Some(previous) = &self.previous else {
+            return 0;
+        };
+        if !settings.only_the_text_moved_since(previous) {
+            return 0;
+        }
+        let edited_from = settings.edited_from.unwrap_or(0);
+        match first_recolored_byte(&self.spans, spans) {
+            Some(byte) => edited_from.min(self.line_at(byte)),
+            None => edited_from,
+        }
+    }
+
+    fn line_at(&self, byte: usize) -> usize {
+        self.line_starts
+            .partition_point(|start| *start <= byte)
+            .saturating_sub(1)
+    }
+}
+
+/// The first byte whose coloring could have moved. A `*/` closes a comment
+/// opened far above, so this can't be read off the edit's own position.
+fn first_recolored_byte(
+    before: &[syntax_registry::HighlightSpan],
+    after: &[syntax_registry::HighlightSpan],
+) -> Option<usize> {
+    for (was, now) in before.iter().zip(after) {
+        if was != now {
+            return Some(was.start.min(now.start));
+        }
+    }
+    // One parse ran longer; they part at the first span past the shorter.
+    before
+        .get(after.len())
+        .or_else(|| after.get(before.len()))
+        .map(|span| span.start)
 }
 
 impl Highlighter for TreeSitterHighlighter {
@@ -930,24 +1053,29 @@ impl Highlighter for TreeSitterHighlighter {
             current_line: 0,
             matches: Arc::new(Vec::new()),
             current_match: None,
+            previous: None,
         };
         highlighter.update(settings);
         highlighter
     }
 
     fn update(&mut self, settings: &Self::Settings) {
-        self.spans = match &settings.grammar {
+        let spans = match &settings.grammar {
             Some(grammar) => grammar.highlight(&settings.source),
             None => Arc::new(Vec::new()),
         };
         self.line_starts = line_starts(&settings.source);
-        self.current_line = 0;
+        self.current_line = self.resume_line(settings, &spans);
+        self.spans = spans;
         self.matches = settings.matches.clone();
         self.current_match = settings.current_match;
+        self.previous = Some(settings.clone());
     }
 
     fn change_line(&mut self, line: usize) {
-        self.current_line = line;
+        // Lowest wins - iced knows where its edit landed, not how far up
+        // the reparse reaches.
+        self.current_line = self.current_line.min(line);
     }
 
     fn highlight_line(&mut self, line: &str) -> Self::Iterator<'_> {
@@ -959,10 +1087,16 @@ impl Highlighter for TreeSitterHighlighter {
         };
         let end = start + line.len();
 
-        let mut ranges: Vec<(Range<usize>, Highlighted)> = self
+        // Spans are ordered and never overlap, so the ones on this line are
+        // one contiguous run. Scanning them all per line cost lines x spans.
+        let from = self
             .spans
+            .partition_point(|span| span.start < start)
+            .saturating_sub(1);
+        let mut ranges: Vec<(Range<usize>, Highlighted)> = self.spans[from..]
             .iter()
-            .filter(|span| span.start < end && span.end > start)
+            .take_while(|span| span.start < end)
+            .filter(|span| span.end > start)
             .map(|span| {
                 let range_start = span.start.max(start) - start;
                 let range_end = span.end.min(end) - start;
@@ -970,24 +1104,24 @@ impl Highlighter for TreeSitterHighlighter {
             })
             .collect();
 
-        // Appended *after* the syntax spans on purpose: iced feeds these to
-        // `AttrsList::add_span`, whose range map overwrites on overlap, so
-        // the last span covering a byte wins. Match coloring has to outrank
-        // syntax coloring to be visible at all.
-        //
-        // Match columns are already line-relative, so unlike the syntax
-        // spans above they need no offset arithmetic.
+        // After the syntax spans on purpose: the last span covering a byte
+        // wins, and match coloring has to outrank syntax coloring. Columns
+        // are already line-relative. Matches group by line, so same search.
+        let first_match = self
+            .matches
+            .partition_point(|found| found.line < line_index);
         ranges.extend(
-            self.matches
+            self.matches[first_match..]
                 .iter()
                 .enumerate()
-                .filter(|(_, found)| found.line == line_index)
-                .map(|(index, found)| {
-                    let kind = if Some(index) == self.current_match {
-                        Highlighted::CurrentMatch
-                    } else {
-                        Highlighted::Match
-                    };
+                .take_while(|(_, found)| found.line == line_index)
+                .map(|(offset, found)| {
+                    let kind =
+                        if Some(first_match + offset) == self.current_match {
+                            Highlighted::CurrentMatch
+                        } else {
+                            Highlighted::Match
+                        };
                     (found.start..found.end, kind)
                 }),
         );
@@ -1354,6 +1488,278 @@ mod tests {
         assert_source_is_synced(&editor);
     }
 
+    /// Types `text` a character at a time, the way a person would.
+    fn type_out(editor: &mut TextArea, text: &str) {
+        for character in text.chars() {
+            let action = if character == '\n' {
+                text_editor::Edit::Enter
+            } else {
+                text_editor::Edit::Insert(character)
+            };
+            editor.update(edit(action));
+        }
+    }
+
+    #[test]
+    fn each_typed_word_is_its_own_undo_step() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "Hello my name is Jimmie");
+
+        // The space rides with the word it follows.
+        for expected in [
+            "Hello my name is ",
+            "Hello my name ",
+            "Hello my ",
+            "Hello ",
+            "",
+        ] {
+            assert!(editor.update(EditorMessage::Undo), "{expected:?}");
+            assert_eq!(editor.text(), expected);
+            assert_source_is_synced(&editor);
+        }
+        assert!(!editor.update(EditorMessage::Undo));
+    }
+
+    #[test]
+    fn redo_walks_the_words_back_in() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "one two three");
+        while editor.update(EditorMessage::Undo) {}
+        assert_eq!(editor.text(), "");
+
+        for expected in ["one ", "one two ", "one two three"] {
+            assert!(editor.update(EditorMessage::Redo), "{expected:?}");
+            assert_eq!(editor.text(), expected);
+            assert_source_is_synced(&editor);
+        }
+    }
+
+    #[test]
+    fn enter_ends_an_undo_step() {
+        let mut editor = plain_editor("");
+        type_out(&mut editor, "first\nsecond");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "first\n");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn moving_the_caret_ends_an_undo_step() {
+        // Typing here, clicking there, then typing again is two edits, not
+        // one - without this they fold into a single step.
+        let mut editor = plain_editor("ab");
+        editor.move_cursor_to(0, 2);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        editor.update(EditorMessage::Action(text_editor::Action::Move(
+            text_editor::Motion::Home,
+        )));
+        editor.update(edit(text_editor::Edit::Insert('Y')));
+        assert_eq!(editor.text(), "YabX");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "abX");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "ab");
+    }
+
+    #[test]
+    fn a_run_of_deletes_still_coalesces_on_the_timer() {
+        // Backspace has no word boundary to break on, so the timer is what
+        // keeps a held key from becoming one enormous step.
+        let mut editor = plain_editor("abcdef");
+        editor.move_cursor_to(0, 6);
+        for _ in 0..3 {
+            editor.update(edit(text_editor::Edit::Backspace));
+        }
+        assert_eq!(editor.text(), "abc");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "abcdef");
+        assert!(!editor.update(EditorMessage::Undo));
+    }
+
+    #[test]
+    fn a_typed_word_stores_only_the_word() {
+        // With word-sized steps, a delta that rounded out to whole lines
+        // would carry the growing line on every keystroke.
+        let mut editor = plain_editor("Hello ");
+        editor.move_cursor_to(0, 6);
+        type_out(&mut editor, "my ");
+
+        let (delta, _) = editor
+            .history
+            .undo(&editor.source, editor.cursor_state())
+            .expect("a word to undo");
+        assert_eq!(delta.replacement(), "");
+        assert_eq!(delta.source_range(), 6..9);
+    }
+
+    #[test]
+    fn undo_and_redo_round_trip_byte_exactly() {
+        // Every shape where endings are load-bearing: the last line, which
+        // carries none, and CRLF, which is two bytes.
+        let cases: &[(&str, (usize, usize), text_editor::Edit)] = &[
+            ("a\nb\nc", (1, 1), text_editor::Edit::Insert('X')),
+            ("a\nb\nc", (0, 0), text_editor::Edit::Insert('X')),
+            ("a\nb\nc", (2, 1), text_editor::Edit::Insert('X')),
+            ("a\nb\nc", (1, 1), text_editor::Edit::Enter),
+            ("a\nb\nc", (2, 1), text_editor::Edit::Enter),
+            ("a\nb\nc", (2, 1), text_editor::Edit::Backspace),
+            ("a\nb\nc", (2, 0), text_editor::Edit::Backspace),
+            ("a\r\nb\r\nc", (1, 1), text_editor::Edit::Insert('X')),
+            ("a\r\nb\r\nc", (2, 1), text_editor::Edit::Enter),
+            ("a\r\nb\r\nc", (1, 0), text_editor::Edit::Backspace),
+            ("a\r\nb\r\nc", (2, 1), text_editor::Edit::Backspace),
+            ("", (0, 0), text_editor::Edit::Insert('X')),
+            ("trailing\n", (1, 0), text_editor::Edit::Insert('X')),
+            ("one line", (0, 3), text_editor::Edit::Insert('X')),
+        ];
+
+        for (doc, cursor, action) in cases {
+            let what = format!("{doc:?} at {cursor:?} {action:?}");
+            let mut editor = plain_editor(doc);
+            editor.move_cursor_to(cursor.0, cursor.1);
+            assert!(editor.update(edit(action.clone())), "no edit: {what}");
+            let edited = editor.text();
+            assert_source_is_synced(&editor);
+
+            assert!(editor.update(EditorMessage::Undo), "no undo: {what}");
+            assert_eq!(editor.text(), *doc, "undo: {what}");
+            assert_source_is_synced(&editor);
+
+            assert!(editor.update(EditorMessage::Redo), "no redo: {what}");
+            assert_eq!(editor.text(), edited, "redo: {what}");
+            assert_source_is_synced(&editor);
+        }
+    }
+
+    #[test]
+    fn undo_carries_only_the_lines_the_edit_touched() {
+        // The whole point: an undo costs the lines it changes.
+        let doc: String = (0..50).map(|i| format!("line {i}\n")).collect();
+        let mut editor = plain_editor(&doc);
+        editor.move_cursor_to(30, 4);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        assert!(editor.update(EditorMessage::Undo));
+
+        assert_eq!(editor.text(), doc);
+        assert_source_is_synced(&editor);
+        // The highlighter resumes at the change, not at the top.
+        assert_eq!(editor.highlighter_settings().edited_from, Some(30));
+    }
+
+    #[test]
+    fn an_edit_reports_the_topmost_line_it_touched() {
+        // Recoloring starts at the selection's anchor, not the caret.
+        let mut editor = plain_editor("a\nb\nc\nd\ne");
+        editor.restore_selection(
+            SavedSelection {
+                anchor: (1, 0),
+                kind: SelectionKind::Range,
+            },
+            (3, 1),
+        );
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        assert_eq!(editor.highlighter_settings().edited_from, Some(1));
+    }
+
+    #[test]
+    fn a_whole_document_undo_gives_way_to_a_rebuild() {
+        // Past `LINES_WORTH_SPLICING` the splice stands down, but the text
+        // still has to come back.
+        let long: String = (0..TextArea::LINES_WORTH_SPLICING + 10)
+            .map(|i| format!("line {i}\n"))
+            .collect();
+        let mut editor = plain_editor("short");
+        editor.reload_text(&long);
+        assert_eq!(editor.text(), long);
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "short");
+        assert_source_is_synced(&editor);
+        assert_eq!(editor.highlighter_settings().edited_from, None);
+
+        assert!(editor.update(EditorMessage::Redo));
+        assert_eq!(editor.text(), long);
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_comment_toggle_undoes_byte_exactly() {
+        // Toggle-comment splices in place, so endings survive it too.
+        for doc in ["a\nb\nc", "a\r\nb\r\nc", "last"] {
+            let mut editor = rust_editor(doc);
+            editor.move_cursor_to(0, 0);
+            assert!(editor.update(EditorMessage::ToggleComment), "{doc:?}");
+            let commented = editor.text();
+            assert!(commented.contains("// "), "{doc:?}");
+            assert_source_is_synced(&editor);
+
+            assert!(editor.update(EditorMessage::Undo), "{doc:?}");
+            assert_eq!(editor.text(), doc, "{doc:?}");
+            assert_source_is_synced(&editor);
+
+            assert!(editor.update(EditorMessage::Redo), "{doc:?}");
+            assert_eq!(editor.text(), commented, "{doc:?}");
+            assert_source_is_synced(&editor);
+        }
+    }
+
+    #[test]
+    fn the_undo_depth_follows_the_shared_setting() {
+        let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+        let settings =
+            SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
+        settings.set_undo_depth(1);
+        let mut editor = TextArea::new("a", &registry, None, settings.clone());
+
+        // Two isolated steps, of which only the most recent may survive.
+        editor.move_cursor_to(0, 1);
+        editor.update(EditorMessage::CopyLineDown);
+        editor.update(EditorMessage::CopyLineDown);
+        let before_undo = editor.text();
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_ne!(editor.text(), before_undo);
+        assert!(!editor.update(EditorMessage::Undo), "depth of 1 keeps one");
+    }
+
+    /// The measurement behind `LINES_WORTH_SPLICING`. Run by hand:
+    /// `cargo test --release -- --ignored --nocapture`. Sees buffer work
+    /// only, not shaping, so every rebuild number it prints is a floor.
+    #[test]
+    #[ignore = "a measurement, not an assertion"]
+    fn what_an_undo_costs_on_a_long_document() {
+        use std::time::Instant;
+
+        const LINES: usize = 20_000;
+        let doc: String = (0..LINES).map(|i| format!("line {i}\n")).collect();
+
+        let mut editor = plain_editor(&doc);
+        editor.move_cursor_to(LINES / 2, 4);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        let started = Instant::now();
+        assert!(editor.update(EditorMessage::Undo));
+        println!("undo of one line in {LINES}: {:?}", started.elapsed());
+
+        let mut editor = plain_editor(&doc);
+        let started = Instant::now();
+        editor.replace_document(&doc);
+        println!("rebuild of {LINES} (unshaped): {:?}", started.elapsed());
+
+        for reach in [1, 10, 100, 500, 1_000, 2_000, 5_000] {
+            let replacement: String =
+                (0..reach).map(|i| format!("other {i}\n")).collect();
+            let mut editor = plain_editor(&doc);
+            let started = Instant::now();
+            editor.paste_over((0, 0), (reach, 0), replacement);
+            println!(
+                "splice of {reach} lines into {LINES}: {:?}",
+                started.elapsed()
+            );
+        }
+    }
+
     #[test]
     fn reload_text_replaces_the_document_and_is_undoable() {
         let mut editor = plain_editor("on disk");
@@ -1702,14 +2108,14 @@ mod tests {
         for doc in
             ["", "one line", "trailing\n", "a\nb\nc", "crlf\r\nlines\r\n"]
         {
-            let editor = plain_editor(doc);
+            let mut editor = plain_editor(doc);
+            let before = editor.text();
             let count = editor.content.line_count();
             let same = editor.covered_text((0, count - 1));
-            assert_eq!(
-                editor.text_with_lines_spliced(0..count, &same),
-                editor.text(),
-                "{doc:?}"
-            );
+            editor.splice_lines_in_place(0..count, &same);
+            editor.resync_source();
+            assert_eq!(editor.text(), before, "{doc:?}");
+            assert_source_is_synced(&editor);
         }
     }
 
@@ -1718,12 +2124,12 @@ mod tests {
         // The last line carries no ending of its own, so a copy landing past
         // it has nothing to inherit - without the fallback this splices a
         // lone LF into a CRLF document.
-        let editor = plain_editor("aaa\r\nbbb");
+        let mut editor = plain_editor("aaa\r\nbbb");
         let doubled = vec!["bbb".to_string(), "bbb".to_string()];
-        assert_eq!(
-            editor.text_with_lines_spliced(1..2, &doubled),
-            "aaa\r\nbbb\r\nbbb"
-        );
+        editor.splice_lines_in_place(1..2, &doubled);
+        editor.resync_source();
+        assert_eq!(editor.text(), "aaa\r\nbbb\r\nbbb");
+        assert_source_is_synced(&editor);
     }
 
     #[test]
@@ -2150,6 +2556,7 @@ mod tests {
             matches: Arc::new(Vec::new()),
             current_match: None,
             foreground_alpha: 1.0,
+            edited_from: None,
         };
         assert!(settings("ab") != settings("ab"));
     }
@@ -2399,6 +2806,83 @@ mod tests {
     }
 
     #[test]
+    fn an_ordinary_edit_reports_only_the_text_moving() {
+        // An empty list arrives after every edit while find is closed;
+        // minting a new `Arc` would read as a find change.
+        let mut editor = plain_editor("a\nb\nc\nd");
+        editor.set_find_matches(Vec::new(), None);
+        let before = editor.highlighter_settings();
+
+        editor.move_cursor_to(2, 1);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        editor.set_find_matches(Vec::new(), None);
+        let after = editor.highlighter_settings();
+
+        assert!(after.only_the_text_moved_since(&before));
+        assert_eq!(after.edited_from, Some(2));
+    }
+
+    #[test]
+    fn an_edit_that_also_moves_the_find_matches_recolors_from_the_top() {
+        // Match coloring can land on a line no edit went near.
+        let mut editor = plain_editor("a\nb\nc\nd");
+        editor.set_find_matches(Vec::new(), None);
+        let before = editor.highlighter_settings();
+
+        editor.move_cursor_to(2, 1);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        editor.set_find_matches(
+            vec![FindMatch {
+                line: 2,
+                start: 0,
+                end: 1,
+            }],
+            Some(0),
+        );
+        let after = editor.highlighter_settings();
+
+        assert!(!after.only_the_text_moved_since(&before));
+    }
+
+    #[test]
+    fn the_highlighter_resumes_at_the_edit_and_rewinds_for_anything_else() {
+        let mut editor = plain_editor("a\nb\nc\nd\ne\nf");
+        editor.set_find_matches(Vec::new(), None);
+        let mut highlighter =
+            TreeSitterHighlighter::new(&editor.highlighter_settings());
+        assert_eq!(highlighter.current_line(), 0);
+
+        editor.move_cursor_to(4, 1);
+        editor.update(edit(text_editor::Edit::Insert('X')));
+        editor.set_find_matches(Vec::new(), None);
+        highlighter.update(&editor.highlighter_settings());
+        assert_eq!(
+            highlighter.current_line(),
+            4,
+            "an edit resumes where it is"
+        );
+
+        // iced reports its own topmost changed line afterwards; the lower of
+        // the two has to win.
+        highlighter.change_line(2);
+        assert_eq!(highlighter.current_line(), 2);
+        highlighter.change_line(5);
+        assert_eq!(highlighter.current_line(), 2, "the lower one stands");
+
+        // A find change is not an edit, so it goes back to the top.
+        editor.set_find_matches(
+            vec![FindMatch {
+                line: 4,
+                start: 0,
+                end: 1,
+            }],
+            Some(0),
+        );
+        highlighter.update(&editor.highlighter_settings());
+        assert_eq!(highlighter.current_line(), 0);
+    }
+
+    #[test]
     fn set_foreground_alpha_reaches_color_for() {
         // The only test that writes the global, restored at the end so the
         // parallel test threads never see a scaled alpha.
@@ -2459,6 +2943,7 @@ mod tests {
             matches: Arc::new(matches),
             current_match: current,
             foreground_alpha: 1.0,
+            edited_from: None,
         })
     }
 
@@ -2535,6 +3020,7 @@ mod tests {
             matches: matches.clone(),
             current_match: None,
             foreground_alpha: 1.0,
+            edited_from: None,
         };
 
         let same = HighlighterSettings { ..base.clone() };
@@ -2568,6 +3054,7 @@ mod tests {
             matches: Arc::new(Vec::new()),
             current_match: None,
             foreground_alpha: 1.0,
+            edited_from: None,
         };
         let loaded_something = HighlighterSettings {
             revision: 1,
@@ -2587,6 +3074,7 @@ mod tests {
             matches: Arc::new(Vec::new()),
             current_match: None,
             foreground_alpha: 1.0,
+            edited_from: None,
         };
         let faded = HighlighterSettings {
             foreground_alpha: 0.5,
