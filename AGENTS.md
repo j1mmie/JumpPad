@@ -1095,6 +1095,36 @@ only lever that would move it is not presenting frames when nothing changed -
 i.e. stopping the caret blink after an idle period. That is a deliberate
 behaviour change and has not been made.
 
+**The software build is 55.5MB, and 60% of it is the window's own pixels.**
+Same window, same machine. Every row below is `vmmap` dirty size, and they sum
+to the reported footprint:
+
+| What | Dirty | Share |
+| --- | --- | --- |
+| Frame buffers - `MALLOC_LARGE` 16.5M live, 8.26M freed-but-charged | 24.8M | 45% |
+| CoreAnimation's own copy of the presented frame | 8.5M | 15% |
+| Heap - document text, undo history, spans, widget state | 14.7M | 27% |
+| Private writable data from ~950 loaded libraries | 3.7M | 7% |
+| Page tables, stacks, ColorSync, CoreUI, misc | 3.9M | 7% |
+
+Three things worth knowing before optimising against this:
+
+- **`MALLOC_LARGE` is exactly two regions of 8.24MiB**, which is 1800x1200x4 -
+  the pool, visible in the allocator. It scales with window area and Retina
+  scale, so a maximised 5K window moves this number a lot and nothing else on
+  the list moves at all.
+- **CoreAnimation copies the frame.** 8752K here against 288K on the GPU build,
+  a difference of exactly one buffer. Presenting through `setContents` with a
+  `CGImage` appears to cost a CA-side copy. Avoiding it means presenting an
+  `IOSurface`-backed layer instead, which is a much larger softbuffer change
+  than the pool was.
+- **`MAX_POOLED_BUFFERS = 3` costs 8.26MB**, 15% of the whole footprint - the
+  peak footprint of 63.8M against 55.5M current is that third buffer, allocated
+  once and since freed with its pages still charged. Dropping the cap to 2 is a
+  one-line change, but do not make it before confirming the pool still reaches
+  a non-zero `age`; two buffers is the exact rotation depth, with no slack for
+  Core Animation holding one longer.
+
 ## Known upstream rendering bug (tiny-skia + tab switching)
 
 `iced`'s tiny-skia compositor skips presenting a frame it thinks looks
