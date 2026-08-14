@@ -17,8 +17,8 @@ pub struct CursorState {
 /// `HistoryConfig`'s default.
 pub const DEFAULT_DEPTH: usize = 200;
 
-/// Edits this close together fold into one step, so a burst of typing
-/// undoes as a word rather than a keystroke.
+/// The fallback step boundary, for edits with no word to end on - a held
+/// backspace would otherwise become one enormous step.
 const COALESCE_WINDOW: Duration = Duration::from_millis(750);
 
 /// A delta-based undo/redo stack, standing in for the one
