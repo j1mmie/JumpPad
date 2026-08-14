@@ -9,6 +9,9 @@ members = [
     "crates/jumppad_actions",
     "crates/jumppad_keybinds",
 ]
+# Patched in below, not a member: it is upstream's crate with one backend
+# changed, so it keeps its own edition and lints rather than inheriting ours.
+exclude = ["vendor/softbuffer"]
 
 [workspace.package]
 version = "0.1.0"
@@ -63,6 +66,17 @@ jumppad_keybinds = { path = "crates/jumppad_keybinds" }
 # that don't unify, and a wall of "expected X, found X". They carry no changes
 # of ours; they are byte-identical to the 0.14.0 tag.
 [patch.crates-io]
+# `softbuffer` 0.4.8 with its CoreGraphics backend recycling frame buffers
+# instead of allocating a fresh zeroed one per frame, so that `Buffer::age`
+# can report a real number. Upstream hardcodes `age() -> 0`, which tells
+# `iced_tiny_skia` the buffer contents are undefined and makes it repaint the
+# entire window for every frame - see AGENTS.md. Only `src/backends/cg.rs`
+# differs from crates.io; every other backend is untouched.
+#
+# Vendored rather than a git fork (the way `iced` is, below) because it is one
+# file's worth of change and having it in-tree keeps it reviewable in the same
+# diff as the notes explaining it.
+softbuffer = { path = "vendor/softbuffer" }
 iced_graphics = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
 iced_core = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
 iced_futures = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }

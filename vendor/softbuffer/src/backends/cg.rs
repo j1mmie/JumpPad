@@ -18,12 +18,15 @@ use objc2_foundation::{
 use objc2_quartz_core::{kCAGravityTopLeft, CALayer, CATransaction};
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawWindowHandle};
 
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fmt;
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::ptr::{self, slice_from_raw_parts_mut, NonNull};
+use std::sync::{Arc, Mutex, PoisonError};
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -94,6 +97,136 @@ impl Observer {
     }
 }
 
+/// The most buffers kept alive for reuse at once.
+///
+/// Core Graphics owns at most the frame on screen plus the one being handed
+/// over, so a steady stream of frames settles at two. The third is slack for
+/// the moments Core Animation holds one a little longer.
+const MAX_POOLED_BUFFERS: usize = 3;
+
+/// A buffer that Core Graphics has finished with, and the present its pixels
+/// came from.
+struct PooledBuffer {
+    pixels: Box<[u32]>,
+    presented_at: u64,
+}
+
+/// Frame buffers kept alive across presents so `age` can report a real number.
+///
+/// Without this, `buffer_mut` allocated a fresh zeroed `Vec<u32>` every frame -
+/// 8MB at a Retina window size, mapped and page-faulted in from scratch each
+/// time - and `age` could only answer `0`, which tells the caller the contents
+/// are undefined and forces it to repaint the whole window. Recycling the
+/// allocations is what makes an honest `age` possible, and the honest `age` is
+/// what lets a caller repaint only the region that actually changed.
+struct BufferPool {
+    state: Mutex<PoolState>,
+}
+
+struct PoolState {
+    /// Buffers Core Graphics has released back to us, ready to draw into.
+    available: Vec<PooledBuffer>,
+    /// Buffers Core Graphics still owns, keyed by the address of their pixels.
+    /// `release` is handed that address and nothing else, so the present each
+    /// buffer was shown at has to be parked here until it comes back.
+    held_by_core_graphics: HashMap<usize, u64>,
+    /// Presents completed on this surface. An `age` is the distance between
+    /// this and a buffer's `presented_at`.
+    presents: u64,
+    /// The element count every pooled buffer has. A resize changes it, which
+    /// retires everything allocated at the old size.
+    len: usize,
+}
+
+impl fmt::Debug for BufferPool {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BufferPool").finish_non_exhaustive()
+    }
+}
+
+impl BufferPool {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(PoolState {
+                available: Vec::new(),
+                held_by_core_graphics: HashMap::new(),
+                presents: 0,
+                len: 0,
+            }),
+        })
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, PoolState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A buffer to draw the next frame into, and how many presents ago its
+    /// pixels were last on screen - `0` when they are undefined.
+    fn take(&self, len: usize) -> (util::PixelBuffer, u8) {
+        let mut state = self.lock();
+
+        if state.len != len {
+            state.len = len;
+            state.available.clear();
+        }
+
+        // The most recently presented buffer is the one whose pixels are
+        // closest to what is on screen, so it leaves the caller the smallest
+        // region to repaint.
+        let newest = state
+            .available
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, pooled)| pooled.presented_at)
+            .map(|(index, _)| index);
+
+        let Some(index) = newest else {
+            return (util::PixelBuffer(vec![0; len]), 0);
+        };
+
+        let pooled = state.available.swap_remove(index);
+        // An age too small is the one dangerous answer: it points the caller
+        // at a more recent frame than this buffer actually holds, and it skips
+        // the difference. So an age that doesn't fit becomes `0` - undefined
+        // contents, repaint everything - rather than a clamp to `u8::MAX`.
+        // Only reachable if a buffer sits unused for 255 presents while others
+        // rotate, which `MAX_POOLED_BUFFERS` makes vanishingly unlikely.
+        let age = u8::try_from(state.presents.saturating_sub(pooled.presented_at)).unwrap_or(0);
+
+        (util::PixelBuffer(pooled.pixels.into_vec()), age)
+    }
+
+    /// Records that `pixels` is about to be handed to Core Graphics.
+    fn mark_presented(&self, pixels: usize) {
+        let mut state = self.lock();
+        let presented_at = state.presents;
+        state.held_by_core_graphics.insert(pixels, presented_at);
+        state.presents += 1;
+    }
+
+    /// Takes a buffer back once Core Graphics has released it.
+    fn reclaim(&self, pixels: Box<[u32]>) {
+        let mut state = self.lock();
+
+        let Some(presented_at) = state
+            .held_by_core_graphics
+            .remove(&(pixels.as_ptr() as usize))
+        else {
+            return;
+        };
+
+        // Allocated before a resize, or more slack than a rotation needs.
+        if pixels.len() != state.len || state.available.len() >= MAX_POOLED_BUFFERS {
+            return;
+        }
+
+        state.available.push(PooledBuffer {
+            pixels,
+            presented_at,
+        });
+    }
+}
+
 #[derive(Debug)]
 pub struct CGImpl<D, W> {
     /// Our layer.
@@ -108,6 +241,8 @@ pub struct CGImpl<D, W> {
     width: usize,
     /// The height of the underlying buffer.
     height: usize,
+    /// Frame buffers recycled across presents - see `BufferPool`.
+    pool: Arc<BufferPool>,
     window_handle: W,
     _display: PhantomData<D>,
 }
@@ -242,6 +377,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
             color_space,
             width,
             height,
+            pool: BufferPool::new(),
             _display: PhantomData,
             window_handle: window_src,
         })
@@ -259,8 +395,10 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
     }
 
     fn buffer_mut(&mut self) -> Result<BufferImpl<'_, D, W>, SoftBufferError> {
+        let (buffer, age) = self.pool.take(self.width * self.height);
         Ok(BufferImpl {
-            buffer: util::PixelBuffer(vec![0; self.width * self.height]),
+            buffer,
+            age,
             imp: self,
         })
     }
@@ -270,6 +408,8 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> SurfaceInterface<D, W> for CGImpl<
 pub struct BufferImpl<'a, D, W> {
     imp: &'a mut CGImpl<D, W>,
     buffer: util::PixelBuffer,
+    /// How many presents ago this buffer's pixels were last on screen.
+    age: u8,
 }
 
 impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_, D, W> {
@@ -292,20 +432,28 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
     }
 
     fn age(&self) -> u8 {
-        0
+        self.age
     }
 
     fn present(self) -> Result<(), SoftBufferError> {
-        unsafe extern "C-unwind" fn release(
-            _info: *mut c_void,
-            data: NonNull<c_void>,
-            size: usize,
-        ) {
+        unsafe extern "C-unwind" fn release(info: *mut c_void, data: NonNull<c_void>, size: usize) {
             let data = data.cast::<u32>();
             let slice = slice_from_raw_parts_mut(data.as_ptr(), size / size_of::<u32>());
             // SAFETY: This is the same slice that we passed to `Box::into_raw` below.
-            drop(unsafe { Box::from_raw(slice) })
+            let pixels = unsafe { Box::from_raw(slice) };
+
+            // SAFETY: `present` passed an `Arc::into_raw` pointer as the info
+            // pointer, and Core Graphics calls this exactly once per data
+            // provider, so this reclaims that one reference and no other.
+            let pool = unsafe { Arc::from_raw(info.cast::<BufferPool>()) };
+
+            // Hand the allocation back instead of freeing it, so the next
+            // frame can draw over it rather than faulting in a fresh mapping.
+            // Core Graphics may call this from any thread; the pool locks.
+            pool.reclaim(pixels);
         }
+
+        let pool = Arc::clone(&self.imp.pool);
 
         let data_provider = {
             let len = self.buffer.len() * size_of::<u32>();
@@ -313,10 +461,18 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
             // Convert slice pointer to thin pointer.
             let data_ptr = buffer.cast::<c_void>();
 
-            // SAFETY: The data pointer and length are valid.
-            // The info pointer can safely be NULL, we don't use it in the `release` callback.
+            pool.mark_presented(data_ptr as usize);
+
+            // SAFETY: The data pointer and length are valid. The info pointer
+            // is a leaked `Arc<BufferPool>` reference that `release` reclaims.
             unsafe {
-                CGDataProvider::with_data(ptr::null_mut(), data_ptr, len, Some(release)).unwrap()
+                CGDataProvider::with_data(
+                    Arc::into_raw(Arc::clone(&pool)).cast_mut().cast::<c_void>(),
+                    data_ptr,
+                    len,
+                    Some(release),
+                )
+                .unwrap()
             }
         };
 
@@ -384,5 +540,109 @@ impl Deref for SendCALayer {
     type Target = CALayer;
     fn deref(&self) -> &Self::Target {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Hands a buffer to the pool the way `present` does, and returns it in
+    /// the state Core Graphics holds it in until the layer swaps contents.
+    fn present(pool: &BufferPool, pixels: util::PixelBuffer) -> Box<[u32]> {
+        let held = pixels.0.into_boxed_slice();
+        pool.mark_presented(held.as_ptr() as usize);
+        held
+    }
+
+    #[test]
+    fn a_cold_pool_allocates_and_says_the_pixels_are_undefined() {
+        let pool = BufferPool::new();
+
+        let (pixels, age) = pool.take(16);
+
+        assert_eq!(age, 0);
+        assert_eq!(pixels.len(), 16);
+        assert!(pixels.iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn a_returned_buffer_comes_back_with_its_age() {
+        let pool = BufferPool::new();
+
+        let (pixels, _) = pool.take(16);
+        let held = present(&pool, pixels);
+        pool.reclaim(held);
+
+        let (_, age) = pool.take(16);
+
+        assert_eq!(age, 1);
+    }
+
+    #[test]
+    fn the_rotation_settles_at_two_buffers() {
+        let pool = BufferPool::new();
+        let mut on_screen = None;
+        let mut ages = Vec::new();
+
+        for _ in 0..6 {
+            let (pixels, age) = pool.take(16);
+            ages.push(age);
+
+            // Core Graphics releases the previous frame when the layer takes
+            // the new one, so a buffer is never free the frame after it went
+            // out.
+            if let Some(previous) = on_screen.replace(present(&pool, pixels)) {
+                pool.reclaim(previous);
+            }
+        }
+
+        assert_eq!(ages, vec![0, 0, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn a_reused_buffer_keeps_the_pixels_it_was_showing() {
+        let pool = BufferPool::new();
+
+        let (mut pixels, _) = pool.take(4);
+        pixels.0.copy_from_slice(&[1, 2, 3, 4]);
+        let held = present(&pool, pixels);
+        pool.reclaim(held);
+
+        let (pixels, age) = pool.take(4);
+
+        // The pixels are the whole point: an age above zero promises the
+        // caller they survived, and it will only repaint what changed.
+        assert_ne!(age, 0);
+        assert_eq!(pixels.as_slice(), &[1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn a_resize_retires_the_buffers_allocated_at_the_old_size() {
+        let pool = BufferPool::new();
+
+        let (pixels, _) = pool.take(16);
+        let held = present(&pool, pixels);
+        pool.reclaim(held);
+
+        let (pixels, age) = pool.take(64);
+
+        assert_eq!(age, 0);
+        assert_eq!(pixels.len(), 64);
+    }
+
+    #[test]
+    fn the_pool_stops_growing_at_its_cap() {
+        let pool = BufferPool::new();
+
+        // More buffers in flight at once than a rotation ever needs.
+        let held: Vec<_> = (0..MAX_POOLED_BUFFERS + 2)
+            .map(|_| present(&pool, pool.take(4).0))
+            .collect();
+        for buffer in held {
+            pool.reclaim(buffer);
+        }
+
+        assert_eq!(pool.lock().available.len(), MAX_POOLED_BUFFERS);
     }
 }
