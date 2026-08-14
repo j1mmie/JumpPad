@@ -26,7 +26,8 @@ use std::mem::size_of;
 use std::num::NonZeroU32;
 use std::ops::Deref;
 use std::ptr::{self, slice_from_raw_parts_mut, NonNull};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 define_class!(
     #[unsafe(super(NSObject))]
@@ -104,6 +105,30 @@ impl Observer {
 /// the moments Core Animation holds one a little longer.
 const MAX_POOLED_BUFFERS: usize = 3;
 
+/// Whether `SOFTBUFFER_TRACE_AGE` asked for the ages `take` hands out.
+///
+/// `age` decides whether the caller can do damage tracking at all, and nothing
+/// outside this crate can observe it - a pool that silently misses every frame
+/// looks exactly like a working one from the application side, right down to
+/// the memory profile. Printing it is the only way to tell the two apart.
+fn age_tracing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SOFTBUFFER_TRACE_AGE").is_some())
+}
+
+/// Prints the first `TRACED_FRAMES` ages and then goes quiet - long enough to
+/// show the pool warming up and reaching a steady state, short enough not to
+/// drown the log or perturb what it is measuring.
+fn trace_age(age: u8, available: usize, held: usize) {
+    const TRACED_FRAMES: usize = 24;
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+    let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
+    if frame < TRACED_FRAMES {
+        eprintln!("softbuffer: frame {frame} age {age}, {available} pooled, {held} held by CG");
+    }
+}
+
 /// A buffer that Core Graphics has finished with, and the present its pixels
 /// came from.
 struct PooledBuffer {
@@ -180,20 +205,33 @@ impl BufferPool {
             .max_by_key(|(_, pooled)| pooled.presented_at)
             .map(|(index, _)| index);
 
-        let Some(index) = newest else {
-            return (util::PixelBuffer(vec![0; len]), 0);
+        let (pixels, age) = match newest {
+            Some(index) => {
+                let pooled = state.available.swap_remove(index);
+                // An age too small is the one dangerous answer: it points the
+                // caller at a more recent frame than this buffer actually
+                // holds, and it skips the difference. So an age that doesn't
+                // fit becomes `0` - undefined contents, repaint everything -
+                // rather than a clamp to `u8::MAX`. Only reachable if a buffer
+                // sits unused for 255 presents while others rotate, which
+                // `MAX_POOLED_BUFFERS` makes vanishingly unlikely.
+                let age =
+                    u8::try_from(state.presents.saturating_sub(pooled.presented_at)).unwrap_or(0);
+
+                (util::PixelBuffer(pooled.pixels.into_vec()), age)
+            }
+            None => (util::PixelBuffer(vec![0; len]), 0),
         };
 
-        let pooled = state.available.swap_remove(index);
-        // An age too small is the one dangerous answer: it points the caller
-        // at a more recent frame than this buffer actually holds, and it skips
-        // the difference. So an age that doesn't fit becomes `0` - undefined
-        // contents, repaint everything - rather than a clamp to `u8::MAX`.
-        // Only reachable if a buffer sits unused for 255 presents while others
-        // rotate, which `MAX_POOLED_BUFFERS` makes vanishingly unlikely.
-        let age = u8::try_from(state.presents.saturating_sub(pooled.presented_at)).unwrap_or(0);
+        if age_tracing_enabled() {
+            trace_age(
+                age,
+                state.available.len(),
+                state.held_by_core_graphics.len(),
+            );
+        }
 
-        (util::PixelBuffer(pooled.pixels.into_vec()), age)
+        (pixels, age)
     }
 
     /// Records that `pixels` is about to be handed to Core Graphics.
