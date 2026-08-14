@@ -175,39 +175,32 @@ Produces:
 
 ## Contributing
 
-The codebase leans hard on names doing the explaining. A few conventions
-worth knowing before you send a patch:
+### Naming
 
-**Names should stand on their own.** Files, types, functions and variables
-should tell you what they're for without you reading the body or a comment
-above them. Name the reason a thing exists rather than the machinery inside
-it, and skip metaphors - if a name needs a sentence of decoding, a plainer
-one is better. When a name needs a comment to explain it, that's a sign to
-rename it rather than to write the comment.
+- Make every file, type, function and variable name stand on its own.
+- Name why something exists, not what it does internally.
+- Avoid metaphors. A name that needs decoding is worse than a plain one.
+- Rename rather than explain. A name needing a comment is the wrong name.
 
-**Watch for things outgrowing their shape.** None of these are rules, just
-signals worth a second look:
+### Split it up when you see
 
-- A long file usually holds several responsibilities that want separating.
-- A long function usually wants its steps pulled out into named helpers.
-- Four or more levels of indentation almost always means a helper is hiding
-  in there.
-- A long comment, or a file thick with them, is usually a naming problem
-  rather than a documentation win.
+- A long file - it is holding several responsibilities.
+- A long function - pull its steps into named helpers.
+- Four or more levels of indentation - a helper is hiding in there.
+- A long comment - the name above it is not pulling its weight.
+- A file thick with comments - same, at scale.
 
-**Comments are judged by where they sit.** On a type they're welcome and can
-run long - describing what something is responsible for is the most useful
-comment there is. On a function they're fine when a nuance of the behaviour
-or an argument needs clarifying. Inside a function body is where to be
-sparing: a body that needs running commentary usually wants breaking into
-smaller, well-named pieces.
+### Comments
 
-Keep comments high level either way. If a detail is genuinely needed to
-understand the feature, explain it; otherwise describe it in plain English
-or leave it out.
+- Use comments sparingly and intentionally.
+- Comment types freely. Say what the type is responsible for. Length is fine.
+- Comment functions when an argument or a behaviour needs clarifying.
+  Length is fine.
+- Avoid comments inside function bodies. Break the body into named helpers
+  instead.
+- Keep comments high level. Skip details the reader has no context for.
 
-`AGENTS.md` covers the same ground in more depth, alongside the
-architecture notes and the list of things that will bite you.
+`AGENTS.md` covers the same ground in more depth.
 
 ## Status
 

@@ -63,7 +63,8 @@ past the shape it should be in:
 
 ## Comments
 
-Where a comment sits matters more than how long it is.
+Use comments sparingly and intentionally. Where one sits decides whether it
+belongs at all:
 
 - **On a type: welcome, and length is fine.** Describe what it is
   responsible for and why it exists. This is the most useful comment in the
