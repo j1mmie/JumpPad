@@ -173,6 +173,42 @@ Produces:
 - `target/x86_64-pc-windows-gnu/release/jumppad.exe`
 - `target/x86_64-pc-windows-gnu/release/jumppad-gpu.exe`
 
+## Contributing
+
+The codebase leans hard on names doing the explaining. A few conventions
+worth knowing before you send a patch:
+
+**Names should stand on their own.** Files, types, functions and variables
+should tell you what they're for without you reading the body or a comment
+above them. Name the reason a thing exists rather than the machinery inside
+it, and skip metaphors - if a name needs a sentence of decoding, a plainer
+one is better. When a name needs a comment to explain it, that's a sign to
+rename it rather than to write the comment.
+
+**Watch for things outgrowing their shape.** None of these are rules, just
+signals worth a second look:
+
+- A long file usually holds several responsibilities that want separating.
+- A long function usually wants its steps pulled out into named helpers.
+- Four or more levels of indentation almost always means a helper is hiding
+  in there.
+- A long comment, or a file thick with them, is usually a naming problem
+  rather than a documentation win.
+
+**Comments are judged by where they sit.** On a type they're welcome and can
+run long - describing what something is responsible for is the most useful
+comment there is. On a function they're fine when a nuance of the behaviour
+or an argument needs clarifying. Inside a function body is where to be
+sparing: a body that needs running commentary usually wants breaking into
+smaller, well-named pieces.
+
+Keep comments high level either way. If a detail is genuinely needed to
+understand the feature, explain it; otherwise describe it in plain English
+or leave it out.
+
+`AGENTS.md` covers the same ground in more depth, alongside the
+architecture notes and the list of things that will bite you.
+
 ## Status
 
 Early prototype.

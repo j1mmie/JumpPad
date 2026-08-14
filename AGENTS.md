@@ -27,15 +27,78 @@ The app was originally built on `egui` and ported to `iced`. Some comments
 in the codebase still reference `egui` behavior for contrast (e.g. "unlike
 egui's `ctx.request_repaint()`") - that's this history, not a mistake.
 
-## Comment style
+## Naming
 
-Comments stay short and sit right next to what they describe:
+Files, types, functions and variables all carry their own explanation. A
+reader should be able to tell what a thing is for without reading its body
+and without reading a comment above it.
 
-- High level, not step-by-step narration.
-- Placed at the thing's first declaration, not cross-referencing other files/areas unless truly necessary.
-- Short - no meandering.
-- Prefer a self-documenting name over a comment.
-- Skip the "why" (bug history, feature origin) unless it's a genuine non-obvious gotcha.
+Name the reason something exists, not the machinery inside it. `undo_depth`
+over `step_cap`, `close_open_burst` over `seal`.
+
+Two rules that follow from that:
+
+- **No metaphors.** A name that needs a sentence of decoding - "footprint",
+  "sticky note", "envelope" - is worse than a plain one, however apt it feels
+  while you are writing it.
+- **If a name needs a comment to explain it, the name is wrong.** Rename it
+  and delete the comment. Do this before reaching for either.
+
+## When to split something up
+
+None of these are hard limits. They are the signals that something has grown
+past the shape it should be in:
+
+- **A long file.** Usually several responsibilities sharing one file. Split
+  it into modules named for what each one is for.
+- **A long function.** Break the steps out into helpers whose names say what
+  each step accomplishes.
+- **Four or more levels of indentation.** Almost always a helper waiting to
+  be extracted; deep nesting usually means a decision is being made in the
+  wrong place.
+- **A long comment.** The name it sits above is not pulling its weight, or
+  the thing it describes is doing too much.
+- **A file thick with comments.** The same problem at scale. Read it as a
+  naming failure before you read it as documentation.
+
+## Comments
+
+Where a comment sits matters more than how long it is.
+
+- **On a type: welcome, and length is fine.** Describe what it is
+  responsible for and why it exists. This is the most useful comment in the
+  codebase and the one most worth writing well.
+- **On a function: fine when needed.** Can run past a few lines when it is
+  clarifying a nuance of the behaviour or of an argument.
+- **Inside a function body: the one to worry about.** A body that needs
+  running commentary is a body that wants splitting into named helpers. If
+  you find yourself narrating steps, extract them instead.
+
+Keep every comment high level. Do not reach for details the reader has no
+context for. If something is genuinely required to understand the feature,
+explain it; otherwise generalize it in plain English or leave it out.
+
+Bad - narrates mechanics, and props up a name that says nothing:
+
+```rust
+/// The whole lines an edit disturbed plus the exact bytes on either side.
+/// `between` finds one by trimming matching runs; `inverted` makes one
+/// footprint serve undo and redo alike.
+pub struct EditFootprint {
+```
+
+Good - the name carries the idea, the comment stays at the level of the
+feature:
+
+```rust
+/// A single delta of the text's content. Deltas are blocks of line
+/// differences.
+pub struct LineChange {
+```
+
+Two older rules still hold: put the comment at the thing's first
+declaration rather than cross-referencing other files, and skip bug history
+and feature origin unless it is a genuine non-obvious gotcha.
 
 ## Workspace layout
 
