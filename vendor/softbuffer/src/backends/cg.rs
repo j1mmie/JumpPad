@@ -116,16 +116,38 @@ fn age_tracing_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("SOFTBUFFER_TRACE_AGE").is_some())
 }
 
-/// Prints the first `TRACED_FRAMES` ages and then goes quiet - long enough to
-/// show the pool warming up and reaching a steady state, short enough not to
+/// How many frames the tracing below reports before going quiet - long enough
+/// to show the pool warm up and reach a steady state, short enough not to
 /// drown the log or perturb what it is measuring.
+const TRACED_FRAMES: usize = 24;
+
+/// Prints the first `TRACED_FRAMES` ages.
 fn trace_age(age: u8, available: usize, held: usize) {
-    const TRACED_FRAMES: usize = 24;
     static FRAMES: AtomicUsize = AtomicUsize::new(0);
 
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
     if frame < TRACED_FRAMES {
         eprintln!("softbuffer: frame {frame} age {age}, {available} pooled, {held} held by CG");
+    }
+}
+
+/// Prints how long `present` took, for the same frames `trace_age` covers.
+///
+/// This is what splits the per-frame cost in two. The caller has already
+/// rasterized into the buffer by the time `present` runs, so whatever is spent
+/// here is the cost of handing a finished frame to Core Animation - and unlike
+/// rasterization, no amount of damage tracking reduces it. A large number here
+/// means `age` is doing its job and the bottleneck is somewhere it cannot
+/// reach.
+fn trace_present(elapsed: std::time::Duration) {
+    static FRAMES: AtomicUsize = AtomicUsize::new(0);
+
+    let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
+    if frame < TRACED_FRAMES {
+        eprintln!(
+            "softbuffer: frame {frame} present {:.2}ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -491,6 +513,7 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
             pool.reclaim(pixels);
         }
 
+        let started = age_tracing_enabled().then(std::time::Instant::now);
         let pool = Arc::clone(&self.imp.pool);
 
         let data_provider = {
@@ -552,6 +575,11 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
         unsafe { self.imp.layer.setContents(Some(image.as_ref())) };
 
         CATransaction::commit();
+
+        if let Some(started) = started {
+            trace_present(started.elapsed());
+        }
+
         Ok(())
     }
 
