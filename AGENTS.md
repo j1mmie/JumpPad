@@ -1056,6 +1056,28 @@ Gotchas, all of them load-bearing:
   tab-switch nudge still repaints every buffer. If `MAX_POOLED_BUFFERS` ever
   grows past 4, raise it to match.
 
+**Measured on a Mac, and it works.** `SOFTBUFFER_TRACE_AGE=1` prints the age
+`take` hands out plus a split of each frame into drawing and presenting;
+`SOFTBUFFER_TRACE_FRAMES` raises the frame budget. At idle, with only the caret
+blinking:
+
+| | Before | After |
+| --- | --- | --- |
+| Drawing, 3/4-screen window | ~35ms | **0.02ms** |
+| Drawing, maximized | ~35ms | **0.02ms** |
+
+The number does not move with window area any more, which is the whole point -
+a caret blink damages a 1px-wide quad and now costs a 1px-wide quad. `present`
+sits at ~5ms and rises to ~16ms once the app settles; that 16ms is one frame at
+60Hz, i.e. `CATransaction::commit` waiting on vsync rather than burning CPU.
+
+**Gotcha - the idle plateau takes ~150 frames to arrive**, and at 2 blinks per
+second that is over a minute. A shorter sample catches the app mid-settle and
+reads as "damage tracking is not working" - which it did, twice, and cost
+several rounds of chasing a bug that was not there. There is also an
+intermediate plateau around 2.8ms before the final 0.02ms one; it has not been
+identified, and syntax highlighting's 50ms poll is the first suspect.
+
 **This does nothing for `jumppad-gpu`.** `iced_wgpu` has no damage tracking at
 all, and its cost is not per-pixel anyway - see the memory note below.
 
