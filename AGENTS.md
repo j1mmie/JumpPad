@@ -988,7 +988,7 @@ path, add it to that list. `-C target-cpu=x86-64-v3` would help further on Intel
 out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
 crash on older CPUs, and moot on Apple Silicon where NEON is baseline.
 
-## macOS: the vendored softbuffer fork (`vendor/softbuffer`)
+## macOS: the softbuffer fork (`j1mmie/softbuffer`)
 
 `iced_tiny_skia`'s `present` only diffs damage when it can identify the previous
 buffer, via `buffer.age()`; otherwise it falls back to
@@ -1004,28 +1004,31 @@ tiny-skia writes into it), and a full-window rasterization - 2.16M pixels to
 blink a caret. Windows and X11 return `1` once presented and get real diffing,
 so this was macOS-only.
 
-**The fix** (`vendor/softbuffer/src/backends/cg.rs`, `BufferPool`): recycle the
-allocations instead of freeing them, which is what makes an honest `age`
-possible, which is what lets `iced_tiny_skia` repaint only what moved. The
-mechanism was already sitting unused in the upstream code - `CGDataProvider`'s
-`info` pointer, passed as `ptr::null_mut()` and ignored by the release
-callback. The fork passes a leaked `Arc<BufferPool>` reference there, and the
-callback reclaims it and returns the buffer to the pool.
+**The fix** (`src/backends/cg.rs`, `BufferPool`): recycle the allocations
+instead of freeing them, which is what makes an honest `age` possible, which is
+what lets `iced_tiny_skia` repaint only what moved. The mechanism was already
+sitting unused in the upstream code - `CGDataProvider`'s `info` pointer, passed
+as `ptr::null_mut()` and ignored by the release callback. The fork passes a
+leaked `Arc<BufferPool>` reference there, and the callback reclaims it and
+returns the buffer to the pool.
 
-`src/backends/cg.rs` is the only *code* that differs from crates.io 0.4.8.
-Every other backend is byte-identical (the vendor drop is its own commit, so
-`git log` shows the fork's delta on its own), and the crate is wired in through
-`[patch.crates-io]` in the root `Cargo.toml`, with `vendor/softbuffer` in the
-workspace's `exclude` list since it is a patch target and not a member.
+The fork lives at `j1mmie/softbuffer`, branch `jumppad/buffer-pool`, wired in
+through `[patch.crates-io]` in the root `Cargo.toml` - same arrangement as the
+`iced_graphics` fork below, and branched from the `v0.4.8` release commit
+rather than `master` for the same reason: the patch has to keep satisfying the
+`^0.4` requirement `iced_tiny_skia` states.
 
-**Gotcha - one `README.md` doctest is `ignore`, and must stay that way.** The
-crate's docs are `#![doc = include_str!("../README.md")]`, and the example
+`src/backends/cg.rs` is the only file that differs, so every other platform
+compiles upstream's code untouched. Keep it that way - a change reaching into a
+second file is a signal to check whether it belongs upstream instead.
+
+**Gotcha - `cargo test` in that fork fails one doctest, and it is not ours.**
+The crate's docs are `#![doc = include_str!("../README.md")]`, and the example
 block there does `#[path = "../examples/utils/winit_app.rs"] mod winit_app;`
-while the published package sets `exclude = ["examples"]`. The file is not in
-the package, so `cargo test --doc` fails on a **pristine crates.io 0.4.8** the
-same way - reproduced directly, so don't attribute it to this fork or "fix" it
-by restoring `no_run`. Undoing it means vendoring the examples and the `winit`
-dev-dependency they need.
+while the published package sets `exclude = ["examples"]`. Reproduced against
+pristine crates.io 0.4.8 sources - same test, same line - so it predates this
+fork and is not worth fixing here. `cargo test --lib` runs the pool's own tests
+without it.
 
 **The rotation settles at two buffers, so `age` settles at 2.** Core Graphics
 holds the frame on screen until the layer takes the next one, so a buffer is
