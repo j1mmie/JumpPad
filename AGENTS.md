@@ -1082,9 +1082,11 @@ surfaced it.
 
 **To re-enable:** teach that `PartialEq` to compare
 `buffer_from_editor(&self.editor).scroll()` too, in the `j1mmie/iced` fork this
-workspace already patches `iced_graphics` from, then return `self.age` from
-`BufferImpl::age` and re-run the trace. That may also make `redraw_nudge`
-unnecessary, since it exists to work around the same comparison.
+workspace already patches `iced_graphics` from. Then set
+`SOFTBUFFER_DAMAGE_TRACKING=1`, which makes `age` report the real number
+without a rebuild, and check that scrolling is clean before making it the
+default. That fix may also retire `redraw_nudge`, which exists to work around
+the same comparison.
 
 The recycling half of this fork is unaffected and still pays for itself. It was
 always two wins; only the second one is blocked.
@@ -1093,21 +1095,24 @@ One number worth not re-deriving: `present` sits at ~5ms and rises to ~16ms
 once the app settles. That 16ms is one frame at 60Hz - `CATransaction::commit`
 waiting on vsync, not CPU being spent.
 
-**Gotcha - the idle plateau takes ~150 frames to arrive**, and at 2 blinks per
-second that is over a minute. A shorter sample catches the app mid-settle and
-reads as "damage tracking is not working" - which it did, twice, and cost
-several rounds of chasing a bug that was not there. There is also an
-intermediate plateau around 2.8ms before the final 0.02ms one; it has not been
-identified, and syntax highlighting's 50ms poll is the first suspect.
+**Gotcha for whoever re-runs this - the idle plateau takes ~150 frames to
+arrive**, and at 2 blinks per second that is over a minute. A shorter sample
+catches the app mid-settle and reads as "damage tracking is not working" -
+which it did, twice, and cost several rounds of chasing a bug that was not
+there. There is also an intermediate plateau around 2.8ms before the final
+0.02ms one; it has not been identified, and syntax highlighting's 50ms poll is
+the first suspect.
 
 **This does nothing for `jumppad-gpu`.** `iced_wgpu` has no damage tracking at
 all, and its cost is not per-pixel anyway - see the memory note below.
 
 One consequence for the "zero idle CPU" goal in `README.md`: it holds for
-JumpPad's *scheduling* (see the scrollbar's `next_redraw`), and the 500ms caret
-blink now costs two caret-sized repaints per second rather than two full-window
-ones. It is still two presents per second for as long as the window is focused,
-which is what the memory note below is about.
+JumpPad's *scheduling* (see the scrollbar's `next_redraw`), but with `age`
+reporting `0` the 500ms caret blink still costs two full-window repaints per
+second whenever the window is focused. Shrinking those to caret-sized is
+exactly what the blocked half of this fork would buy. Either way it is two
+presents per second for as long as the window is focused, which is what the
+memory note below is about.
 
 ## macOS: what the memory numbers actually mean
 

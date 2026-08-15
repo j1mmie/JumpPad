@@ -116,6 +116,17 @@ fn age_tracing_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("SOFTBUFFER_TRACE_AGE").is_some())
 }
 
+/// Whether `SOFTBUFFER_DAMAGE_TRACKING` asked `age` for the real number
+/// instead of the `0` it reports by default.
+///
+/// Only useful once `iced_graphics`'s editor comparison can see a scroll - see
+/// `BufferImpl::age` for why it cannot today. It exists so that checking a fix
+/// to that comparison is a run rather than a rebuild.
+fn damage_tracking_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("SOFTBUFFER_DAMAGE_TRACKING").is_some())
+}
+
 /// How many frames the tracing below reports before going quiet, overridable
 /// with `SOFTBUFFER_TRACE_FRAMES`.
 ///
@@ -553,13 +564,16 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
     ///
     /// **To re-enable:** teach that `PartialEq` to compare
     /// `buffer_from_editor(&self.editor).scroll()` as well, in the
-    /// `j1mmie/iced` fork this workspace already patches `iced_graphics` from.
-    /// Then return `self.age` here and re-run the trace. Until then the
-    /// recycling below still pays for itself - it was always two wins, and
-    /// only this one is blocked.
+    /// `j1mmie/iced` fork this workspace already patches `iced_graphics` from,
+    /// then set `SOFTBUFFER_DAMAGE_TRACKING` to check the result without a
+    /// rebuild. Until then the recycling below still pays for itself - it was
+    /// always two wins, and only this one is blocked.
     fn age(&self) -> u8 {
-        let _ = self.age;
-        0
+        if damage_tracking_enabled() {
+            self.age
+        } else {
+            0
+        }
     }
 
     fn present(self) -> Result<(), SoftBufferError> {
