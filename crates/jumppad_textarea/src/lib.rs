@@ -1,4 +1,5 @@
 mod comment;
+pub mod font;
 mod history;
 mod lines;
 mod safe_area;
@@ -56,6 +57,12 @@ pub struct SharedEditorConfig {
     scroll_sensitivity: AtomicU32,
     /// Clamped by `History::set_depth`, not here.
     undo_depth: AtomicUsize,
+    /// The typeface documents are drawn in. Behind a lock rather than in an
+    /// atomic because a [`Font`] is four fields wide; swappable because a
+    /// `config.toml` reload has to reach tabs that already exist.
+    font: RwLock<Font>,
+    /// `f32` bits, as above. Clamped by [`font::clamp_size`] on the way in.
+    font_size: AtomicU32,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole resolver. Swappable because a `keybinds.toml` reload
     /// has to reach tabs that already exist.
@@ -73,6 +80,8 @@ impl SharedEditorConfig {
             ),
             scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
             undo_depth: AtomicUsize::new(history::DEFAULT_DEPTH),
+            font: RwLock::new(Font::MONOSPACE),
+            font_size: AtomicU32::new(font::DEFAULT_SIZE.to_bits()),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
         })
@@ -110,6 +119,26 @@ impl SharedEditorConfig {
 
     pub fn set_undo_depth(&self, depth: usize) {
         self.undo_depth.store(depth, Ordering::Relaxed);
+    }
+
+    /// The typeface documents are drawn in. `Font::MONOSPACE` - the
+    /// system's own monospace face - until a config names another.
+    pub fn font(&self) -> Font {
+        *self.font.read().unwrap()
+    }
+
+    pub fn set_font(&self, font: Font) {
+        *self.font.write().unwrap() = font;
+    }
+
+    /// The height of the editor's text in pixels.
+    pub fn font_size(&self) -> f32 {
+        f32::from_bits(self.font_size.load(Ordering::Relaxed))
+    }
+
+    pub fn set_font_size(&self, size: f32) {
+        self.font_size
+            .store(font::clamp_size(size).to_bits(), Ordering::Relaxed);
     }
 
     /// Routed through here so settings have one mutation API, but stored in
@@ -639,7 +668,8 @@ impl TextEditorWidget for TextArea {
                 editor_core::EDITOR_WIDGET_ID,
             ))
             .placeholder("")
-            .font(Font::MONOSPACE)
+            .font(self.settings.font())
+            .size(self.settings.font_size())
             .height(Fill)
             .scroll_sensitivity(self.settings.scroll_sensitivity())
             .style(move |theme, status| {

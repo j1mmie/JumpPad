@@ -15,8 +15,8 @@ use iced::widget::{
     scrollable, stack, text, text_input,
 };
 use iced::{
-    Center, Color, Element, Fill, Pixels, Point, Right, Subscription, Task,
-    Theme, Top, keyboard,
+    Center, Color, Element, Fill, Font, Pixels, Point, Right, Subscription,
+    Task, Theme, Top, keyboard,
 };
 
 use jumppad_actions::{Action, Context};
@@ -414,6 +414,8 @@ impl JumpPadApp {
         editor_config.set_foreground_alpha(config.alpha.foreground);
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
         editor_config.set_undo_depth(config.history.depth);
+        editor_config.set_font(resolve_font(config.font.family.as_deref()));
+        editor_config.set_font_size(config.font.size);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
@@ -1213,6 +1215,15 @@ impl JumpPadApp {
         // No repaint: tabs read the new depth on their next edit.
         if new.history.depth != current.history.depth {
             self.editor_config.set_undo_depth(new.history.depth);
+        }
+
+        // Live: an editor handed a font or a size it wasn't drawing with
+        // reshapes every line it holds, open tabs included.
+        if new.font != current.font {
+            self.editor_config
+                .set_font(resolve_font(new.font.family.as_deref()));
+            self.editor_config.set_font_size(new.font.size);
+            repaint = true;
         }
 
         // One [[languages]] edit can feed two consumers, so diff the derived
@@ -2918,6 +2929,25 @@ fn resolve_theme(name: &str) -> Theme {
     }
 }
 
+/// Matches a config-file font family against the families installed on this
+/// machine, case-insensitively so hand-edited TOML doesn't have to get the
+/// exact casing right. Falls back to the system's monospace face - and logs
+/// why - rather than letting a name nothing provides draw the document in
+/// whatever face the platform substitutes, which is rarely a monospaced one.
+fn resolve_font(family: Option<&str>) -> Font {
+    let Some(name) = family.map(str::trim).filter(|name| !name.is_empty())
+    else {
+        return Font::MONOSPACE;
+    };
+
+    jumppad_textarea::font::installed(name).unwrap_or_else(|| {
+        eprintln!(
+            "jumppad: font family {name:?} isn't installed, using the default monospace font"
+        );
+        Font::MONOSPACE
+    })
+}
+
 /// Where syntax-highlighting wasm grammars (`<extension>.wasm`) are looked for.
 fn default_search_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
@@ -4169,6 +4199,47 @@ mod tests {
         app.apply_config(config);
         assert_eq!(app.background_alpha, 0.5);
         assert_eq!(app.editor_config.background_alpha(), 0.5);
+    }
+
+    /// No family here, so the assertions stay off the machine's installed
+    /// fonts - `resolve_font` only consults them for a family that names
+    /// something, and a test box need not have the one it named.
+    #[test]
+    fn apply_config_reaches_the_shared_text_size() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            font: jumppad_config::FontConfig {
+                family: None,
+                size: 22.0,
+            },
+            ..Default::default()
+        };
+
+        app.apply_config(config);
+        assert_eq!(app.editor_config.font_size(), 22.0);
+        assert_eq!(app.editor_config.font(), Font::MONOSPACE);
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+    }
+
+    #[test]
+    fn an_unreadable_configured_text_size_is_clamped_not_obeyed() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            font: jumppad_config::FontConfig {
+                family: None,
+                size: 0.0,
+            },
+            ..Default::default()
+        };
+
+        app.apply_config(config);
+        assert!(app.editor_config.font_size() >= 4.0);
+    }
+
+    #[test]
+    fn a_blank_configured_family_is_the_system_monospace_font() {
+        assert_eq!(resolve_font(None), Font::MONOSPACE);
+        assert_eq!(resolve_font(Some("   ")), Font::MONOSPACE);
     }
 
     fn language(

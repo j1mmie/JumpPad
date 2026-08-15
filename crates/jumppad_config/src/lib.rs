@@ -24,6 +24,7 @@ pub struct Config {
     pub scroll: ScrollConfig,
     pub history: HistoryConfig,
     pub files: FilesConfig,
+    pub font: FontConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -239,6 +240,40 @@ impl SaveConflictResolution {
         matches!(self, Self::Ask)
     }
 }
+
+/// The typeface and text size the editor draws documents with.
+///
+/// `family` names a font family already installed on the machine, spelled
+/// the way the system lists it (`"JetBrains Mono"`, `"Cascadia Code"`);
+/// leaving it out draws with whatever the system offers as its monospace
+/// font, which is what JumpPad has always done. Nothing here is loaded from
+/// a file - a family the machine doesn't have is reported at startup and
+/// ignored.
+///
+/// `size` is the height of the editor's text in pixels before any per-window
+/// zoom. Both are matched and clamped where applied, not here, so this crate
+/// doesn't need an `iced` dependency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    pub size: f32,
+}
+
+impl Default for FontConfig {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+/// The editor's text size when `config.toml` doesn't name one. Matches
+/// iced's own default text size, so an absent `[font] size` draws exactly
+/// what JumpPad drew before the setting existed.
+pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -558,6 +593,39 @@ mod tests {
             "#,
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_config_with_no_font_section_keeps_the_default_typeface_and_size() {
+        let config: Config = toml::from_str(r#"theme = "Dracula""#).unwrap();
+        assert_eq!(config.font, FontConfig::default());
+        assert_eq!(config.font.family, None);
+        assert_eq!(config.font.size, DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn a_font_section_can_name_a_family_a_size_or_just_one_of_them() {
+        let config: Config = toml::from_str(
+            r#"
+            [font]
+            family = "JetBrains Mono"
+            size = 18.0
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.font.family.as_deref(), Some("JetBrains Mono"));
+        assert_eq!(config.font.size, 18.0);
+
+        let size_only: Config = toml::from_str("[font]\nsize = 13.5").unwrap();
+        assert_eq!(size_only.font.family, None);
+        assert_eq!(size_only.font.size, 13.5);
+    }
+
+    #[test]
+    fn an_unnamed_family_is_left_out_of_the_written_default_file() {
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(written.contains("[font]"));
+        assert!(!written.contains("family"));
     }
 
     #[test]

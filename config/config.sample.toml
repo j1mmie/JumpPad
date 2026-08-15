@@ -32,6 +32,19 @@ sensitivity = 1.0
 # skips the check and always writes. Applies live - no restart needed.
 save_conflict_resolution = "ask"
 
+[font]
+# The font family the editor draws documents in, spelled the way your system
+# lists it ("JetBrains Mono", "Cascadia Code", "SF Mono"). It has to be
+# installed already - JumpPad loads no font files of its own - and a family
+# nothing on the machine provides logs a line and falls back to the default.
+# Leave it out for the system's own monospace font. Applies live - no restart
+# needed.
+# family = "JetBrains Mono"
+
+# Height of the editor's text in pixels. Clamped to 4..=200, so a typo
+# leaves the text readable. Applies live - no restart needed.
+size = 16.0
+
 # Each [[languages]] entry maps file extensions to a syntax (its .wasm
 # grammar) and a toggle-comment style. Replaces the built-in list wholesale.
 
