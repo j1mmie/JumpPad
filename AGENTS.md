@@ -708,7 +708,8 @@ two `[[bin]]` entries). This produces two binaries from the same
 `jumppad` package:
 
 - `jumppad` - `tiny-skia` (default), pure software, ~22MB idle vs. ~146MB
-  for `wgpu` in this app.
+  for `wgpu` in this app. Neither figure was measured on macOS and neither
+  describes it - see "what the memory numbers actually mean" below.
 - `jumppad-gpu` - `wgpu`, hardware-accelerated.
 
 Each `[[bin]]` has `required-features` set to the matching Cargo feature,
@@ -987,29 +988,194 @@ path, add it to that list. `-C target-cpu=x86-64-v3` would help further on Intel
 out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
 crash on older CPUs, and moot on Apple Silicon where NEON is baseline.
 
-## macOS: softbuffer disables damage tracking entirely
+## macOS: the softbuffer fork (`j1mmie/softbuffer`)
 
 `iced_tiny_skia`'s `present` only diffs damage when it can identify the previous
 buffer, via `buffer.age()`; otherwise it falls back to
 `vec![Rectangle::with_size(viewport.logical_size())]` - the whole window.
-**softbuffer's CoreGraphics backend hardcodes `age() -> 0`**
-(`src/backends/cg.rs`), because it has nothing to age: it allocates a fresh
-zeroed framebuffer every frame and hands it to a `CGDataProvider`.
+**Upstream softbuffer's CoreGraphics backend hardcodes `age() -> 0`**, because
+it has nothing to age: `buffer_mut` allocates a fresh zeroed `Vec<u32>` every
+frame and hands it to a `CGDataProvider`, which frees it once the layer's
+contents move on.
 
-So on macOS there is no damage tracking. Per-frame cost is proportional to
-**window area, not to what changed**, and a maximized Retina window is the worst
-case. Selection drags and scrolling show it first, since both redraw in bursts -
-one per mouse-move and one per wheel step. Windows and X11 return `1` once
-presented and do get real diffing, so this is macOS-only.
+That cost two things on every frame, however little had changed: an 8MB
+allocation at a Retina window size (mapped fresh, so ~528 page faults as
+tiny-skia writes into it), and a full-window rasterization - 2.16M pixels to
+blink a caret. Windows and X11 return `1` once presented and get real diffing,
+so this was macOS-only.
 
-Fixing it means forking softbuffer for buffer reuse plus a real `age()`. That is
-the next big lever if the renderer still feels slow; nothing in JumpPad can work
-around it.
+**The fix** (`src/backends/cg.rs`, `BufferPool`): recycle the allocations
+instead of freeing them, which is what makes an honest `age` possible, which is
+what lets `iced_tiny_skia` repaint only what moved. The mechanism was already
+sitting unused in the upstream code - `CGDataProvider`'s `info` pointer, passed
+as `ptr::null_mut()` and ignored by the release callback. The fork passes a
+leaked `Arc<BufferPool>` reference there, and the callback reclaims it and
+returns the buffer to the pool.
+
+The fork lives at `j1mmie/softbuffer`, branch `jumppad/buffer-pool`, wired in
+through `[patch.crates-io]` in the root `Cargo.toml` - same arrangement as the
+`iced_graphics` fork below, and branched from the `v0.4.8` release commit
+rather than `master` for the same reason: the patch has to keep satisfying the
+`^0.4` requirement `iced_tiny_skia` states.
+
+`src/backends/cg.rs` is the only file that differs, so every other platform
+compiles upstream's code untouched. Keep it that way - a change reaching into a
+second file is a signal to check whether it belongs upstream instead.
+
+**Gotcha - `cargo test` in that fork fails one doctest, and it is not ours.**
+The crate's docs are `#![doc = include_str!("../README.md")]`, and the example
+block there does `#[path = "../examples/utils/winit_app.rs"] mod winit_app;`
+while the published package sets `exclude = ["examples"]`. Reproduced against
+pristine crates.io 0.4.8 sources - same test, same line - so it predates this
+fork and is not worth fixing here. `cargo test --lib` runs the pool's own tests
+without it.
+
+**The rotation settles at two buffers, so `age` settles at 2.** Core Graphics
+holds the frame on screen until the layer takes the next one, so a buffer is
+never free the frame after it went out: frame N's buffer comes back during
+frame N+1's present and is reused for frame N+2. `MAX_POOLED_BUFFERS` is 3 -
+two for the rotation, one of slack for when Core Animation holds one longer.
+Unit tests in that file pin the arithmetic, `the_rotation_settles_at_two_buffers`
+most directly. They are `cfg(target_vendor = "apple")` along with the rest of
+the module, so they only run on a Mac.
+
+Gotchas, all of them load-bearing:
+
+- **A recycled buffer must not be zeroed.** Its stale pixels are the entire
+  point - `age` promises the caller they survived, and the caller draws only
+  the damage on top of them. Zeroing while reporting a non-zero age would show
+  a window with holes in it.
+- **Too small an age is the dangerous direction, not too large.** It points the
+  caller at a more recent frame than the buffer actually holds and skips the
+  difference; too large only costs redundant drawing. So an age that overflows
+  `u8` reports `0` (undefined, repaint everything) rather than clamping.
+- **`reclaim` removes the pointer from `held_by_core_graphics` before the
+  size check**, so a buffer retired by a resize still clears its entry. Leaving
+  it would strand a stale present index under an address the allocator can hand
+  out again.
+- **The release callback can run on any thread.** Core Graphics gives no
+  guarantee about which, hence the `Mutex` rather than a `RefCell`.
+- **`REDRAW_NUDGE_FRAMES` is 4**, comfortably above the rotation depth, so the
+  tab-switch nudge still repaints every buffer. If `MAX_POOLED_BUFFERS` ever
+  grows past 4, raise it to match.
+
+**Gotcha - `age` deliberately reports `0` today, and the reason is not in this
+crate.** The pool tracks the real age correctly and reporting it works
+spectacularly on the numbers: measured with `SOFTBUFFER_TRACE_AGE=1` (plus
+`SOFTBUFFER_TRACE_FRAMES` to raise the frame budget), idle drawing fell from
+~35ms to **0.02ms**, at both a 3/4-screen and a maximized window - it stopped
+scaling with window area at all, which was the entire point.
+
+It also renders incorrectly, so it is off.
+
+`iced_graphics::text::editor::Internal`'s `PartialEq` compares font, bounds and
+line metrics, and nothing else. **Scrolling changes none of them**, so a
+scrolled editor compares equal to its own previous frame and contributes no
+damage at all. Whatever those unrepainted regions held stays there and
+successive frames pile up inside them - a strip of superimposed text above and
+below the editor, refreshed on every caret blink. There is no other field to
+lean on: `Internal::version` is the *font system's* version, which only moves
+when fonts load.
+
+This is the same upstream defect recorded below against tab switching, and it
+has presumably always affected scrolling on Windows and X11, whose softbuffer
+backends report a real age. macOS was accidentally immune only because
+upstream's `age` was hardcoded to `0` - turning damage tracking on is what
+surfaced it.
+
+**To re-enable:** teach that `PartialEq` to compare
+`buffer_from_editor(&self.editor).scroll()` too, in the `j1mmie/iced` fork this
+workspace already patches `iced_graphics` from. Then set
+`SOFTBUFFER_DAMAGE_TRACKING=1`, which makes `age` report the real number
+without a rebuild, and check that scrolling is clean before making it the
+default. That fix may also retire `redraw_nudge`, which exists to work around
+the same comparison.
+
+The recycling half of this fork is unaffected and still pays for itself. It was
+always two wins; only the second one is blocked.
+
+One number worth not re-deriving: `present` sits at ~5ms and rises to ~16ms
+once the app settles. That 16ms is one frame at 60Hz - `CATransaction::commit`
+waiting on vsync, not CPU being spent.
+
+**Gotcha for whoever re-runs this - the idle plateau takes ~150 frames to
+arrive**, and at 2 blinks per second that is over a minute. A shorter sample
+catches the app mid-settle and reads as "damage tracking is not working" -
+which it did, twice, and cost several rounds of chasing a bug that was not
+there. There is also an intermediate plateau around 2.8ms before the final
+0.02ms one; it has not been identified, and syntax highlighting's 50ms poll is
+the first suspect.
+
+**This does nothing for `jumppad-gpu`.** `iced_wgpu` has no damage tracking at
+all, and its cost is not per-pixel anyway - see the memory note below.
 
 One consequence for the "zero idle CPU" goal in `README.md`: it holds for
-JumpPad's *scheduling* (see the scrollbar's `next_redraw`), but on macOS the
-500ms caret blink costs two full-window repaints per second whenever the window
-is focused.
+JumpPad's *scheduling* (see the scrollbar's `next_redraw`), but with `age`
+reporting `0` the 500ms caret blink still costs two full-window repaints per
+second whenever the window is focused. Shrinking those to caret-sized is
+exactly what the blocked half of this fork would buy. Either way it is two
+presents per second for as long as the window is focused, which is what the
+memory note below is about.
+
+## macOS: what the memory numbers actually mean
+
+Measured with `vmmap --summary`, which is what Activity Monitor's "Memory"
+column reports (`phys_footprint`). Numbers from a 900x600 window at 2x on
+macOS 15.7.
+
+`jumppad-gpu` reads ~530MB focused and ~75MB unfocused. **95% of the focused
+figure is the Metal driver's own arena, not JumpPad**: `IOAccelerator
+(graphics)` alone is 456MB across ~146 regions, of which 360MB is marked
+`VOLATILE` - discardable by the kernel on demand. JumpPad's actual heap across
+every malloc zone is ~14MB, and `Writable regions: written` is ~17MB.
+
+Three things follow, and each has been mistaken for a bug at least once:
+
+- **The mapped driver is not in the footprint.** `__TEXT` is 1.0G virtual and
+  663MB resident but **0K dirty**; clean file-backed pages do not count. That
+  is why RSS reads 1.4G while the footprint reads 530MB.
+- **The arena is held while the app presents frames, not while it is focused.**
+  Terminal.app, with cursor blinking off (its default), sits at ~100MB; turn
+  blinking on and it holds ~419MB. Same mechanism, same driver. JumpPad blinks
+  unconditionally, so it never reaches the quiet state.
+- **A comparison against TextEdit is not like-for-like.** TextEdit never
+  creates an `MTLDevice`, so it pays none of this. The fair comparison for
+  `jumppad-gpu` is Terminal at ~392MB.
+
+So the GPU build's memory is a fixed driver cost plus ~75MB of JumpPad, and the
+only lever that would move it is not presenting frames when nothing changed -
+i.e. stopping the caret blink after an idle period. That is a deliberate
+behaviour change and has not been made.
+
+**The software build is 55.5MB, and 60% of it is the window's own pixels.**
+Same window, same machine. Every row below is `vmmap` dirty size, and they sum
+to the reported footprint:
+
+| What | Dirty | Share |
+| --- | --- | --- |
+| Frame buffers - `MALLOC_LARGE` 16.5M live, 8.26M freed-but-charged | 24.8M | 45% |
+| CoreAnimation's own copy of the presented frame | 8.5M | 15% |
+| Heap - document text, undo history, spans, widget state | 14.7M | 27% |
+| Private writable data from ~950 loaded libraries | 3.7M | 7% |
+| Page tables, stacks, ColorSync, CoreUI, misc | 3.9M | 7% |
+
+Three things worth knowing before optimising against this:
+
+- **`MALLOC_LARGE` is exactly two regions of 8.24MiB**, which is 1800x1200x4 -
+  the pool, visible in the allocator. It scales with window area and Retina
+  scale, so a maximised 5K window moves this number a lot and nothing else on
+  the list moves at all.
+- **CoreAnimation copies the frame.** 8752K here against 288K on the GPU build,
+  a difference of exactly one buffer. Presenting through `setContents` with a
+  `CGImage` appears to cost a CA-side copy. Avoiding it means presenting an
+  `IOSurface`-backed layer instead, which is a much larger softbuffer change
+  than the pool was.
+- **`MAX_POOLED_BUFFERS = 3` costs 8.26MB**, 15% of the whole footprint - the
+  peak footprint of 63.8M against 55.5M current is that third buffer, allocated
+  once and since freed with its pages still charged. Dropping the cap to 2 is a
+  one-line change, but do not make it before confirming the pool still reaches
+  a non-zero `age`; two buffers is the exact rotation depth, with no slack for
+  Core Animation holding one longer.
 
 ## Known upstream rendering bug (tiny-skia + tab switching)
 

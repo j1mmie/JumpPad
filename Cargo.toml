@@ -63,6 +63,20 @@ jumppad_keybinds = { path = "crates/jumppad_keybinds" }
 # that don't unify, and a wall of "expected X, found X". They carry no changes
 # of ours; they are byte-identical to the 0.14.0 tag.
 [patch.crates-io]
+# `softbuffer` 0.4.8 with its CoreGraphics backend recycling frame buffers
+# instead of allocating a fresh zeroed one per frame - 8MB and ~528 page
+# faults per frame at a Retina window size. That also makes an honest
+# `Buffer::age` possible, which is what would let `iced_tiny_skia` repaint
+# only what changed; upstream hardcodes `age() -> 0`, so it repaints the whole
+# window every frame. See AGENTS.md, including why the age half is currently
+# switched off.
+#
+# Branched from the `v0.4.8` release commit, not `master`, for the same reason
+# `iced_graphics` below is branched from its tag: a patch has to keep
+# satisfying the `^0.4` requirement `iced_tiny_skia` states, or Cargo refuses
+# it. `src/backends/cg.rs` is the only file that differs, so every other
+# platform compiles upstream's code untouched.
+softbuffer = { git = "https://github.com/j1mmie/softbuffer", branch = "jumppad/buffer-pool" }
 iced_graphics = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
 iced_core = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
 iced_futures = { git = "https://github.com/j1mmie/iced", branch = "jumppad/fractional-scroll" }
