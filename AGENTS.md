@@ -1056,20 +1056,42 @@ Gotchas, all of them load-bearing:
   tab-switch nudge still repaints every buffer. If `MAX_POOLED_BUFFERS` ever
   grows past 4, raise it to match.
 
-**Measured on a Mac, and it works.** `SOFTBUFFER_TRACE_AGE=1` prints the age
-`take` hands out plus a split of each frame into drawing and presenting;
-`SOFTBUFFER_TRACE_FRAMES` raises the frame budget. At idle, with only the caret
-blinking:
+**Gotcha - `age` deliberately reports `0` today, and the reason is not in this
+crate.** The pool tracks the real age correctly and reporting it works
+spectacularly on the numbers: measured with `SOFTBUFFER_TRACE_AGE=1` (plus
+`SOFTBUFFER_TRACE_FRAMES` to raise the frame budget), idle drawing fell from
+~35ms to **0.02ms**, at both a 3/4-screen and a maximized window - it stopped
+scaling with window area at all, which was the entire point.
 
-| | Before | After |
-| --- | --- | --- |
-| Drawing, 3/4-screen window | ~35ms | **0.02ms** |
-| Drawing, maximized | ~35ms | **0.02ms** |
+It also renders incorrectly, so it is off.
 
-The number does not move with window area any more, which is the whole point -
-a caret blink damages a 1px-wide quad and now costs a 1px-wide quad. `present`
-sits at ~5ms and rises to ~16ms once the app settles; that 16ms is one frame at
-60Hz, i.e. `CATransaction::commit` waiting on vsync rather than burning CPU.
+`iced_graphics::text::editor::Internal`'s `PartialEq` compares font, bounds and
+line metrics, and nothing else. **Scrolling changes none of them**, so a
+scrolled editor compares equal to its own previous frame and contributes no
+damage at all. Whatever those unrepainted regions held stays there and
+successive frames pile up inside them - a strip of superimposed text above and
+below the editor, refreshed on every caret blink. There is no other field to
+lean on: `Internal::version` is the *font system's* version, which only moves
+when fonts load.
+
+This is the same upstream defect recorded below against tab switching, and it
+has presumably always affected scrolling on Windows and X11, whose softbuffer
+backends report a real age. macOS was accidentally immune only because
+upstream's `age` was hardcoded to `0` - turning damage tracking on is what
+surfaced it.
+
+**To re-enable:** teach that `PartialEq` to compare
+`buffer_from_editor(&self.editor).scroll()` too, in the `j1mmie/iced` fork this
+workspace already patches `iced_graphics` from, then return `self.age` from
+`BufferImpl::age` and re-run the trace. That may also make `redraw_nudge`
+unnecessary, since it exists to work around the same comparison.
+
+The recycling half of this fork is unaffected and still pays for itself. It was
+always two wins; only the second one is blocked.
+
+One number worth not re-deriving: `present` sits at ~5ms and rises to ~16ms
+once the app settles. That 16ms is one frame at 60Hz - `CATransaction::commit`
+waiting on vsync, not CPU being spent.
 
 **Gotcha - the idle plateau takes ~150 frames to arrive**, and at 2 blinks per
 second that is over a minute. A shorter sample catches the app mid-settle and

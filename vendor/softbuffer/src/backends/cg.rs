@@ -528,8 +528,38 @@ impl<D: HasDisplayHandle, W: HasWindowHandle> BufferInterface for BufferImpl<'_,
         &mut self.buffer
     }
 
+    /// Reports `0` - undefined contents - rather than the real age, so that
+    /// callers repaint the whole window.
+    ///
+    /// The pool tracks the true age correctly (`BufferPool::take`, and the
+    /// tests below pin the arithmetic), and reporting it does make
+    /// `iced_tiny_skia` skip most of its drawing: idle repaints measured
+    /// 0.02ms against ~35ms. It also renders incorrectly, because iced cannot
+    /// currently tell it what actually changed.
+    ///
+    /// `iced_graphics::text::editor::Internal`'s `PartialEq` compares font,
+    /// bounds and line metrics - and nothing else. Scrolling changes none of
+    /// them, so a scrolled editor compares *equal* to its own previous frame
+    /// and contributes no damage. The regions the caller then never repaints
+    /// keep whatever they held, and successive frames pile up in them: a strip
+    /// of superimposed text at the top and bottom of the editor, refreshed on
+    /// every caret blink. `Internal` has no field that would help, either -
+    /// its `version` is the font system's, which only moves when fonts load.
+    ///
+    /// This is the same upstream defect AGENTS.md records against tab
+    /// switching, and it has presumably always affected scrolling on Windows
+    /// and X11, whose backends report a real age. macOS was accidentally
+    /// immune only because upstream's `age` was hardcoded to `0`.
+    ///
+    /// **To re-enable:** teach that `PartialEq` to compare
+    /// `buffer_from_editor(&self.editor).scroll()` as well, in the
+    /// `j1mmie/iced` fork this workspace already patches `iced_graphics` from.
+    /// Then return `self.age` here and re-run the trace. Until then the
+    /// recycling below still pays for itself - it was always two wins, and
+    /// only this one is blocked.
     fn age(&self) -> u8 {
-        self.age
+        let _ = self.age;
+        0
     }
 
     fn present(self) -> Result<(), SoftBufferError> {
