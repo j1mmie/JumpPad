@@ -116,17 +116,31 @@ fn age_tracing_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("SOFTBUFFER_TRACE_AGE").is_some())
 }
 
-/// How many frames the tracing below reports before going quiet - long enough
-/// to show the pool warm up and reach a steady state, short enough not to
-/// drown the log or perturb what it is measuring.
-const TRACED_FRAMES: usize = 24;
+/// How many frames the tracing below reports before going quiet, overridable
+/// with `SOFTBUFFER_TRACE_FRAMES`.
+///
+/// The default is enough to watch the pool warm up and settle. Raise it when
+/// whatever is being measured only begins after some setup: dragging the
+/// window to the size under test burns frames before the steady state starts,
+/// and a hand-drag burns far more of them than a keyboard-driven resize.
+fn traced_frames() -> usize {
+    const DEFAULT_TRACED_FRAMES: usize = 24;
+    static FRAMES: OnceLock<usize> = OnceLock::new();
 
-/// Prints the first `TRACED_FRAMES` ages.
+    *FRAMES.get_or_init(|| {
+        std::env::var("SOFTBUFFER_TRACE_FRAMES")
+            .ok()
+            .and_then(|frames| frames.parse().ok())
+            .unwrap_or(DEFAULT_TRACED_FRAMES)
+    })
+}
+
+/// Prints the age handed out, for as many frames as `traced_frames` allows.
 fn trace_age(age: u8, available: usize, held: usize) {
     static FRAMES: AtomicUsize = AtomicUsize::new(0);
 
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
-    if frame < TRACED_FRAMES {
+    if frame < traced_frames() {
         eprintln!("softbuffer: frame {frame} age {age}, {available} pooled, {held} held by CG");
     }
 }
@@ -142,7 +156,7 @@ fn trace_draw(elapsed: std::time::Duration) {
     static FRAMES: AtomicUsize = AtomicUsize::new(0);
 
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
-    if frame < TRACED_FRAMES {
+    if frame < traced_frames() {
         eprintln!(
             "softbuffer: frame {frame} draw {:.2}ms",
             elapsed.as_secs_f64() * 1000.0
@@ -162,7 +176,7 @@ fn trace_present(elapsed: std::time::Duration) {
     static FRAMES: AtomicUsize = AtomicUsize::new(0);
 
     let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
-    if frame < TRACED_FRAMES {
+    if frame < traced_frames() {
         eprintln!(
             "softbuffer: frame {frame} present {:.2}ms",
             elapsed.as_secs_f64() * 1000.0
