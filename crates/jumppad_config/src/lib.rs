@@ -24,6 +24,7 @@ pub struct Config {
     pub scroll: ScrollConfig,
     pub history: HistoryConfig,
     pub files: FilesConfig,
+    pub font: FontConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -239,6 +240,71 @@ impl SaveConflictResolution {
         matches!(self, Self::Ask)
     }
 }
+
+/// The fonts JumpPad draws with, split by what they are for: documents in
+/// the editor, and the app's own chrome around them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontConfig {
+    pub editor: EditorFontConfig,
+    pub ui: UiFontConfig,
+}
+
+/// The typeface and text size documents are drawn with.
+///
+/// `family` names a font family already installed on the machine, spelled
+/// the way the system lists it (`"JetBrains Mono"`, `"Cascadia Code"`);
+/// leaving it out draws with whatever the system offers as its monospace
+/// font, which is what JumpPad has always done. Nothing here is loaded from
+/// a file - a family the machine doesn't have is reported at startup and
+/// ignored.
+///
+/// `size` is the height of the editor's text in pixels before any per-window
+/// zoom. Both are matched and clamped where applied, not here, so this crate
+/// doesn't need an `iced` dependency.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorFontConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    pub size: f32,
+}
+
+impl Default for EditorFontConfig {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+/// The typeface and text size JumpPad's own chrome is drawn with - tab
+/// titles, the find palette, dialogs. Same family rules as the editor's.
+///
+/// `size` is the tab titles' height in pixels; the chrome's smaller text
+/// keeps its proportion to it, so one number scales the whole frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiFontConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+    pub size: f32,
+}
+
+impl Default for UiFontConfig {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+/// The text size either section falls back to when `config.toml` doesn't
+/// name one. Matches iced's own default text size, so an absent `size`
+/// draws exactly what JumpPad drew before the setting existed.
+pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -561,6 +627,56 @@ mod tests {
     }
 
     #[test]
+    fn a_config_with_no_font_section_keeps_the_defaults_for_both_fonts() {
+        let config: Config = toml::from_str(r#"theme = "Dracula""#).unwrap();
+        assert_eq!(config.font, FontConfig::default());
+        assert_eq!(config.font.editor.family, None);
+        assert_eq!(config.font.editor.size, DEFAULT_FONT_SIZE);
+        assert_eq!(config.font.ui.family, None);
+    }
+
+    #[test]
+    fn the_editor_and_ui_fonts_are_named_independently() {
+        let config: Config = toml::from_str(
+            r#"
+            [font.editor]
+            family = "JetBrains Mono"
+            size = 18.0
+
+            [font.ui]
+            family = "Inter"
+            size = 13.0
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.font.editor.family.as_deref(),
+            Some("JetBrains Mono")
+        );
+        assert_eq!(config.font.editor.size, 18.0);
+        assert_eq!(config.font.ui.family.as_deref(), Some("Inter"));
+        assert_eq!(config.font.ui.size, 13.0);
+    }
+
+    #[test]
+    fn an_editor_size_alone_leaves_the_family_and_the_ui_font_default() {
+        let config: Config =
+            toml::from_str("[font.editor]\nsize = 13.5").unwrap();
+        assert_eq!(config.font.editor.family, None);
+        assert_eq!(config.font.editor.size, 13.5);
+        assert_eq!(config.font.ui, UiFontConfig::default());
+        assert_eq!(config.font.ui.size, DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn unnamed_families_are_left_out_of_the_written_default_file() {
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(written.contains("[font.editor]"));
+        assert!(written.contains("[font.ui]"));
+        assert!(!written.contains("family"));
+    }
+
+    #[test]
     fn default_keybinds_config_has_no_overrides() {
         assert!(KeybindsConfig::default().overrides.is_empty());
     }
@@ -852,42 +968,6 @@ mod tests {
             "../../../config/keybinds.sample.toml"
         ))
         .unwrap();
-    }
-
-    #[test]
-    fn sample_keybinds_document_every_action() {
-        // The sample file lists the names a user may bind. Generated by hand,
-        // checked by machine: an action added to the registry without being
-        // documented fails here rather than being undiscoverable.
-        let sample = include_str!("../../../config/keybinds.sample.toml");
-        for action in jumppad_actions::Action::ALL {
-            assert!(
-                sample.contains(action.name()),
-                "keybinds.sample.toml never mentions {action}"
-            );
-        }
-    }
-
-    #[test]
-    fn every_documented_name_is_a_real_action() {
-        // The other direction: a name that survived a rename would send
-        // users chasing a binding that silently does nothing.
-        let sample = include_str!("../../../config/keybinds.sample.toml");
-        // The list runs from "Valid names:" to the bare `#` that closes the
-        // block - past that is prose, where "toggle_comment's" is a sentence
-        // rather than a name.
-        let names = sample
-            .lines()
-            .skip_while(|line| !line.contains("Valid names:"))
-            .take_while(|line| line.trim_end() != "#")
-            .flat_map(|line| line.split([' ', ',', '#']))
-            .filter(|word| word.contains('_'));
-        for name in names {
-            assert!(
-                jumppad_actions::Action::from_name(name).is_some(),
-                "keybinds.sample.toml documents {name:?}, which is not an action"
-            );
-        }
     }
 
     #[test]

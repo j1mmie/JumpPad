@@ -1,0 +1,5 @@
+[alias]
+run_release     = "run --release -p jumppad --bin jumppad"
+run_release_gpu = "run --release -p jumppad --bin jumppad-gpu --no-default-features --features wgpu"
+run_debug       = "run           -p jumppad --bin jumppad"
+run_debug_gpu   = "run           -p jumppad --bin jumppad-gpu --no-default-features --features wgpu"
