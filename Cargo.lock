@@ -2123,7 +2123,6 @@ version = "0.1.0"
 dependencies = [
  "global-hotkey",
  "iced_core",
- "jumppad_actions",
  "serde",
  "toml",
 ]
