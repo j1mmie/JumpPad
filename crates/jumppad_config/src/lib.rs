@@ -241,7 +241,16 @@ impl SaveConflictResolution {
     }
 }
 
-/// The typeface and text size the editor draws documents with.
+/// The fonts JumpPad draws with, split by what they are for: documents in
+/// the editor, and the app's own chrome around them.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FontConfig {
+    pub editor: EditorFontConfig,
+    pub ui: UiFontConfig,
+}
+
+/// The typeface and text size documents are drawn with.
 ///
 /// `family` names a font family already installed on the machine, spelled
 /// the way the system lists it (`"JetBrains Mono"`, `"Cascadia Code"`);
@@ -255,13 +264,13 @@ impl SaveConflictResolution {
 /// doesn't need an `iced` dependency.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct FontConfig {
+pub struct EditorFontConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     pub size: f32,
 }
 
-impl Default for FontConfig {
+impl Default for EditorFontConfig {
     fn default() -> Self {
         Self {
             family: None,
@@ -270,9 +279,22 @@ impl Default for FontConfig {
     }
 }
 
+/// The typeface JumpPad's own chrome is drawn with - tab titles, the find
+/// palette. Same family rules as the editor's.
+///
+/// No size to go with it: the chrome's text sizes are picked one at a time
+/// and paired with absolute line heights that keep its edges on whole
+/// pixels, so a single size setting has nothing to apply to.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiFontConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub family: Option<String>,
+}
+
 /// The editor's text size when `config.toml` doesn't name one. Matches
-/// iced's own default text size, so an absent `[font] size` draws exactly
-/// what JumpPad drew before the setting existed.
+/// iced's own default text size, so an absent `[font.editor] size` draws
+/// exactly what JumpPad drew before the setting existed.
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
@@ -596,35 +618,49 @@ mod tests {
     }
 
     #[test]
-    fn a_config_with_no_font_section_keeps_the_default_typeface_and_size() {
+    fn a_config_with_no_font_section_keeps_the_defaults_for_both_fonts() {
         let config: Config = toml::from_str(r#"theme = "Dracula""#).unwrap();
         assert_eq!(config.font, FontConfig::default());
-        assert_eq!(config.font.family, None);
-        assert_eq!(config.font.size, DEFAULT_FONT_SIZE);
+        assert_eq!(config.font.editor.family, None);
+        assert_eq!(config.font.editor.size, DEFAULT_FONT_SIZE);
+        assert_eq!(config.font.ui.family, None);
     }
 
     #[test]
-    fn a_font_section_can_name_a_family_a_size_or_just_one_of_them() {
+    fn the_editor_and_ui_fonts_are_named_independently() {
         let config: Config = toml::from_str(
             r#"
-            [font]
+            [font.editor]
             family = "JetBrains Mono"
             size = 18.0
+
+            [font.ui]
+            family = "Inter"
             "#,
         )
         .unwrap();
-        assert_eq!(config.font.family.as_deref(), Some("JetBrains Mono"));
-        assert_eq!(config.font.size, 18.0);
-
-        let size_only: Config = toml::from_str("[font]\nsize = 13.5").unwrap();
-        assert_eq!(size_only.font.family, None);
-        assert_eq!(size_only.font.size, 13.5);
+        assert_eq!(
+            config.font.editor.family.as_deref(),
+            Some("JetBrains Mono")
+        );
+        assert_eq!(config.font.editor.size, 18.0);
+        assert_eq!(config.font.ui.family.as_deref(), Some("Inter"));
     }
 
     #[test]
-    fn an_unnamed_family_is_left_out_of_the_written_default_file() {
+    fn an_editor_size_alone_leaves_the_family_and_the_ui_font_default() {
+        let config: Config =
+            toml::from_str("[font.editor]\nsize = 13.5").unwrap();
+        assert_eq!(config.font.editor.family, None);
+        assert_eq!(config.font.editor.size, 13.5);
+        assert_eq!(config.font.ui, UiFontConfig::default());
+    }
+
+    #[test]
+    fn unnamed_families_are_left_out_of_the_written_default_file() {
         let written = toml::to_string_pretty(&Config::default()).unwrap();
-        assert!(written.contains("[font]"));
+        assert!(written.contains("[font.editor]"));
+        assert!(written.contains("[font.ui]"));
         assert!(!written.contains("family"));
     }
 

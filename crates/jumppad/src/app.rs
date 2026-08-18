@@ -414,8 +414,11 @@ impl JumpPadApp {
         editor_config.set_foreground_alpha(config.alpha.foreground);
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
         editor_config.set_undo_depth(config.history.depth);
-        editor_config.set_font(resolve_font(config.font.family.as_deref()));
-        editor_config.set_font_size(config.font.size);
+        editor_config.set_font(resolve_font(
+            config.font.editor.family.as_deref(),
+            Font::MONOSPACE,
+        ));
+        editor_config.set_font_size(config.font.editor.size);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
@@ -1219,10 +1222,12 @@ impl JumpPadApp {
 
         // Live: an editor handed a font or a size it wasn't drawing with
         // reshapes every line it holds, open tabs included.
-        if new.font != current.font {
-            self.editor_config
-                .set_font(resolve_font(new.font.family.as_deref()));
-            self.editor_config.set_font_size(new.font.size);
+        if new.font.editor != current.font.editor {
+            self.editor_config.set_font(resolve_font(
+                new.font.editor.family.as_deref(),
+                Font::MONOSPACE,
+            ));
+            self.editor_config.set_font_size(new.font.editor.size);
             repaint = true;
         }
 
@@ -1236,6 +1241,11 @@ impl JumpPadApp {
                 .set_comment_styles(build_comment_styles(&new));
         }
 
+        // iced takes the UI's font once, as a startup setting - there is no
+        // way to hand the renderer another one mid-run.
+        if new.font.ui != current.font.ui {
+            restart_required("[font.ui] family");
+        }
         if new.window != current.window {
             restart_required("[window] decorations");
         }
@@ -2931,20 +2941,20 @@ fn resolve_theme(name: &str) -> Theme {
 
 /// Matches a config-file font family against the families installed on this
 /// machine, case-insensitively so hand-edited TOML doesn't have to get the
-/// exact casing right. Falls back to the system's monospace face - and logs
-/// why - rather than letting a name nothing provides draw the document in
-/// whatever face the platform substitutes, which is rarely a monospaced one.
-fn resolve_font(family: Option<&str>) -> Font {
+/// exact casing right. An unnamed or unavailable family takes `fallback` -
+/// and logs why - rather than letting a name nothing provides draw text in
+/// whatever face the platform substitutes for it.
+pub(crate) fn resolve_font(family: Option<&str>, fallback: Font) -> Font {
     let Some(name) = family.map(str::trim).filter(|name| !name.is_empty())
     else {
-        return Font::MONOSPACE;
+        return fallback;
     };
 
     jumppad_textarea::font::installed(name).unwrap_or_else(|| {
         eprintln!(
-            "jumppad: font family {name:?} isn't installed, using the default monospace font"
+            "jumppad: font family {name:?} isn't installed, using the default font"
         );
-        Font::MONOSPACE
+        fallback
     })
 }
 
@@ -4201,16 +4211,19 @@ mod tests {
         assert_eq!(app.editor_config.background_alpha(), 0.5);
     }
 
-    /// No family here, so the assertions stay off the machine's installed
-    /// fonts - `resolve_font` only consults them for a family that names
-    /// something, and a test box need not have the one it named.
+    /// No family in either section, so the assertions stay off the machine's
+    /// installed fonts - `resolve_font` only consults them for a family that
+    /// names something, and a test box need not have the one it named.
     #[test]
     fn apply_config_reaches_the_shared_text_size() {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
             font: jumppad_config::FontConfig {
-                family: None,
-                size: 22.0,
+                editor: jumppad_config::EditorFontConfig {
+                    family: None,
+                    size: 22.0,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -4226,8 +4239,11 @@ mod tests {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
             font: jumppad_config::FontConfig {
-                family: None,
-                size: 0.0,
+                editor: jumppad_config::EditorFontConfig {
+                    family: None,
+                    size: 0.0,
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -4237,9 +4253,29 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_configured_family_is_the_system_monospace_font() {
-        assert_eq!(resolve_font(None), Font::MONOSPACE);
-        assert_eq!(resolve_font(Some("   ")), Font::MONOSPACE);
+    fn a_blank_family_takes_the_fallback_it_was_handed() {
+        assert_eq!(resolve_font(None, Font::MONOSPACE), Font::MONOSPACE);
+        assert_eq!(resolve_font(Some("   "), Font::MONOSPACE), Font::MONOSPACE);
+        assert_eq!(resolve_font(None, Font::DEFAULT), Font::DEFAULT);
+    }
+
+    #[test]
+    fn a_ui_font_change_asks_for_a_restart_and_moves_nothing_live() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            font: jumppad_config::FontConfig {
+                ui: jumppad_config::UiFontConfig {
+                    family: Some("Inter".to_string()),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        app.apply_config(config.clone());
+        assert_eq!(app.editor_config.font(), Font::MONOSPACE);
+        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
+        assert_eq!(app.config.font.ui, config.font.ui);
     }
 
     fn language(

@@ -25,9 +25,12 @@ sensitivity = 1.0
 [files]
 save_conflict_resolution = "ask"
 
-[font]
+[font.editor]
 # family = "JetBrains Mono"
 size = 16.0
+
+[font.ui]
+# family = "Inter"
 
 [[languages]]
 name = "Markdown"
