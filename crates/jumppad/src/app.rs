@@ -91,6 +91,9 @@ pub struct JumpPadApp {
     error: Option<String>,
     editor_factory: EditorFactory,
     theme: Theme,
+    /// The font and sizes the app's own chrome draws with. Rebuilt on a
+    /// config reload, so `[font.ui]` reaches the next frame.
+    ui_text: UiText,
     background_alpha: f32,
     /// Frames left to hold a nudged background color for, counted down from
     /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
@@ -456,6 +459,7 @@ impl JumpPadApp {
             error: None,
             editor_factory,
             theme: resolve_theme(&config.theme),
+            ui_text: ui_text(&config.font.ui),
             background_alpha: config.alpha.background.clamp(0.0, 1.0),
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
@@ -1241,11 +1245,13 @@ impl JumpPadApp {
                 .set_comment_styles(build_comment_styles(&new));
         }
 
-        // iced takes the UI's font once, as a startup setting - there is no
-        // way to hand the renderer another one mid-run.
+        // Live, like the editor's: every widget in the chrome is handed
+        // this font and these sizes on the `view` that follows.
         if new.font.ui != current.font.ui {
-            restart_required("[font.ui] family");
+            self.ui_text = ui_text(&new.font.ui);
+            repaint = true;
         }
+
         if new.window != current.window {
             restart_required("[window] decorations");
         }
@@ -2015,8 +2021,9 @@ impl JumpPadApp {
     /// it had unsaved edits - VS Code shows one for the same reason, since
     /// the conflict otherwise stays invisible until the next save.
     fn changed_on_disk_bar(&self, tab_id: u64) -> Element<'_, Message> {
+        let ui = self.ui_text;
         let action = |label: &'static str, message: Message| {
-            button(text(label).size(12).line_height(FIND_TEXT_LINE_HEIGHT))
+            button(ui.control_text(label))
                 .padding([4, 8])
                 .style(find_button_style)
                 .on_press(message)
@@ -2024,9 +2031,7 @@ impl JumpPadApp {
 
         container(
             row![
-                text("This file has changed on disk.")
-                    .size(12)
-                    .line_height(FIND_TEXT_LINE_HEIGHT),
+                ui.control_text("This file has changed on disk."),
                 action("Reload", Message::ReloadFromDisk(tab_id)),
                 action("Keep mine", Message::AcknowledgeExternalChange(tab_id)),
             ]
@@ -2041,25 +2046,24 @@ impl JumpPadApp {
 
     /// The find palette: query field, match counter, previous/next, close.
     fn find_palette(&self, state: &FindState) -> Element<'_, Message> {
+        let ui = self.ui_text;
         let query = text_input("Find", &state.query)
             .id(Id::new(FIND_INPUT_ID))
             .on_input(Message::FindQueryChanged)
             .on_submit(Message::FindNext)
             .padding([4, 8])
-            .size(14)
+            .font(ui.font)
+            .size(ui.input_size())
             .width(Pixels(180.0))
             .style(find_input_style);
 
         let counter: Element<'_, Message> = match state.counter() {
-            Some(label) => text(label)
-                .size(12)
-                .line_height(FIND_TEXT_LINE_HEIGHT)
-                .into(),
+            Some(label) => ui.control_text(label).into(),
             None => text("").into(),
         };
 
         let step = |label: &'static str, message: Message| {
-            button(text(label).size(12).line_height(FIND_TEXT_LINE_HEIGHT))
+            button(ui.control_text(label))
                 .padding([4, 6])
                 .style(find_button_style)
                 .on_press(message)
@@ -2082,24 +2086,23 @@ impl JumpPadApp {
     }
 
     pub fn view(&self) -> Element<'_, Message> {
+        let ui = self.ui_text;
         let tab_chips = self.tabs.iter().enumerate().map(|(index, tab)| {
             let is_active = index == self.active;
 
-            let title =
-                button(text(tab.title()).line_height(TAB_TITLE_LINE_HEIGHT))
-                    .padding([6, 10])
-                    .style(move |theme, status| {
-                        tab_title_style(theme, status, is_active)
-                    })
-                    .on_press(Message::SelectTab(index));
+            let title = button(ui.tab_text(tab.title()))
+                .padding([6, 10])
+                .style(move |theme, status| {
+                    tab_title_style(theme, status, is_active)
+                })
+                .on_press(Message::SelectTab(index));
 
-            let close =
-                button(text("x").size(12).line_height(TAB_CLOSE_LINE_HEIGHT))
-                    .padding([6, 8])
-                    .style(move |theme, status| {
-                        tab_close_style(theme, status, is_active)
-                    })
-                    .on_press(Message::CloseTab(index));
+            let close = button(ui.control_text("x"))
+                .padding([6, 8])
+                .style(move |theme, status| {
+                    tab_close_style(theme, status, is_active)
+                })
+                .on_press(Message::CloseTab(index));
 
             // The frame is the only thing that paints this tab's background -
             // title and close stay fully transparent so there's one seamless surface.
@@ -2113,11 +2116,10 @@ impl JumpPadApp {
                 .into()
         });
 
-        let new_tab_button =
-            button(text("+").line_height(TAB_TITLE_LINE_HEIGHT))
-                .padding([6, 10])
-                .style(new_tab_style)
-                .on_press(Message::NewTab);
+        let new_tab_button = button(ui.tab_text("+"))
+            .padding([6, 10])
+            .style(new_tab_style)
+            .on_press(Message::NewTab);
 
         let tabs_row =
             row(tab_chips.chain(std::iter::once(new_tab_button.into())))
@@ -2129,7 +2131,7 @@ impl JumpPadApp {
         // once, in pieces. `filler` covers the leftover space past the last
         // chip, matching `title`'s padding and line height so its height lines
         // up without relying on flex cross-axis sizing.
-        let filler = container(text("").line_height(TAB_TITLE_LINE_HEIGHT))
+        let filler = container(ui.tab_text(""))
             .padding([6, 10])
             .width(Fill)
             .style(tab_bar_style);
@@ -2159,7 +2161,7 @@ impl JumpPadApp {
                     .height(Fill)
                     .into()
             } else {
-                text("No open tabs").into()
+                ui.body_text("No open tabs").into()
             };
 
         // Composed before the find palette so the palette floats above the
@@ -2203,7 +2205,7 @@ impl JumpPadApp {
         let editor = if self.files_hovered {
             stack![
                 editor,
-                container(center(text("Drop to open")))
+                container(center(ui.body_text("Drop to open")))
                     .width(Fill)
                     .height(Fill)
                     .style(drop_overlay_style)
@@ -2218,9 +2220,10 @@ impl JumpPadApp {
         if let Some(error) = &self.error {
             content = content.push(
                 row![
-                    text(error.clone())
+                    ui.body_text(error.clone())
                         .color(iced::Color::from_rgb8(220, 60, 60)),
-                    button("Dismiss").on_press(Message::DismissError),
+                    button(ui.body_text("Dismiss"))
+                        .on_press(Message::DismissError),
                 ]
                 .spacing(10)
                 .padding(6),
@@ -2239,11 +2242,14 @@ impl JumpPadApp {
                     |label: &'static str,
                      index: usize,
                      decision: CloseDecision| {
-                        modal_choice(label, pending.focused == index).on_press(
-                            Message::CloseConfirmed(pending.tab_id, decision),
-                        )
+                        modal_choice(ui, label, pending.focused == index)
+                            .on_press(Message::CloseConfirmed(
+                                pending.tab_id,
+                                decision,
+                            ))
                     };
                 modal_dialog(
+                    ui,
                     format!(
                         "Do you want to save the changes you made to {}?",
                         pending.title
@@ -2260,11 +2266,14 @@ impl JumpPadApp {
                     |label: &'static str,
                      index: usize,
                      decision: ConflictDecision| {
-                        modal_choice(label, pending.focused == index).on_press(
-                            Message::ConflictResolved(pending.tab_id, decision),
-                        )
+                        modal_choice(ui, label, pending.focused == index)
+                            .on_press(Message::ConflictResolved(
+                                pending.tab_id,
+                                decision,
+                            ))
                     };
                 modal_dialog(
+                    ui,
                     format!(
                         "{} has changed on disk since you opened it.",
                         pending.title
@@ -2575,14 +2584,73 @@ fn handle_hotkey(
     message_for(action)
 }
 
-/// Line heights for the tab bar's text, absolute so the strip's height - and
-/// with it every horizontal quad edge in it - lands on a whole pixel. iced's
-/// default `LineHeight::Relative(1.3)` would put the strip at 6 + 20.8 + 6 =
-/// 32.8px, and a quad edge mid-pixel gets antialiased into a visible seam on a
+/// The text the app draws around the editor: one font and one size, with
+/// the smaller sizes derived from that size so the whole frame scales
+/// together. The proportions are the ones the sizes had when they were
+/// hardcoded at a 16px base.
+///
+/// The line heights are absolute so the tab strip's height - and with it
+/// every horizontal quad edge in it - lands on a whole pixel. iced's default
+/// `LineHeight::Relative(1.3)` would put the strip at 6 + 20.8 + 6 = 32.8px,
+/// and a quad edge mid-pixel gets antialiased into a visible seam on a
 /// transparent window (see AGENTS.md). Only holds at integer scale factors;
 /// nothing chosen in logical pixels survives a 1.25x or 1.5x display.
-const TAB_TITLE_LINE_HEIGHT: Pixels = Pixels(20.0); // 16px text, 1.3x rounded down
-const TAB_CLOSE_LINE_HEIGHT: Pixels = Pixels(16.0); // 12px text, 1.3x rounded up
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UiText {
+    font: Font,
+    /// Tab titles draw at this; everything smaller is a fraction of it.
+    base: f32,
+}
+
+impl UiText {
+    fn new(font: Font, size: f32) -> Self {
+        Self {
+            font,
+            base: jumppad_textarea::font::clamp_size(size),
+        }
+    }
+
+    /// Tab titles, the new-tab button, and the filler that has to match
+    /// their height.
+    fn tab_text<'a>(
+        self,
+        content: impl iced::widget::text::IntoFragment<'a>,
+    ) -> iced::widget::Text<'a> {
+        text(content)
+            .font(self.font)
+            .size(self.base)
+            .line_height(Pixels((self.base * 1.3).floor()))
+    }
+
+    /// The compact controls: a tab's close button, and the find palette's
+    /// and changed-on-disk bar's labels and buttons.
+    fn control_text<'a>(
+        self,
+        content: impl iced::widget::text::IntoFragment<'a>,
+    ) -> iced::widget::Text<'a> {
+        let size = self.base * 0.75;
+
+        text(content)
+            .font(self.font)
+            .size(size)
+            .line_height(Pixels((size * 1.3).ceil()))
+    }
+
+    /// Full sentences - dialog prompts, the error banner, the empty and
+    /// drop-target states - which run at the default relative line height.
+    fn body_text<'a>(
+        self,
+        content: impl iced::widget::text::IntoFragment<'a>,
+    ) -> iced::widget::Text<'a> {
+        text(content).font(self.font).size(self.base)
+    }
+
+    /// The find palette's query field, which takes a bare size rather than
+    /// a `Text`.
+    fn input_size(self) -> f32 {
+        self.base * 0.875
+    }
+}
 
 /// How far toward black to shade a tab-bar surface, as an absolute drop in
 /// brightness rather than a percentage - a percentage step is too small to see
@@ -2683,10 +2751,11 @@ fn tab_bar_style(theme: &Theme) -> container::Style {
 /// their labels and the message each choice sends. The caller adds that with
 /// `.on_press`, so a click resolves the dialog the same way Enter does.
 fn modal_choice(
+    ui: UiText,
     label: &'static str,
     is_focused: bool,
 ) -> button::Button<'static, Message> {
-    button(text(label))
+    button(ui.body_text(label))
         .padding([6, 14])
         .style(move |theme, status| {
             modal_button_style(theme, status, is_focused)
@@ -2695,11 +2764,12 @@ fn modal_choice(
 
 /// A modal's box: one line of prompt over a row of choices.
 fn modal_dialog<'a>(
+    ui: UiText,
     prompt: String,
     choices: iced::widget::Row<'a, Message>,
 ) -> container::Container<'a, Message> {
     container(
-        column![text(prompt), choices.spacing(10)]
+        column![ui.body_text(prompt), choices.spacing(10)]
             .spacing(16)
             .padding(20),
     )
@@ -2739,12 +2809,6 @@ fn modal_button_style(
         ..button::Style::default()
     }
 }
-
-/// The modal's own dialog box - opaque, so it reads as a real window sitting
-/// on top of the scrim rather than another translucent layer.
-/// Absolute like the tab bar's, so the palette's edges land on whole
-/// pixels instead of being antialiased into seams (see AGENTS.md).
-const FIND_TEXT_LINE_HEIGHT: Pixels = Pixels(16.0);
 
 fn find_palette_style(theme: &Theme) -> container::Style {
     container::Style::default()
@@ -2805,6 +2869,8 @@ fn find_button_style(theme: &Theme, status: button::Status) -> button::Style {
     }
 }
 
+/// The modal's own dialog box - opaque, so it reads as a real window
+/// sitting on top of the scrim rather than another translucent layer.
 fn modal_dialog_style(theme: &Theme) -> container::Style {
     let palette = theme.extended_palette();
     container::Style::default()
@@ -2956,6 +3022,17 @@ pub(crate) fn resolve_font(family: Option<&str>, fallback: Font) -> Font {
         );
         fallback
     })
+}
+
+/// The chrome's text for a `[font.ui]` section. Its fallback is the default
+/// sans face rather than the editor's monospace one: chrome set in a
+/// monospaced face because a family was misspelled would look like a
+/// different bug than the one it is.
+pub(crate) fn ui_text(config: &jumppad_config::UiFontConfig) -> UiText {
+    UiText::new(
+        resolve_font(config.family.as_deref(), Font::DEFAULT),
+        config.size,
+    )
 }
 
 /// Where syntax-highlighting wasm grammars (`<extension>.wasm`) are looked for.
@@ -3297,6 +3374,10 @@ mod tests {
             error: None,
             editor_factory: factory,
             theme: Theme::ALL[0].clone(),
+            ui_text: UiText::new(
+                Font::DEFAULT,
+                jumppad_config::DEFAULT_FONT_SIZE,
+            ),
             background_alpha: 1.0,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
@@ -4260,12 +4341,13 @@ mod tests {
     }
 
     #[test]
-    fn a_ui_font_change_asks_for_a_restart_and_moves_nothing_live() {
+    fn apply_config_reaches_the_chrome_and_leaves_the_editor_alone() {
         let mut app = test_app(1);
         let config = jumppad_config::Config {
             font: jumppad_config::FontConfig {
                 ui: jumppad_config::UiFontConfig {
-                    family: Some("Inter".to_string()),
+                    family: None,
+                    size: 20.0,
                 },
                 ..Default::default()
             },
@@ -4273,9 +4355,25 @@ mod tests {
         };
 
         app.apply_config(config.clone());
-        assert_eq!(app.editor_config.font(), Font::MONOSPACE);
-        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
-        assert_eq!(app.config.font.ui, config.font.ui);
+        assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+        // The editor reads its own section, and that one didn't move.
+        assert_eq!(
+            app.editor_config.font_size(),
+            jumppad_config::DEFAULT_FONT_SIZE
+        );
+    }
+
+    /// The sizes and line heights the chrome used when they were hardcoded,
+    /// so the default config still draws the frame it always drew.
+    #[test]
+    fn the_default_base_reproduces_the_sizes_the_chrome_was_built_with() {
+        let ui = UiText::new(Font::DEFAULT, jumppad_config::DEFAULT_FONT_SIZE);
+        assert_eq!(ui.base, 16.0);
+        assert_eq!(ui.base * 0.75, 12.0);
+        assert_eq!(ui.input_size(), 14.0);
+        assert_eq!(Pixels((ui.base * 1.3).floor()), Pixels(20.0));
+        assert_eq!(Pixels((ui.base * 0.75 * 1.3).ceil()), Pixels(16.0));
     }
 
     fn language(

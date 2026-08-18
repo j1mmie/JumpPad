@@ -279,22 +279,31 @@ impl Default for EditorFontConfig {
     }
 }
 
-/// The typeface JumpPad's own chrome is drawn with - tab titles, the find
-/// palette. Same family rules as the editor's.
+/// The typeface and text size JumpPad's own chrome is drawn with - tab
+/// titles, the find palette, dialogs. Same family rules as the editor's.
 ///
-/// No size to go with it: the chrome's text sizes are picked one at a time
-/// and paired with absolute line heights that keep its edges on whole
-/// pixels, so a single size setting has nothing to apply to.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+/// `size` is the tab titles' height in pixels; the chrome's smaller text
+/// keeps its proportion to it, so one number scales the whole frame.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UiFontConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
+    pub size: f32,
 }
 
-/// The editor's text size when `config.toml` doesn't name one. Matches
-/// iced's own default text size, so an absent `[font.editor] size` draws
-/// exactly what JumpPad drew before the setting existed.
+impl Default for UiFontConfig {
+    fn default() -> Self {
+        Self {
+            family: None,
+            size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
+/// The text size either section falls back to when `config.toml` doesn't
+/// name one. Matches iced's own default text size, so an absent `size`
+/// draws exactly what JumpPad drew before the setting existed.
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
@@ -636,6 +645,7 @@ mod tests {
 
             [font.ui]
             family = "Inter"
+            size = 13.0
             "#,
         )
         .unwrap();
@@ -645,6 +655,7 @@ mod tests {
         );
         assert_eq!(config.font.editor.size, 18.0);
         assert_eq!(config.font.ui.family.as_deref(), Some("Inter"));
+        assert_eq!(config.font.ui.size, 13.0);
     }
 
     #[test]
@@ -654,6 +665,7 @@ mod tests {
         assert_eq!(config.font.editor.family, None);
         assert_eq!(config.font.editor.size, 13.5);
         assert_eq!(config.font.ui, UiFontConfig::default());
+        assert_eq!(config.font.ui.size, DEFAULT_FONT_SIZE);
     }
 
     #[test]

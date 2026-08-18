@@ -105,12 +105,6 @@ Options:
     // Skipped entirely (not just requested-then-ignored) at the default
     // alpha of `1.0`, since transparent windows use a costlier compositing path.
     let transparent = config.alpha.background < 1.0;
-    // Resolved out here because iced takes the UI's font once, before the
-    // app state exists, and never asks again.
-    let ui_font = app::resolve_font(
-        config.font.ui.family.as_deref(),
-        iced::Font::DEFAULT,
-    );
 
     // Defaults to `info` level (still overridable via `RUST_LOG`) so
     // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
@@ -134,7 +128,6 @@ Options:
         JumpPadApp::view,
     )
     .title("JumpPad")
-    .default_font(ui_font)
     .window_size(iced::Size::new(900.0, 600.0))
     .decorations(decorations)
     .transparent(transparent)
