@@ -6,7 +6,7 @@
 #               Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
 #               Moonfly, Nightfly, Oxocarbon, Ferra
 
-theme = "Tokyo Night Storm"
+theme = "Dark"
 # theme = "Light"
 
 [alpha]
@@ -20,18 +20,21 @@ decorations = true
 enabled = false
 
 [scroll]
-sensitivity = 1.0
+sensitivity = 0.5
 
 [files]
 save_conflict_resolution = "ask"
 
 [font.editor]
-# family = "JetBrains Mono"
+family = "MesloLGS NF"
+# family = "CaskaydiaMono Nerd Font Mono"
+# family = "Menlo"
 size = 16.0
 
 [font.ui]
-# family = "Inter"
-size = 16.0
+# family = "Lucida Grande"
+family = "Arial Black"
+# size = 16.0
 
 [[languages]]
 name = "Markdown"

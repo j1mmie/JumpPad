@@ -1,17 +1,5 @@
-# `jumppad` and `jumppad-gpu` are two [[bin]] targets in one package, each
-# gated behind the Cargo feature that picks its iced compositor backend -
-# software rendering or hardware. `tiny-skia` is the default feature, so
-# running the GPU build otherwise means turning the default off, naming the
-# other feature, and naming the binary, every time. See
-# `crates/jumppad/Cargo.toml` for why exactly one backend is compiled in per
-# binary rather than both.
-#
-#   cargo cpu --release
-#   cargo gpu --release
-#   cargo gpu -- notes.txt
-#
-# Anything after the alias is passed through, so `--release`, `--target` and
-# the program's own arguments all still work.
 [alias]
-cpu = "run -p jumppad --bin jumppad"
-gpu = "run -p jumppad --bin jumppad-gpu --no-default-features --features wgpu"
+run_release     = "run --release -p jumppad --bin jumppad"
+run_release_gpu = "run --release -p jumppad --bin jumppad-gpu --no-default-features --features wgpu"
+run_debug       = "run           -p jumppad --bin jumppad"
+run_debug_gpu   = "run           -p jumppad --bin jumppad-gpu --no-default-features --features wgpu"
