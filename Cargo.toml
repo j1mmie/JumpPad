@@ -25,12 +25,17 @@ edition = "2024"
 # which split them out so a Linux build can pick just one) - `x11`/`wayland`
 # have to be requested explicitly here since `default-features = false`
 # above turns them off along with everything else.
+# `linux-theme-detection` is in that same default set, and is what lets
+# `[mode] detection = "auto"` work on Linux: macOS and Windows report their
+# light/dark setting through winit, which iced always listens to, but no such
+# window event exists on Linux - the feature reads the XDG desktop portal
+# instead.
 # `fira-sans` is deliberately left off. It embeds a 440KB copy of Fira Sans
 # in every binary, and nothing here ever asks for that family by name: the
 # UI's `Font::DEFAULT` and the editor's `Font::MONOSPACE` are both generic
 # families, resolved against the fonts the machine already has. The embedded
 # copy is carried and never drawn.
-iced = { version = "0.14", default-features = false, features = ["x11", "wayland"] }
+iced = { version = "0.14", default-features = false, features = ["x11", "wayland", "linux-theme-detection"] }
 # Only needed by `jumppad_config`, to convert `global-hotkey`/`keyboard-types`
 # key-chord config into iced-native `keyboard::{Modifiers, key::Code}` in one
 # place. `iced_core` is the crate that actually defines those types, with

@@ -1,17 +1,40 @@
 # Sample config file
 
-# Valid Themes: Light, Dark, Dracula, Nord, Solarized Light, Solarized Dark,
-#               Gruvbox Light, Gruvbox Dark, Catppuccin Latte, Catppuccin Frappé,
-#               Catppuccin Macchiato, Catppuccin Mocha, Tokyo Night, Tokyo Night Storm,
-#               Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
-#               Moonfly, Nightfly, Oxocarbon, Ferra
+# A colorway is just colors - one of iced's built-in palettes:
+#   Light, Dark, Dracula, Nord, Solarized Light, Solarized Dark,
+#   Gruvbox Light, Gruvbox Dark, Catppuccin Latte, Catppuccin Frappé,
+#   Catppuccin Macchiato, Catppuccin Mocha, Tokyo Night, Tokyo Night Storm,
+#   Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
+#   Moonfly, Nightfly, Oxocarbon, Ferra
+#
+# A theme is JumpPad's: a colorway plus the alpha and fonts that go with it.
+# Every property is optional - what you leave out is the default.
 
-theme = "Dark"
-# theme = "Light"
+[mode]
+# "auto" follows the OS while JumpPad runs. "light" or "dark" pins one slot.
+detection = "auto"
+light_theme = "jimmie_light"
+dark_theme = "jimmie_dark"
+# A name with no [themes] entry behind it is read as a colorway on the
+# default theme, so picking colors needs no theme of its own:
+# dark_theme = "Dracula"
 
-[alpha]
-background = 0.925
-foreground = 1.0
+[themes.jimmie_dark]
+colorway = "Dark"
+alpha.background = 0.925
+alpha.foreground = 1.0
+fonts.editor.family = "MesloLGS NF"
+# fonts.editor.family = "CaskaydiaMono Nerd Font Mono"
+# fonts.editor.family = "Menlo"
+fonts.editor.size = 16.0
+fonts.ui.family = "Arial Black"
+# fonts.ui.family = "Lucida Grande"
+# fonts.ui.size = 16.0
+
+[themes.jimmie_light]
+colorway = "Light"
+fonts.editor.family = "MesloLGS NF"
+fonts.ui.family = "Arial Black"
 
 [window]
 decorations = true
@@ -24,17 +47,6 @@ sensitivity = 0.5
 
 [files]
 save_conflict_resolution = "ask"
-
-[font.editor]
-family = "MesloLGS NF"
-# family = "CaskaydiaMono Nerd Font Mono"
-# family = "Menlo"
-size = 16.0
-
-[font.ui]
-# family = "Lucida Grande"
-family = "Arial Black"
-# size = 16.0
 
 [[languages]]
 name = "Markdown"

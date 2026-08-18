@@ -20,6 +20,7 @@ use iced::{
 };
 
 use jumppad_actions::{Action, Context};
+use jumppad_config::Appearance;
 
 use crate::docwatch;
 use crate::find::FindState;
@@ -90,9 +91,15 @@ pub struct JumpPadApp {
     next_id: u64,
     error: Option<String>,
     editor_factory: EditorFactory,
+    /// Which theme slot is showing, and what the OS last said. The OS's
+    /// answer is kept even while `detection` ignores it, so switching back
+    /// to `auto` resolves immediately instead of waiting for the OS to
+    /// change again.
+    showing: Appearance,
+    os_appearance: Option<Appearance>,
+    /// All three are written only by `apply_theme`, from the theme the
+    /// config and `showing` resolve to.
     theme: Theme,
-    /// The font and sizes the app's own chrome draws with. Rebuilt on a
-    /// config reload, so `[font.ui]` reaches the next frame.
     ui_text: UiText,
     background_alpha: f32,
     /// Frames left to hold a nudged background color for, counted down from
@@ -317,6 +324,11 @@ pub enum Message {
     WindowFocused,
     /// The OS file watcher saw activity on a config file.
     ConfigFileEvent(reload::WatchedFile),
+    /// What the OS's light/dark setting is: once at startup, and again
+    /// whenever it changes. Acted on only while `[mode] detection` is
+    /// `auto`, but always listened for, so turning `auto` back on doesn't
+    /// wait for the OS to change again.
+    SystemAppearanceReported(iced::theme::Mode),
     /// Periodic while a config-reload burst is pending - applies the
     /// debounced reload once the files stop changing.
     ConfigSettleTick,
@@ -410,18 +422,15 @@ impl JumpPadApp {
         let keybind_overrides = Arc::new(build_key_overrides(&keybinds));
         warn_unrecognized_overrides(&keybinds.overrides);
 
+        // Opaque and unstyled to start with: `apply_theme` below writes
+        // every appearance setting, so there is one writer rather than two
+        // that have to agree.
         let editor_config = jumppad_textarea::SharedEditorConfig::new(
-            config.alpha.background,
+            1.0,
             build_key_resolver(keybind_overrides.clone()),
         );
-        editor_config.set_foreground_alpha(config.alpha.foreground);
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
         editor_config.set_undo_depth(config.history.depth);
-        editor_config.set_font(resolve_font(
-            config.font.editor.family.as_deref(),
-            Font::MONOSPACE,
-        ));
-        editor_config.set_font_size(config.font.editor.size);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
@@ -443,6 +452,12 @@ impl JumpPadApp {
             .unwrap_or_else(|| PathBuf::from("drafts"));
         let manifest = session::load_manifest(&session_candidates);
 
+        // Nothing to ask yet: iced answers `system::theme()` as a task, so
+        // the OS's setting arrives a message later. Until it does the light
+        // slot stands - see the boot batch below.
+        let os_appearance = None;
+        let showing = config.mode.showing(os_appearance);
+
         let visor_enabled = config.visor.enabled;
         // Skip registering the global hotkey entirely when visor mode is off,
         // rather than claiming the combo and then ignoring it.
@@ -458,9 +473,13 @@ impl JumpPadApp {
             next_id: 0,
             error: None,
             editor_factory,
-            theme: resolve_theme(&config.theme),
-            ui_text: ui_text(&config.font.ui),
-            background_alpha: config.alpha.background.clamp(0.0, 1.0),
+            showing,
+            os_appearance,
+            // Placeholders until the `apply_theme` below, which is what
+            // actually resolves them.
+            theme: Theme::Light,
+            ui_text: ui_text(&jumppad_config::UiFontConfig::default()),
+            background_alpha: 1.0,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
@@ -482,7 +501,9 @@ impl JumpPadApp {
             modifiers: keyboard::Modifiers::default(),
             // The same expression `run()` derives the window's transparent
             // flag from - this field is what remembers the outcome.
-            window_transparent: config.alpha.background < 1.0,
+            // The same question `run()` asks to decide the window's
+            // transparent flag - this field is what remembers the outcome.
+            window_transparent: config.wants_transparency(),
             editor_config,
             config_watch: reload::ConfigWatch::new(),
             document_watch: docwatch::DocumentWatch::new(),
@@ -490,7 +511,17 @@ impl JumpPadApp {
             keybinds,
         };
 
-        let window_task = iced::window::latest().map(Message::WindowReady);
+        app.apply_theme();
+        // Nothing has been drawn yet, so the nudge `apply_theme` arms for a
+        // live change would only burn frames on the way up.
+        app.redraw_nudge_frames = 0;
+
+        // Both asked once, here. Later changes to either arrive through
+        // `subscription` instead.
+        let boot_tasks = Task::batch([
+            iced::window::latest().map(Message::WindowReady),
+            iced::system::theme().map(Message::SystemAppearanceReported),
+        ]);
 
         let Some(manifest) =
             manifest.filter(|manifest| !manifest.tabs.is_empty())
@@ -498,7 +529,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, focus_editor(), argv_task]),
+                Task::batch([task, boot_tasks, focus_editor(), argv_task]),
             );
         };
 
@@ -584,7 +615,7 @@ impl JumpPadApp {
             let task = app.new_tab();
             return (
                 app,
-                Task::batch([task, window_task, focus_editor(), argv_task]),
+                Task::batch([task, boot_tasks, focus_editor(), argv_task]),
             );
         }
 
@@ -608,7 +639,7 @@ impl JumpPadApp {
         let task = Task::batch(reload_tasks.into_iter().chain([
             switch_task,
             focus_task,
-            window_task,
+            boot_tasks,
             argv_task,
         ]));
         (app, task)
@@ -1181,36 +1212,16 @@ impl JumpPadApp {
     /// Applies a freshly reloaded `config.toml`, diffing against the one in
     /// effect. The single wiring point for live config: a new reloadable
     /// setting gets its arm here, and a setting that can only apply at
-    /// startup gets a `restart_required` line instead.
+    /// startup gets a `restart_required` line instead. Anything a theme
+    /// carries belongs in `apply_theme` instead, which an OS light/dark
+    /// switch calls too.
+    ///
+    /// Nothing left here changes what is on screen by itself, so none of
+    /// these arms arms the repaint nudge; `apply_theme` does its own.
     fn apply_config(&mut self, new: jumppad_config::Config) {
         let current = &self.config;
-        let mut repaint = false;
-
-        if new.theme != current.theme {
-            self.theme = resolve_theme(&new.theme);
-            repaint = true;
-        }
-
-        if new.alpha.foreground != current.alpha.foreground {
-            self.editor_config
-                .set_foreground_alpha(new.alpha.foreground);
-            repaint = true;
-        }
-
-        if new.alpha.background != current.alpha.background {
-            if self.window_transparent {
-                self.background_alpha = new.alpha.background.clamp(0.0, 1.0);
-                self.editor_config
-                    .set_background_alpha(new.alpha.background);
-                repaint = true;
-            } else if new.alpha.background < 1.0 {
-                // Applying anyway would darken the window without revealing
-                // the desktop: an opaque surface presents `rgb * a` as-is.
-                restart_required(
-                    "[alpha] background on a window that started opaque",
-                );
-            }
-        }
+        let appearance_changed =
+            new.themes != current.themes || new.mode != current.mode;
 
         // No repaint: nothing on screen changes until the next wheel event,
         // and the widget reads the new value on the `view` that one causes.
@@ -1224,17 +1235,6 @@ impl JumpPadApp {
             self.editor_config.set_undo_depth(new.history.depth);
         }
 
-        // Live: an editor handed a font or a size it wasn't drawing with
-        // reshapes every line it holds, open tabs included.
-        if new.font.editor != current.font.editor {
-            self.editor_config.set_font(resolve_font(
-                new.font.editor.family.as_deref(),
-                Font::MONOSPACE,
-            ));
-            self.editor_config.set_font_size(new.font.editor.size);
-            repaint = true;
-        }
-
         // One [[languages]] edit can feed two consumers, so diff the derived
         // views: comment styles apply live (no repaint - nothing on screen
         // changes until the next toggle), grammar mappings can't.
@@ -1243,13 +1243,6 @@ impl JumpPadApp {
         {
             self.editor_config
                 .set_comment_styles(build_comment_styles(&new));
-        }
-
-        // Live, like the editor's: every widget in the chrome is handed
-        // this font and these sizes on the `view` that follows.
-        if new.font.ui != current.font.ui {
-            self.ui_text = ui_text(&new.font.ui);
-            repaint = true;
         }
 
         if new.window != current.window {
@@ -1262,12 +1255,63 @@ impl JumpPadApp {
             restart_required("[[languages]] extension-to-syntax mappings");
         }
 
-        if repaint {
-            // tiny-skia's damage tracking can otherwise skip presenting a
-            // change that moved no widget - an alpha-only reload, say.
-            self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
-        }
         self.config = new;
+
+        // Last, and through the same path an OS change takes: `theme_for`
+        // reads the config that was just stored.
+        if appearance_changed {
+            self.showing = self.config.mode.showing(self.os_appearance);
+            self.apply_theme();
+        }
+    }
+
+    /// Resolves the config and the showing slot into a theme, and writes it
+    /// everywhere it is read from. The only way a theme reaches the app, so
+    /// a config reload and a change of the OS's setting cannot drift apart.
+    fn apply_theme(&mut self) {
+        let theme = self.config.theme_for(self.showing);
+
+        self.theme = resolve_theme(
+            &theme.colorway,
+            resolve_theme(self.showing.default_colorway(), Theme::Light),
+        );
+        // A window is transparent or not from the moment it is created, and
+        // `run()` counted every theme in the file before creating this one.
+        // So this only bites when a reload introduces translucency to a
+        // session that started without any.
+        if theme.alpha.background < 1.0 && !self.window_transparent {
+            restart_required(
+                "[alpha] background below 1.0, in a session whose window started opaque",
+            );
+        } else {
+            self.background_alpha = theme.alpha.background.clamp(0.0, 1.0);
+            self.editor_config
+                .set_background_alpha(theme.alpha.background);
+        }
+        self.editor_config
+            .set_foreground_alpha(theme.alpha.foreground);
+        self.editor_config.set_font(resolve_font(
+            theme.fonts.editor.family.as_deref(),
+            Font::MONOSPACE,
+        ));
+        self.editor_config.set_font_size(theme.fonts.editor.size);
+        self.ui_text = ui_text(&theme.fonts.ui);
+        // tiny-skia's damage tracking can otherwise skip presenting a change
+        // that moved no widget - a colorway or alpha swap, say.
+        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+    }
+
+    /// Takes the OS's light/dark setting and switches themes if it moved the
+    /// showing slot. Recorded whatever `detection` says, so a reload that
+    /// turns `auto` back on resolves against an answer already in hand.
+    fn apply_os_appearance(&mut self, os: Option<Appearance>) {
+        self.os_appearance = os;
+
+        let showing = self.config.mode.showing(self.os_appearance);
+        if showing != self.showing {
+            self.showing = showing;
+            self.apply_theme();
+        }
     }
 
     /// Mirror of `apply_config` for `keybinds.toml`. The override tables are
@@ -1643,6 +1687,10 @@ impl JumpPadApp {
                 // A focus gain is already a settled moment - the safety net
                 // for changes the watcher never delivered, no debounce needed.
                 self.sweep_documents()
+            }
+            Message::SystemAppearanceReported(reported) => {
+                self.apply_os_appearance(system_appearance(reported));
+                Task::none()
             }
             Message::ConfigFileEvent(file) => {
                 self.config_watch.note_event(file, Instant::now());
@@ -2397,6 +2445,12 @@ impl JumpPadApp {
             reload::subscription(),
             docwatch::subscription(self.watched_paths()),
             iced::window::resize_events().map(|_| Message::WindowResized),
+            // Ungated on purpose: iced's runtime watches the OS setting
+            // whether or not anything listens, so pinning `[mode]` saves
+            // nothing by unsubscribing and would only let the answer go
+            // stale under a later switch back to `auto`.
+            iced::system::theme_changes()
+                .map(Message::SystemAppearanceReported),
         ];
 
         // Gated timers below: each only ticks while its condition holds, so
@@ -2980,11 +3034,21 @@ fn restart_required(what: &str) {
     eprintln!("jumppad: {what} changed - takes effect on restart");
 }
 
-/// Matches a config-file theme name against `Theme::ALL` by display name
+/// What the OS reports, in JumpPad's terms. `None` means it stated no
+/// preference, which leaves `detection = "auto"` on the light slot.
+fn system_appearance(reported: iced::theme::Mode) -> Option<Appearance> {
+    match reported {
+        iced::theme::Mode::Light => Some(Appearance::Light),
+        iced::theme::Mode::Dark => Some(Appearance::Dark),
+        iced::theme::Mode::None => None,
+    }
+}
+
+/// Matches a config-file colorway name against `Theme::ALL` by display name
 /// (`"Dracula"`, `"Solarized Light"`, ...), case-insensitively so hand-edited
-/// TOML doesn't have to get the exact casing right. Falls back to the
-/// default theme - and logs why - rather than failing startup over a typo.
-fn resolve_theme(name: &str) -> Theme {
+/// TOML doesn't have to get the exact casing right. Falls back to `fallback`
+/// - and logs why - rather than failing startup over a typo.
+fn resolve_theme(name: &str, fallback: Theme) -> Theme {
     let theme = Theme::ALL
         .iter()
         .find(|theme| theme.to_string().eq_ignore_ascii_case(name.trim()));
@@ -2998,9 +3062,9 @@ fn resolve_theme(name: &str) -> Theme {
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!(
-                "jumppad: unknown theme {name:?}, using default. Valid options: {valid}"
+                "jumppad: unknown colorway {name:?}, using default. Valid options: {valid}"
             );
-            Theme::Light
+            fallback
         }
     }
 }
@@ -3373,6 +3437,8 @@ mod tests {
             next_id: tab_count,
             error: None,
             editor_factory: factory,
+            showing: Appearance::Light,
+            os_appearance: None,
             theme: Theme::ALL[0].clone(),
             ui_text: UiText::new(
                 Font::DEFAULT,
@@ -4255,29 +4321,43 @@ mod tests {
         );
     }
 
+    /// A config whose slots both name `theme`, so the same definition can be
+    /// read into either one.
+    fn config_with_theme(theme: &str) -> jumppad_config::Config {
+        toml::from_str(&format!(
+            "[mode]\nlight_theme = \"mine\"\ndark_theme = \"mine\"\n\n[themes.mine]\n{theme}"
+        ))
+        .unwrap()
+    }
+
     #[test]
-    fn apply_config_swaps_the_theme_and_arms_a_repaint() {
+    fn apply_config_swaps_the_colorway_and_arms_a_repaint() {
         let mut app = test_app(1);
-        let config = jumppad_config::Config {
-            theme: "Dracula".to_string(),
-            ..Default::default()
-        };
-        app.apply_config(config);
+
+        app.apply_config(config_with_theme(r#"colorway = "Dracula""#));
         assert_eq!(app.theme.to_string(), "Dracula");
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
-        assert_eq!(app.config.theme, "Dracula");
+    }
+
+    /// The colorway can be named by the slot instead of by a theme, so
+    /// picking colors needs no `[themes]` entry at all.
+    #[test]
+    fn a_slot_naming_a_colorway_paints_that_colorway() {
+        let mut app = test_app(1);
+        let config: jumppad_config::Config = toml::from_str(
+            "[mode]\ndetection = \"dark\"\ndark_theme = \"Nord\"",
+        )
+        .unwrap();
+
+        app.apply_config(config);
+        assert_eq!(app.theme.to_string(), "Nord");
+        assert_eq!(app.editor_config.font_size(), 16.0, "default fonts stand");
     }
 
     #[test]
     fn apply_config_background_alpha_needs_a_window_born_transparent() {
         let mut app = test_app(1);
-        let config = jumppad_config::Config {
-            alpha: jumppad_config::AlphaConfig {
-                background: 0.5,
-                foreground: 1.0,
-            },
-            ..Default::default()
-        };
+        let config = config_with_theme("alpha.background = 0.5");
 
         // Booted opaque: the surface can't turn translucent, so nothing moves.
         app.apply_config(config.clone());
@@ -4298,18 +4378,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_shared_text_size() {
         let mut app = test_app(1);
-        let config = jumppad_config::Config {
-            font: jumppad_config::FontConfig {
-                editor: jumppad_config::EditorFontConfig {
-                    family: None,
-                    size: 22.0,
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        app.apply_config(config);
+        app.apply_config(config_with_theme("fonts.editor.size = 22.0"));
         assert_eq!(app.editor_config.font_size(), 22.0);
         assert_eq!(app.editor_config.font(), Font::MONOSPACE);
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
@@ -4318,18 +4387,7 @@ mod tests {
     #[test]
     fn an_unreadable_configured_text_size_is_clamped_not_obeyed() {
         let mut app = test_app(1);
-        let config = jumppad_config::Config {
-            font: jumppad_config::FontConfig {
-                editor: jumppad_config::EditorFontConfig {
-                    family: None,
-                    size: 0.0,
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        app.apply_config(config);
+        app.apply_config(config_with_theme("fonts.editor.size = 0.0"));
         assert!(app.editor_config.font_size() >= 4.0);
     }
 
@@ -4343,18 +4401,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_chrome_and_leaves_the_editor_alone() {
         let mut app = test_app(1);
-        let config = jumppad_config::Config {
-            font: jumppad_config::FontConfig {
-                ui: jumppad_config::UiFontConfig {
-                    family: None,
-                    size: 20.0,
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-
-        app.apply_config(config.clone());
+        app.apply_config(config_with_theme("fonts.ui.size = 20.0"));
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
         // The editor reads its own section, and that one didn't move.
@@ -4362,6 +4409,112 @@ mod tests {
             app.editor_config.font_size(),
             jumppad_config::DEFAULT_FONT_SIZE
         );
+    }
+
+    /// Light and dark differing in every property a theme carries, so one
+    /// switch has to move all of them together.
+    fn config_with_both_slots() -> jumppad_config::Config {
+        toml::from_str(
+            r#"
+            [mode]
+            detection = "auto"
+            light_theme = "day"
+            dark_theme = "night"
+
+            [themes.day]
+            colorway = "Solarized Light"
+            fonts.editor.size = 15.0
+            fonts.ui.size = 15.0
+
+            [themes.night]
+            colorway = "Nord"
+            fonts.editor.size = 21.0
+            fonts.ui.size = 21.0
+            "#,
+        )
+        .unwrap()
+    }
+
+    fn report(app: &mut JumpPadApp, reported: iced::theme::Mode) {
+        let _ = app.update(Message::SystemAppearanceReported(reported));
+    }
+
+    /// The guard on there being one apply path: colorway, editor font and
+    /// chrome font all move on the same message.
+    #[test]
+    fn an_os_switch_to_dark_swaps_the_whole_theme() {
+        let mut app = test_app(1);
+        app.apply_config(config_with_both_slots());
+        report(&mut app, iced::theme::Mode::Light);
+        assert_eq!(app.theme.to_string(), "Solarized Light");
+        assert_eq!(app.editor_config.font_size(), 15.0);
+        assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 15.0));
+
+        app.redraw_nudge_frames = 0;
+        report(&mut app, iced::theme::Mode::Dark);
+        assert_eq!(app.theme.to_string(), "Nord");
+        assert_eq!(app.editor_config.font_size(), 21.0);
+        assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 21.0));
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
+    }
+
+    #[test]
+    fn an_os_switch_moves_nothing_while_the_mode_is_pinned() {
+        let mut app = test_app(1);
+        let mut config = config_with_both_slots();
+        config.mode.detection = jumppad_config::Detection::Light;
+        app.apply_config(config);
+        app.redraw_nudge_frames = 0;
+
+        report(&mut app, iced::theme::Mode::Dark);
+        assert_eq!(app.theme.to_string(), "Solarized Light");
+        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
+        // Recorded anyway - the test below is what that buys.
+        assert_eq!(app.os_appearance, Some(Appearance::Dark));
+    }
+
+    /// Why the OS's answer is kept while pinned: turning `auto` back on
+    /// resolves against it instead of waiting for the next OS switch.
+    #[test]
+    fn turning_detection_back_to_automatic_uses_the_last_os_report() {
+        let mut app = test_app(1);
+        let mut pinned = config_with_both_slots();
+        pinned.mode.detection = jumppad_config::Detection::Light;
+        app.apply_config(pinned);
+        report(&mut app, iced::theme::Mode::Dark);
+        assert_eq!(app.theme.to_string(), "Solarized Light");
+
+        app.apply_config(config_with_both_slots());
+        assert_eq!(app.theme.to_string(), "Nord");
+    }
+
+    /// A reported mode of `None` is no preference, not a third theme.
+    #[test]
+    fn an_os_with_no_preference_leaves_the_light_slot_showing() {
+        let mut app = test_app(1);
+        app.apply_config(config_with_both_slots());
+        report(&mut app, iced::theme::Mode::None);
+        assert_eq!(app.theme.to_string(), "Solarized Light");
+        assert_eq!(app.os_appearance, None);
+    }
+
+    #[test]
+    fn an_unknown_colorway_falls_back_to_the_one_it_was_handed() {
+        assert_eq!(resolve_theme("nonsense", Theme::Dark), Theme::Dark);
+        assert_eq!(resolve_theme("nonsense", Theme::Light), Theme::Light);
+    }
+
+    /// The two crates have to agree on how the default colorways are spelled,
+    /// and only this one can check the spelling.
+    #[test]
+    fn both_default_colorway_names_are_real_colorways() {
+        for showing in [Appearance::Light, Appearance::Dark] {
+            let name = showing.default_colorway();
+            assert!(
+                Theme::ALL.iter().any(|theme| theme.to_string() == name),
+                "{name:?} is not a colorway"
+            );
+        }
     }
 
     /// The sizes and line heights the chrome used when they were hardcoded,

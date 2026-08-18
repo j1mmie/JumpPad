@@ -102,9 +102,13 @@ Options:
     let visor_enabled = config.visor.enabled;
     // Visor mode wins: a drop-down visor is undecorated by definition.
     let decorations = config.window.decorations && !visor_enabled;
-    // Skipped entirely (not just requested-then-ignored) at the default
-    // alpha of `1.0`, since transparent windows use a costlier compositing path.
-    let transparent = config.alpha.background < 1.0;
+    // Asked of every theme, not just the one showing at startup: a window
+    // is transparent or not from the moment it is created, so one that any
+    // theme might want to see through has to be born that way for a theme
+    // switch to apply without a restart. Skipped entirely (not just
+    // requested-then-ignored) when no theme asks, since transparent windows
+    // use a costlier compositing path.
+    let transparent = config.wants_transparency();
 
     // Defaults to `info` level (still overridable via `RUST_LOG`) so
     // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
