@@ -478,7 +478,7 @@ impl JumpPadApp {
             // Placeholders until the `apply_theme` below, which is what
             // actually resolves them.
             theme: Theme::Light,
-            ui_text: ui_text(&jumppad_config::UiFontConfig::default()),
+            ui_text: ui_text(&jumppad_config::FontConfig::default()),
             background_alpha: 1.0,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
@@ -1279,23 +1279,23 @@ impl JumpPadApp {
         // `run()` counted every theme in the file before creating this one.
         // So this only bites when a reload introduces translucency to a
         // session that started without any.
-        if theme.alpha.background < 1.0 && !self.window_transparent {
+        if theme.background.alpha < 1.0 && !self.window_transparent {
             restart_required(
                 "[alpha] background below 1.0, in a session whose window started opaque",
             );
         } else {
-            self.background_alpha = theme.alpha.background.clamp(0.0, 1.0);
+            self.background_alpha = theme.background.alpha.clamp(0.0, 1.0);
             self.editor_config
-                .set_background_alpha(theme.alpha.background);
+                .set_background_alpha(theme.background.alpha);
         }
         self.editor_config
-            .set_foreground_alpha(theme.alpha.foreground);
+            .set_foreground_alpha(theme.foreground.alpha);
         self.editor_config.set_font(resolve_font(
-            theme.fonts.editor.family.as_deref(),
+            theme.editor.font.family.as_deref(),
             Font::MONOSPACE,
         ));
-        self.editor_config.set_font_size(theme.fonts.editor.size);
-        self.ui_text = ui_text(&theme.fonts.ui);
+        self.editor_config.set_font_size(theme.editor.font.size);
+        self.ui_text = ui_text(&theme.ui.font);
         // tiny-skia's damage tracking can otherwise skip presenting a change
         // that moved no widget - a colorway or alpha swap, say.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
@@ -3088,11 +3088,11 @@ pub(crate) fn resolve_font(family: Option<&str>, fallback: Font) -> Font {
     })
 }
 
-/// The chrome's text for a `[font.ui]` section. Its fallback is the default
+/// The chrome's text for a theme's `ui.font` section. Its fallback is the default
 /// sans face rather than the editor's monospace one: chrome set in a
 /// monospaced face because a family was misspelled would look like a
 /// different bug than the one it is.
-pub(crate) fn ui_text(config: &jumppad_config::UiFontConfig) -> UiText {
+pub(crate) fn ui_text(config: &jumppad_config::FontConfig) -> UiText {
     UiText::new(
         resolve_font(config.family.as_deref(), Font::DEFAULT),
         config.size,
@@ -4325,7 +4325,7 @@ mod tests {
     /// read into either one.
     fn config_with_theme(theme: &str) -> jumppad_config::Config {
         toml::from_str(&format!(
-            "[mode]\nlight_theme = \"mine\"\ndark_theme = \"mine\"\n\n[themes.mine]\n{theme}"
+            "[mode]\ntheme.light = \"mine\"\ntheme.dark = \"mine\"\n\n[themes.mine]\n{theme}"
         ))
         .unwrap()
     }
@@ -4345,7 +4345,7 @@ mod tests {
     fn a_slot_naming_a_colorway_paints_that_colorway() {
         let mut app = test_app(1);
         let config: jumppad_config::Config = toml::from_str(
-            "[mode]\ndetection = \"dark\"\ndark_theme = \"Nord\"",
+            "[mode]\ndetection = \"dark\"\ntheme.dark = \"Nord\"",
         )
         .unwrap();
 
@@ -4357,7 +4357,7 @@ mod tests {
     #[test]
     fn apply_config_background_alpha_needs_a_window_born_transparent() {
         let mut app = test_app(1);
-        let config = config_with_theme("alpha.background = 0.5");
+        let config = config_with_theme("background.alpha = 0.5");
 
         // Booted opaque: the surface can't turn translucent, so nothing moves.
         app.apply_config(config.clone());
@@ -4378,7 +4378,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_shared_text_size() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("fonts.editor.size = 22.0"));
+        app.apply_config(config_with_theme("editor.font.size = 22.0"));
         assert_eq!(app.editor_config.font_size(), 22.0);
         assert_eq!(app.editor_config.font(), Font::MONOSPACE);
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
@@ -4387,7 +4387,7 @@ mod tests {
     #[test]
     fn an_unreadable_configured_text_size_is_clamped_not_obeyed() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("fonts.editor.size = 0.0"));
+        app.apply_config(config_with_theme("editor.font.size = 0.0"));
         assert!(app.editor_config.font_size() >= 4.0);
     }
 
@@ -4401,7 +4401,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_chrome_and_leaves_the_editor_alone() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("fonts.ui.size = 20.0"));
+        app.apply_config(config_with_theme("ui.font.size = 20.0"));
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
         // The editor reads its own section, and that one didn't move.
@@ -4418,18 +4418,18 @@ mod tests {
             r#"
             [mode]
             detection = "auto"
-            light_theme = "day"
-            dark_theme = "night"
+            theme.light = "day"
+            theme.dark = "night"
 
             [themes.day]
             colorway = "Solarized Light"
-            fonts.editor.size = 15.0
-            fonts.ui.size = 15.0
+            editor.font.size = 15.0
+            ui.font.size = 15.0
 
             [themes.night]
             colorway = "Nord"
-            fonts.editor.size = 21.0
-            fonts.ui.size = 21.0
+            editor.font.size = 21.0
+            ui.font.size = 21.0
             "#,
         )
         .unwrap()

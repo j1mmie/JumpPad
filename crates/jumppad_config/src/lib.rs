@@ -54,8 +54,8 @@ impl Config {
     /// its own name.
     pub fn theme_for(&self, showing: Appearance) -> ResolvedTheme {
         let name = match showing {
-            Appearance::Light => &self.mode.light_theme,
-            Appearance::Dark => &self.mode.dark_theme,
+            Appearance::Light => &self.mode.theme.light,
+            Appearance::Dark => &self.mode.theme.dark,
         };
 
         match self.themes.get(name) {
@@ -64,13 +64,17 @@ impl Config {
                     .colorway
                     .clone()
                     .unwrap_or_else(|| showing.default_colorway().to_string()),
-                alpha: theme.alpha,
-                fonts: theme.fonts.clone(),
+                background: theme.background,
+                foreground: theme.foreground,
+                editor: theme.editor.clone(),
+                ui: theme.ui.clone(),
             },
             None => ResolvedTheme {
                 colorway: name.clone(),
-                alpha: AlphaConfig::default(),
-                fonts: FontConfig::default(),
+                background: BackgroundConfig::default(),
+                foreground: ForegroundConfig::default(),
+                editor: EditorConfig::default(),
+                ui: UiConfig::default(),
             },
         }
     }
@@ -83,7 +87,7 @@ impl Config {
     pub fn wants_transparency(&self) -> bool {
         self.themes
             .values()
-            .any(|theme| theme.alpha.background < 1.0)
+            .any(|theme| theme.background.alpha < 1.0)
     }
 
     /// Extension (lowercased) -> comment style, for toggle-comment; a later
@@ -128,18 +132,33 @@ impl Appearance {
 #[serde(default)]
 pub struct ModeConfig {
     pub detection: Detection,
-    /// The theme to show in that slot - or, when no theme by this name
-    /// exists, a colorway to show the slot's default theme in.
-    pub light_theme: String,
-    pub dark_theme: String,
+    pub theme: ThemeSlots,
 }
 
 impl Default for ModeConfig {
     fn default() -> Self {
         Self {
             detection: Detection::Auto,
-            light_theme: Appearance::Light.default_colorway().to_string(),
-            dark_theme: Appearance::Dark.default_colorway().to_string(),
+            theme: ThemeSlots::default(),
+        }
+    }
+}
+
+/// Which theme fills each of the two slots. A name here is a `[themes]`
+/// entry - or, when no theme carries it, a colorway to show that slot's
+/// default theme in.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeSlots {
+    pub light: String,
+    pub dark: String,
+}
+
+impl Default for ThemeSlots {
+    fn default() -> Self {
+        Self {
+            light: Appearance::Light.default_colorway().to_string(),
+            dark: Appearance::Dark.default_colorway().to_string(),
         }
     }
 }
@@ -186,8 +205,10 @@ pub struct ThemeConfig {
     /// dark one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub colorway: Option<String>,
-    pub alpha: AlphaConfig,
-    pub fonts: FontConfig,
+    pub background: BackgroundConfig,
+    pub foreground: ForegroundConfig,
+    pub editor: EditorConfig,
+    pub ui: UiConfig,
 }
 
 /// A [`ThemeConfig`] with every fallback already applied - what the app
@@ -195,8 +216,10 @@ pub struct ThemeConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTheme {
     pub colorway: String,
-    pub alpha: AlphaConfig,
-    pub fonts: FontConfig,
+    pub background: BackgroundConfig,
+    pub foreground: ForegroundConfig,
+    pub editor: EditorConfig,
+    pub ui: UiConfig,
 }
 
 /// One `[[languages]]` entry: file extensions plus an optional grammar and
@@ -300,23 +323,50 @@ impl Default for WindowConfig {
     }
 }
 
-/// Independent transparency for the editor's background versus its text -
-/// `1.0` is fully solid, `0.0` fully invisible. Clamped where applied, not
-/// here, so this crate doesn't need an `iced` dependency.
+/// What a theme does to the surface behind the text. `alpha` is its
+/// opacity: `1.0` fully solid, `0.0` fully invisible. Its own section so
+/// anything else about the background joins it here rather than beside the
+/// text's. Clamped where applied, not here, so this crate doesn't need an
+/// `iced` dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct AlphaConfig {
-    pub background: f32,
-    pub foreground: f32,
+pub struct BackgroundConfig {
+    pub alpha: f32,
 }
 
-impl Default for AlphaConfig {
+impl Default for BackgroundConfig {
     fn default() -> Self {
-        Self {
-            background: 1.0,
-            foreground: 1.0,
-        }
+        Self { alpha: 1.0 }
     }
+}
+
+/// The same, for the text drawn on that surface. Independent of it, so a
+/// window can be see-through without its text fading with it.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ForegroundConfig {
+    pub alpha: f32,
+}
+
+impl Default for ForegroundConfig {
+    fn default() -> Self {
+        Self { alpha: 1.0 }
+    }
+}
+
+/// A theme's half for the documents themselves.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct EditorConfig {
+    pub font: FontConfig,
+}
+
+/// A theme's half for the app's own chrome around them - tab titles, the
+/// find palette, dialogs.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiConfig {
+    pub font: FontConfig,
 }
 
 /// Mouse-wheel and trackpad scrolling. `sensitivity` is a plain multiplier
@@ -376,36 +426,29 @@ impl SaveConflictResolution {
     }
 }
 
-/// The fonts JumpPad draws with, split by what they are for: documents in
-/// the editor, and the app's own chrome around them.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
-#[serde(default)]
-pub struct FontConfig {
-    pub editor: EditorFontConfig,
-    pub ui: UiFontConfig,
-}
-
-/// The typeface and text size documents are drawn with.
+/// The typeface and text size one surface is drawn with. The same shape
+/// serves the editor and the chrome; what differs is what the size means.
 ///
 /// `family` names a font family already installed on the machine, spelled
-/// the way the system lists it (`"JetBrains Mono"`, `"Cascadia Code"`);
-/// leaving it out draws with whatever the system offers as its monospace
-/// font, which is what JumpPad has always done. Nothing here is loaded from
-/// a file - a family the machine doesn't have is reported at startup and
-/// ignored.
+/// the way the system lists it (`"JetBrains Mono"`, `"Cascadia Code"`).
+/// Leaving it out draws with what the system offers - its monospace face
+/// for documents, its interface face for the chrome. Nothing here is loaded
+/// from a file: a family the machine doesn't have is reported at startup
+/// and ignored.
 ///
-/// `size` is the height of the editor's text in pixels before any per-window
-/// zoom. Both are matched and clamped where applied, not here, so this crate
-/// doesn't need an `iced` dependency.
+/// `size` is the height of the editor's text in pixels; in the chrome it is
+/// the tab titles' height, and the smaller text keeps its proportion to it,
+/// so one number scales the whole frame. Both are matched and clamped where
+/// applied, not here, so this crate doesn't need an `iced` dependency.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct EditorFontConfig {
+pub struct FontConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub family: Option<String>,
     pub size: f32,
 }
 
-impl Default for EditorFontConfig {
+impl Default for FontConfig {
     fn default() -> Self {
         Self {
             family: None,
@@ -414,31 +457,9 @@ impl Default for EditorFontConfig {
     }
 }
 
-/// The typeface and text size JumpPad's own chrome is drawn with - tab
-/// titles, the find palette, dialogs. Same family rules as the editor's.
-///
-/// `size` is the tab titles' height in pixels; the chrome's smaller text
-/// keeps its proportion to it, so one number scales the whole frame.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct UiFontConfig {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub family: Option<String>,
-    pub size: f32,
-}
-
-impl Default for UiFontConfig {
-    fn default() -> Self {
-        Self {
-            family: None,
-            size: DEFAULT_FONT_SIZE,
-        }
-    }
-}
-
-/// The text size either section falls back to when `config.toml` doesn't
-/// name one. Matches iced's own default text size, so an absent `size`
-/// draws exactly what JumpPad drew before the setting existed.
+/// The text size a surface falls back to when `config.toml` doesn't name
+/// one. Matches iced's own default text size, so an absent `size` draws
+/// exactly what JumpPad drew before the setting existed.
 pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
@@ -764,7 +785,7 @@ mod tests {
     /// A config whose dark slot names `theme`, which the caller defines.
     fn with_dark_theme(theme: &str) -> Config {
         toml::from_str(&format!(
-            "[mode]\ndetection = \"dark\"\ndark_theme = \"mine\"\n\n[themes.mine]\n{theme}"
+            "[mode]\ndetection = \"dark\"\ntheme.dark = \"mine\"\n\n[themes.mine]\n{theme}"
         ))
         .unwrap()
     }
@@ -772,41 +793,39 @@ mod tests {
     #[test]
     fn a_theme_with_no_fonts_keeps_the_defaults_for_both() {
         let theme = with_dark_theme("").theme_for(Appearance::Dark);
-        assert_eq!(theme.fonts, FontConfig::default());
-        assert_eq!(theme.fonts.editor.family, None);
-        assert_eq!(theme.fonts.editor.size, DEFAULT_FONT_SIZE);
-        assert_eq!(theme.fonts.ui.family, None);
+        assert_eq!(theme.editor.font, FontConfig::default());
+        assert_eq!(theme.ui.font, FontConfig::default());
+        assert_eq!(theme.editor.font.family, None);
+        assert_eq!(theme.editor.font.size, DEFAULT_FONT_SIZE);
+        assert_eq!(theme.ui.font.family, None);
     }
 
     #[test]
     fn the_editor_and_ui_fonts_are_named_independently() {
         let config = with_dark_theme(
             r#"
-            fonts.editor.family = "JetBrains Mono"
-            fonts.editor.size = 18.0
-            fonts.ui.family = "Inter"
-            fonts.ui.size = 13.0
+            editor.font.family = "JetBrains Mono"
+            editor.font.size = 18.0
+            ui.font.family = "Inter"
+            ui.font.size = 13.0
             "#,
         );
         let theme = config.theme_for(Appearance::Dark);
-        assert_eq!(
-            theme.fonts.editor.family.as_deref(),
-            Some("JetBrains Mono")
-        );
-        assert_eq!(theme.fonts.editor.size, 18.0);
-        assert_eq!(theme.fonts.ui.family.as_deref(), Some("Inter"));
-        assert_eq!(theme.fonts.ui.size, 13.0);
+        assert_eq!(theme.editor.font.family.as_deref(), Some("JetBrains Mono"));
+        assert_eq!(theme.editor.font.size, 18.0);
+        assert_eq!(theme.ui.font.family.as_deref(), Some("Inter"));
+        assert_eq!(theme.ui.font.size, 13.0);
     }
 
     /// The rule that makes every property optional at every depth: naming
     /// one leaves its siblings, and the other section, untouched.
     #[test]
     fn an_editor_size_alone_leaves_the_family_and_the_ui_font_default() {
-        let config = with_dark_theme("fonts.editor.size = 13.5");
+        let config = with_dark_theme("editor.font.size = 13.5");
         let theme = config.theme_for(Appearance::Dark);
-        assert_eq!(theme.fonts.editor.family, None);
-        assert_eq!(theme.fonts.editor.size, 13.5);
-        assert_eq!(theme.fonts.ui, UiFontConfig::default());
+        assert_eq!(theme.editor.font.family, None);
+        assert_eq!(theme.editor.font.size, 13.5);
+        assert_eq!(theme.ui.font, FontConfig::default());
     }
 
     #[test]
@@ -816,8 +835,10 @@ mod tests {
             config.theme_for(Appearance::Light),
             ResolvedTheme {
                 colorway: "Light".to_string(),
-                alpha: AlphaConfig::default(),
-                fonts: FontConfig::default(),
+                background: BackgroundConfig::default(),
+                foreground: ForegroundConfig::default(),
+                editor: EditorConfig::default(),
+                ui: UiConfig::default(),
             }
         );
         assert_eq!(config.theme_for(Appearance::Dark).colorway, "Dark");
@@ -828,18 +849,18 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [mode]
-            light_theme = "mine"
-            dark_theme = "mine"
+            theme.light = "mine"
+            theme.dark = "mine"
 
             [themes.mine]
-            alpha.background = 0.5
+            background.alpha = 0.5
             "#,
         )
         .unwrap();
         assert_eq!(config.theme_for(Appearance::Light).colorway, "Light");
         assert_eq!(config.theme_for(Appearance::Dark).colorway, "Dark");
         // The rest of the theme is the same either way.
-        assert_eq!(config.theme_for(Appearance::Dark).alpha.background, 0.5);
+        assert_eq!(config.theme_for(Appearance::Dark).background.alpha, 0.5);
     }
 
     #[test]
@@ -847,7 +868,7 @@ mod tests {
         let config: Config = toml::from_str(
             r#"
             [mode]
-            dark_theme = "Dracula"
+            theme.dark = "Dracula"
 
             [themes.Dracula]
             colorway = "Nord"
@@ -860,12 +881,14 @@ mod tests {
     #[test]
     fn a_slot_naming_no_theme_is_read_as_a_colorway() {
         let config: Config =
-            toml::from_str("[mode]\ndark_theme = \"Tokyo Night Storm\"")
+            toml::from_str("[mode]\ntheme.dark = \"Tokyo Night Storm\"")
                 .unwrap();
         let theme = config.theme_for(Appearance::Dark);
         assert_eq!(theme.colorway, "Tokyo Night Storm");
-        assert_eq!(theme.alpha, AlphaConfig::default());
-        assert_eq!(theme.fonts, FontConfig::default());
+        assert_eq!(theme.background, BackgroundConfig::default());
+        assert_eq!(theme.foreground, ForegroundConfig::default());
+        assert_eq!(theme.editor.font, FontConfig::default());
+        assert_eq!(theme.ui.font, FontConfig::default());
     }
 
     #[test]
@@ -893,13 +916,13 @@ mod tests {
     fn transparency_is_wanted_if_any_theme_at_all_asks_for_it() {
         assert!(!Config::default().wants_transparency());
 
-        let solid = with_dark_theme("alpha.background = 1.0");
+        let solid = with_dark_theme("background.alpha = 1.0");
         assert!(!solid.wants_transparency());
 
         let unnamed: Config = toml::from_str(
             r#"
             [themes.never_shown]
-            alpha.background = 0.9
+            background.alpha = 0.9
             "#,
         )
         .unwrap();
@@ -912,8 +935,9 @@ mod tests {
     fn the_written_default_file_names_the_two_colorways_and_no_themes() {
         let written = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(written.contains(r#"detection = "auto""#));
-        assert!(written.contains(r#"light_theme = "Light""#));
-        assert!(written.contains(r#"dark_theme = "Dark""#));
+        assert!(written.contains("[mode.theme]"));
+        assert!(written.contains(r#"light = "Light""#));
+        assert!(written.contains(r#"dark = "Dark""#));
         assert!(!written.contains("colorway"));
         assert!(!written.contains("family"));
     }
@@ -946,11 +970,11 @@ mod tests {
     fn try_parse_reads_the_first_existing_candidate() {
         let file = TempFile::with_contents(
             "valid.toml",
-            "[mode]\ndark_theme = \"Dracula\"",
+            "[mode]\ntheme.dark = \"Dracula\"",
         );
         let missing = PathBuf::from("does_not_exist/config.toml");
         let config: Config = try_parse(&[missing, file.0.clone()]).unwrap();
-        assert_eq!(config.mode.dark_theme, "Dracula");
+        assert_eq!(config.mode.theme.dark, "Dracula");
     }
 
     #[test]
@@ -988,13 +1012,14 @@ mod tests {
     }
 
     #[test]
-    fn default_alpha_is_fully_solid() {
+    fn both_surfaces_default_to_fully_solid() {
         assert_eq!(
-            AlphaConfig::default(),
-            AlphaConfig {
-                background: 1.0,
-                foreground: 1.0
-            }
+            BackgroundConfig::default(),
+            BackgroundConfig { alpha: 1.0 }
+        );
+        assert_eq!(
+            ForegroundConfig::default(),
+            ForegroundConfig { alpha: 1.0 }
         );
     }
 
@@ -1258,35 +1283,30 @@ mod tests {
     #[test]
     fn a_theme_with_no_alpha_section_falls_back_to_solid() {
         let theme = with_dark_theme("").theme_for(Appearance::Dark);
-        assert_eq!(theme.alpha, AlphaConfig::default());
+        assert_eq!(theme.background, BackgroundConfig::default());
+        assert_eq!(theme.foreground, ForegroundConfig::default());
     }
 
     #[test]
-    fn a_theme_with_an_alpha_section_parses() {
+    fn a_theme_can_set_either_surface_alpha() {
         let config = with_dark_theme(
             r#"
-            alpha.background = 0.7
-            alpha.foreground = 0.9
+            background.alpha = 0.7
+            foreground.alpha = 0.9
             "#,
         );
-        assert_eq!(
-            config.theme_for(Appearance::Dark).alpha,
-            AlphaConfig {
-                background: 0.7,
-                foreground: 0.9
-            }
-        );
+        let theme = config.theme_for(Appearance::Dark);
+        assert_eq!(theme.background, BackgroundConfig { alpha: 0.7 });
+        assert_eq!(theme.foreground, ForegroundConfig { alpha: 0.9 });
     }
 
+    /// The surfaces are separate sections, so naming one says nothing about
+    /// the other.
     #[test]
-    fn a_theme_alpha_with_only_one_field_defaults_the_other() {
-        let config = with_dark_theme("alpha.background = 0.5");
-        assert_eq!(
-            config.theme_for(Appearance::Dark).alpha,
-            AlphaConfig {
-                background: 0.5,
-                foreground: 1.0
-            }
-        );
+    fn a_theme_naming_one_surface_leaves_the_other_solid() {
+        let config = with_dark_theme("background.alpha = 0.5");
+        let theme = config.theme_for(Appearance::Dark);
+        assert_eq!(theme.background, BackgroundConfig { alpha: 0.5 });
+        assert_eq!(theme.foreground, ForegroundConfig::default());
     }
 }

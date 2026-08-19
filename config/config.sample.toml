@@ -13,28 +13,28 @@
 [mode]
 # "auto" follows the OS while JumpPad runs. "light" or "dark" pins one slot.
 detection = "auto"
-light_theme = "jimmie_light"
-dark_theme = "jimmie_dark"
+theme.light = "jimmie_light"
+theme.dark = "jimmie_dark"
 # A name with no [themes] entry behind it is read as a colorway on the
 # default theme, so picking colors needs no theme of its own:
-# dark_theme = "Dracula"
+# theme.dark = "Dracula"
 
 [themes.jimmie_dark]
 colorway = "Dark"
-alpha.background = 0.925
-alpha.foreground = 1.0
-fonts.editor.family = "MesloLGS NF"
-# fonts.editor.family = "CaskaydiaMono Nerd Font Mono"
-# fonts.editor.family = "Menlo"
-fonts.editor.size = 16.0
-fonts.ui.family = "Arial Black"
-# fonts.ui.family = "Lucida Grande"
-# fonts.ui.size = 16.0
+background.alpha = 0.925
+foreground.alpha = 1.0
+editor.font.family = "MesloLGS NF"
+# editor.font.family = "CaskaydiaMono Nerd Font Mono"
+# editor.font.family = "Menlo"
+editor.font.size = 16.0
+ui.font.family = "Arial Black"
+# ui.font.family = "Lucida Grande"
+# ui.font.size = 16.0
 
 [themes.jimmie_light]
 colorway = "Light"
-fonts.editor.family = "MesloLGS NF"
-fonts.ui.family = "Arial Black"
+editor.font.family = "MesloLGS NF"
+ui.font.family = "Arial Black"
 
 [window]
 decorations = true
