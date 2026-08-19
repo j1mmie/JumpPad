@@ -728,7 +728,7 @@ CoreGraphics backend builds its `CGImage` with
 `CGImageAlphaInfo::NoneSkipFirst` (`softbuffer-0.4.8/src/backends/cg.rs`),
 which discards the alpha channel outright. The `jumppad` (tiny-skia) binary
 therefore cannot produce a translucent window on macOS at all, no matter
-what `[alpha] background` says - it renders the alpha and CoreGraphics
+what a theme's `background.alpha` says - it renders the alpha and CoreGraphics
 throws it away. Anything transparency-related reported from macOS is by
 definition the wgpu path, so don't debug it against `iced_tiny_skia`'s
 compositor (this mistake has already been made once).
@@ -1397,7 +1397,7 @@ the editor, which matches VSCode.
 
 ## Transparent windows: why nothing repaints the background
 
-With `[alpha] background < 1.0`, `JumpPadApp::style` hands iced a
+With a theme's `background.alpha < 1.0`, `JumpPadApp::style` hands iced a
 `background_color` whose alpha is the configured value. The compositor
 writes that straight into the framebuffer (`BlendMode::Source`, so it
 *replaces* rather than blends), then every widget quad blends **on top**
@@ -1642,13 +1642,25 @@ reloads, so the signals can't conflict or double-apply.
 **Adding a live setting means adding an arm to `apply_config` (or
 `apply_keybinds`) in `app.rs` - nowhere else.** Both diff against the
 stored `self.config`/`self.keybinds` baseline and only touch what
-changed. A setting that can only apply at startup (window decorations,
-visor mode, and `alpha.background` on a window that booted opaque - the
-`transparent` window flag is creation-time) gets a `restart_required`
-log line instead of a half-working apply. One `[[languages]]` edit can
-feed two consumers, so `apply_config` diffs its *derived views*: the
-comment-style map applies live, the extension-to-grammar map is baked
-into the registry at startup and logs restart-required.
+changed. Anything a *theme* carries goes in `apply_theme` instead, which
+`apply_config` and an OS light/dark switch both call, so the two can't
+drift. One `[[languages]]` edit can feed two consumers, so `apply_config`
+diffs its *derived views*: the comment-style map applies live, the
+extension-to-grammar map is baked into the registry at startup and logs
+restart-required - the one setting still waiting on a restart.
+
+A window is handed its transparency, its decorations and its level when
+it is created and has no setter for any of them after, so those don't get
+an arm: they get a new window. `window::settings` (`window.rs`) says what
+window a config describes - `run()` builds the first one from it,
+`window::replace` builds every later one - and `window::needs_replacing`
+diffs two configs through it, so **a new creation-time setting joins by
+being named in `settings`, not by growing an arm.** The replacement opens
+before the old window closes, because iced ends the program when the last
+window is destroyed. It ends at `Message::WindowReady`, the arm every
+window arrives through, which is also where a new window is handed the
+platform setup and the keyboard focus its own widget tree doesn't carry;
+the caret and the selection do carry, since they live in the document.
 
 The one exception is `[files] save_conflict_resolution`, which nothing
 holds a copy of: `save_expectation` reads it out of `self.config` at save
@@ -1666,10 +1678,10 @@ fail (above).
 Three things reach the *editor* widgets on reload, all via the
 `SharedEditorConfig` handle every `TextArea` reads per view (the app
 can't reach into a `Box<dyn TextEditorWidget>`): the editor keybind
-overrides, `alpha.background`, and `scroll.sensitivity`. The scroll
+overrides, a theme's `background.alpha`, and `scroll.sensitivity`. The scroll
 sensitivity is the one that arms no repaint - nothing on screen changes
 until the next wheel event, and the `view` that event causes is where
-the widget picks the new value up. `alpha.foreground` rides the same
+the widget picks the new value up. `foreground.alpha` rides the same
 setter but is stored in a static atomic (`to_format` must stay a bare
 `fn` pointer), and it also sits in `HighlighterSettings`' hand-written
 `PartialEq` - without that, syntax-colored spans keep their old alpha

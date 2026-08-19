@@ -528,10 +528,7 @@ impl JumpPadApp {
             manifest.filter(|manifest| !manifest.tabs.is_empty())
         else {
             let task = app.new_tab();
-            return (
-                app,
-                Task::batch([task, boot_tasks, focus_editor(), argv_task]),
-            );
+            return (app, Task::batch([task, boot_tasks, argv_task]));
         };
 
         // Dirty tabs read their draft file; clean, file-backed tabs get a
@@ -614,10 +611,7 @@ impl JumpPadApp {
 
         if app.tabs.is_empty() {
             let task = app.new_tab();
-            return (
-                app,
-                Task::batch([task, boot_tasks, focus_editor(), argv_task]),
-            );
+            return (app, Task::batch([task, boot_tasks, argv_task]));
         }
 
         app.next_id = manifest
@@ -629,17 +623,11 @@ impl JumpPadApp {
             .unwrap_or(0);
 
         let desired_active = manifest.active.min(app.tabs.len() - 1);
+        // No focus task alongside it: `WindowReady` focuses whatever this
+        // leaves active, once the window it belongs to exists.
         let switch_task = app.switch_active(desired_active);
-        // `switch_active` only focuses when the index actually changes, so
-        // a restored active index of 0 needs an explicit focus here too.
-        let focus_task = if desired_active == 0 {
-            focus_editor()
-        } else {
-            Task::none()
-        };
         let task = Task::batch(reload_tasks.into_iter().chain([
             switch_task,
-            focus_task,
             boot_tasks,
             argv_task,
         ]));
@@ -1954,6 +1942,9 @@ impl JumpPadApp {
                 Task::batch([
                     self.disable_system_backdrop(),
                     self.snap_to_monitor(),
+                    // Every window arrives here, the first one included, so
+                    // this is the only place focus is handed to a new one.
+                    self.restore_focus(),
                 ])
             }
             Message::HotkeyEvent(event) => {
@@ -2078,6 +2069,40 @@ impl JumpPadApp {
             self.animation = None;
         }
         iced::window::move_to(id, point)
+    }
+
+    /// The widget a window should hand keyboard focus to, by id, or `None`
+    /// when nothing on screen wants it.
+    fn focus_target(&self) -> Option<&'static str> {
+        if self.modal.is_some() {
+            // A modal's choices are driven from the app's own key handling
+            // and its focused choice is a field of the modal, so there is no
+            // widget here to hand anything to.
+            return None;
+        }
+
+        match self.active_find().filter(|find| find.open) {
+            Some(_) => Some(FIND_INPUT_ID),
+            None => Some(editor_core::EDITOR_WIDGET_ID),
+        }
+    }
+
+    /// Puts keyboard focus where [`focus_target`](Self::focus_target) says.
+    ///
+    /// Focus belongs to a window's own widget tree, so a window that has
+    /// just appeared has none of it, however much of the app's state carried
+    /// into it - the caret and the selection do, since those live in the
+    /// document rather than in the widgets drawing it.
+    ///
+    /// Not `focus_find` for the palette, though the id is the same: that one
+    /// selects the query as well, which is right when reopening the palette
+    /// and wrong here, where the next keystroke would wipe a query the user
+    /// was midway through.
+    fn restore_focus(&self) -> Task<Message> {
+        match self.focus_target() {
+            Some(id) => operate(operation::focusable::focus(Id::new(id))),
+            None => Task::none(),
+        }
     }
 
     /// The active tab's find state, if it has any.
@@ -4539,6 +4564,71 @@ mod tests {
                 "{name:?} is not a palette"
             );
         }
+    }
+
+    /// What the plan for replacing windows rests on: the caret lives in the
+    /// document, not in the widget tree, so the tree a new window builds
+    /// from scratch doesn't take it with it.
+    #[test]
+    fn the_caret_and_selection_belong_to_the_document_not_the_window() {
+        use iced::widget::text_editor::{Action, Motion};
+
+        let mut app = app_with_text(&["one two\nthree four"]);
+        let _ = app.update(Message::Editor(
+            0,
+            EditorMessage::Action(Action::Move(Motion::Down)),
+        ));
+        let moved = app.tabs[0].editor.cursor_position();
+        assert_ne!(moved, (0, 0), "the caret moved");
+
+        // A window replacement rebuilds every widget from a fresh cache.
+        // `view` is what a rebuild runs, and the caret has to outlive it.
+        let _ = app.view();
+        let _ = app.view();
+
+        assert_eq!(app.tabs[0].editor.cursor_position(), moved);
+    }
+
+    #[test]
+    fn a_new_window_gives_its_focus_to_the_editor() {
+        let app = test_app(1);
+        assert_eq!(app.focus_target(), Some(editor_core::EDITOR_WIDGET_ID));
+        assert_ne!(app.restore_focus().units(), 0, "and issues the operation");
+    }
+
+    /// The palette outranks the editor while it is on screen: that is where
+    /// the user was typing.
+    #[test]
+    fn a_new_window_under_an_open_palette_focuses_the_query() {
+        let mut app = test_app(1);
+        let tab = app.tabs[0].id;
+        app.find.insert(
+            tab,
+            crate::find::FindState {
+                query: "two".to_string(),
+                open: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(app.focus_target(), Some(FIND_INPUT_ID));
+
+        // A closed palette isn't on screen, so it isn't a focus target - its
+        // query is kept only so reopening it starts where you left off.
+        app.find.get_mut(&tab).unwrap().open = false;
+        assert_eq!(app.focus_target(), Some(editor_core::EDITOR_WIDGET_ID));
+    }
+
+    #[test]
+    fn a_modal_leaves_focus_where_the_app_is_handling_it() {
+        let mut app = test_app(1);
+        app.modal = Some(Modal::Close(PendingClose {
+            tab_id: app.tabs[0].id,
+            title: "one".to_string(),
+            focused: 0,
+        }));
+
+        assert_eq!(app.focus_target(), None);
+        assert_eq!(app.restore_focus().units(), 0);
     }
 
     /// The sizes and line heights the chrome used when they were hardcoded,
