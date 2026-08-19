@@ -512,7 +512,9 @@ impl JumpPadApp {
             keybinds,
         };
 
-        app.apply_theme();
+        // The task is dropped rather than batched: there is no window yet
+        // to tell anything to, and `WindowReady` tells the one that arrives.
+        let _ = app.apply_theme();
         // Nothing has been drawn yet, so the nudge `apply_theme` arms for a
         // live change would only burn frames on the way up.
         app.redraw_nudge_frames = 0;
@@ -1259,28 +1261,32 @@ impl JumpPadApp {
 
         // Last, and through the same path an OS change takes: `theme_for`
         // reads the config that was just stored.
-        if appearance_changed {
+        let applied = if appearance_changed {
             self.showing = self.config.mode.showing(self.os_appearance);
-            self.apply_theme();
-        }
+            self.apply_theme()
+        } else {
+            Task::none()
+        };
 
         match self.window.filter(|_| replacement) {
             // Ends at `WindowReady`, the same arm the first window arrives
             // through, so a replacement is set up by the code that sets up
-            // every window.
+            // every window - which makes whatever `apply_theme` asked for
+            // redundant, since the new window is told all of it on arrival.
             Some(previous) => {
                 window::replace(previous, window::settings(&self.config))
                     .map(|id| Message::WindowReady(Some(id)))
             }
-            None => Task::none(),
+            None => applied,
         }
     }
 
     /// Resolves the config and the showing slot into a theme, and writes it
     /// everywhere it is read from. The only way a theme reaches the app, so
     /// a config reload and a change of the OS's setting cannot drift apart.
-    fn apply_theme(&mut self) {
+    fn apply_theme(&mut self) -> Task<Message> {
         let theme = self.config.theme_for(self.showing);
+        let was_translucent = self.background_alpha < 1.0;
 
         self.theme = resolve_palette(
             &theme.palette,
@@ -1310,19 +1316,43 @@ impl JumpPadApp {
         // tiny-skia's damage tracking can otherwise skip presenting a change
         // that moved no widget - a palette or alpha swap, say.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+
+        if self.background_alpha < 1.0 && !was_translucent {
+            self.turn_translucent()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// What a window has to be told once it is actually going to be seen
+    /// through. Done at `WindowReady` for a window that starts translucent,
+    /// and here for one that becomes translucent later - a theme switch can
+    /// cross that line without needing a new window, since the window's
+    /// transparency was settled at startup for every theme in the file.
+    ///
+    /// Both platforms leave the reverse alone: nothing re-enables a system
+    /// backdrop, the same as when a session boots translucent and reloads to
+    /// solid.
+    fn turn_translucent(&mut self) -> Task<Message> {
+        self.arm_surface_reset();
+        self.arm_shadow_refresh();
+
+        self.disable_system_backdrop()
     }
 
     /// Takes the OS's light/dark setting and switches themes if it moved the
     /// showing slot. Recorded whatever `detection` says, so a reload that
     /// turns `auto` back on resolves against an answer already in hand.
-    fn apply_os_appearance(&mut self, os: Option<Appearance>) {
+    fn apply_os_appearance(&mut self, os: Option<Appearance>) -> Task<Message> {
         self.os_appearance = os;
 
         let showing = self.config.mode.showing(self.os_appearance);
         if showing != self.showing {
             self.showing = showing;
-            self.apply_theme();
+            return self.apply_theme();
         }
+
+        Task::none()
     }
 
     /// Mirror of `apply_config` for `keybinds.toml`. The override tables are
@@ -1700,8 +1730,7 @@ impl JumpPadApp {
                 self.sweep_documents()
             }
             Message::SystemAppearanceReported(reported) => {
-                self.apply_os_appearance(system_appearance(reported));
-                Task::none()
+                self.apply_os_appearance(system_appearance(reported))
             }
             Message::ConfigFileEvent(file) => {
                 self.config_watch.note_event(file, Instant::now());
@@ -4629,6 +4658,69 @@ mod tests {
 
         assert_eq!(app.focus_target(), None);
         assert_eq!(app.restore_focus().units(), 0);
+    }
+
+    /// The case that reached a user: a window born transparent because
+    /// *some* theme wanted it, showing a solid theme, then reloaded to a
+    /// translucent one. No new window is called for - the window is already
+    /// transparent - so the platform setup a translucent window needs has to
+    /// be re-armed here or it never runs at all.
+    #[test]
+    fn a_window_that_only_becomes_translucent_later_is_still_set_up_for_it() {
+        let mut app = test_app(1);
+        // Born transparent on account of a theme that isn't showing.
+        app.window_transparent = true;
+        app.window = Some(iced::window::Id::unique());
+        app.surface_reset_frames = 0;
+
+        let solid_then_translucent: jumppad_config::Config = toml::from_str(
+            r#"
+            [mode]
+            detection = "light"
+            theme.light = "day"
+
+            [themes.day]
+            background.alpha = 0.5
+
+            [themes.night]
+            background.alpha = 0.975
+            "#,
+        )
+        .unwrap();
+        assert!(
+            solid_then_translucent.wants_transparency(),
+            "the unshown theme is what made the window transparent"
+        );
+
+        let _ = app.apply_config(solid_then_translucent);
+        assert_eq!(app.background_alpha, 0.5, "the alpha applied");
+        if cfg!(target_os = "windows") {
+            assert_ne!(
+                app.surface_reset_frames, 0,
+                "the redirection surface was never re-armed"
+            );
+        }
+        if cfg!(target_os = "macos") {
+            assert_ne!(app.shadow_refresh_frames, 0);
+        }
+    }
+
+    /// And only on the crossing: a theme swap between two translucent
+    /// themes has nothing new to tell the window.
+    #[test]
+    fn a_window_already_translucent_is_not_set_up_twice() {
+        let mut app = test_app(1);
+        app.window_transparent = true;
+        app.window = Some(iced::window::Id::unique());
+
+        let _ = app.apply_config(config_with_theme("background.alpha = 0.5"));
+        app.surface_reset_frames = 0;
+        app.shadow_refresh_frames = 0;
+
+        let _ = app.apply_config(config_with_theme("background.alpha = 0.7"));
+        assert_eq!(app.background_alpha, 0.7);
+        assert_eq!(app.surface_reset_frames, 0);
+        assert_eq!(app.shadow_refresh_frames, 0);
     }
 
     /// The sizes and line heights the chrome used when they were hardcoded,
