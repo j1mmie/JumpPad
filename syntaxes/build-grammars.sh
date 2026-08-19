@@ -43,11 +43,14 @@ mkdir -p "$out"
 clone "ikatyang/tree-sitter-toml" toml
 build "$work/toml" toml
 
-clone "tree-sitter-grammars/tree-sitter-yaml" yaml
-build "$work/yaml" yaml
-
 clone "tree-sitter/tree-sitter-json" json
 build "$work/json" json
+
+clone "tree-sitter/tree-sitter-html" html
+build "$work/html" html
+
+clone "tree-sitter-grammars/tree-sitter-yaml" yaml
+build "$work/yaml" yaml
 
 clone "tree-sitter-grammars/tree-sitter-diff" diff
 build "$work/diff" diff
@@ -57,9 +60,6 @@ build "$work/make" make
 
 clone "tree-sitter-grammars/tree-sitter-pem" pem
 build "$work/pem" pem
-
-clone "tree-sitter-grammars/tree-sitter-html" html
-build "$work/html" html
 
 # xml and csv each bundle multiple grammars as subdirectories of one repo.
 clone "tree-sitter-grammars/tree-sitter-xml" xml

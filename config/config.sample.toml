@@ -1,40 +1,31 @@
 # Sample config file
 
-# A palette is just colors - one of iced's built-in palettes:
+# A palette is a set of colors that can be used in a theme. JumpPad comes with
+# a few palettes built-in:
 #   Light, Dark, Dracula, Nord, Solarized Light, Solarized Dark,
 #   Gruvbox Light, Gruvbox Dark, Catppuccin Latte, Catppuccin Frappé,
 #   Catppuccin Macchiato, Catppuccin Mocha, Tokyo Night, Tokyo Night Storm,
 #   Tokyo Night Light, Kanagawa Wave, Kanagawa Dragon, Kanagawa Lotus,
 #   Moonfly, Nightfly, Oxocarbon, Ferra
 #
-# A theme is JumpPad's: a palette plus the alpha and fonts that go with it.
-# Every property is optional - what you leave out is the default.
-
-[mode]
-# "auto" follows the OS while JumpPad runs. "light" or "dark" pins one slot.
-detection = "auto"
-theme.light = "jimmie_light"
-theme.dark = "jimmie_dark"
-# A name with no [themes] entry behind it is read as a palette on the
-# default theme, so picking colors needs no theme of its own:
-# theme.dark = "Dracula"
 
 [themes.jimmie_dark]
 palette = "Dark"
 background.alpha = 0.925
 foreground.alpha = 1.0
-editor.font.family = "MesloLGS NF"
-# editor.font.family = "CaskaydiaMono Nerd Font Mono"
-# editor.font.family = "Menlo"
+editor.font.family = "Consolas"
 editor.font.size = 16.0
-ui.font.family = "Arial Black"
-# ui.font.family = "Lucida Grande"
-# ui.font.size = 16.0
+ui.font.family = "Comic Sans MS"
 
 [themes.jimmie_light]
 palette = "Light"
-editor.font.family = "MesloLGS NF"
-ui.font.family = "Arial Black"
+editor.font.family = "Consolas"
+ui.font.family = "Comic Sans MS"
+
+[mode]
+detection = "auto"
+theme.light = "jimmie_light"
+theme.dark = "jimmie_dark"
 
 [window]
 decorations = true
