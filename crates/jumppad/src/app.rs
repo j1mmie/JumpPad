@@ -1271,9 +1271,9 @@ impl JumpPadApp {
     fn apply_theme(&mut self) {
         let theme = self.config.theme_for(self.showing);
 
-        self.theme = resolve_theme(
-            &theme.colorway,
-            resolve_theme(self.showing.default_colorway(), Theme::Light),
+        self.theme = resolve_palette(
+            &theme.palette,
+            resolve_palette(self.showing.default_palette(), Theme::Light),
         );
         // A window is transparent or not from the moment it is created, and
         // `run()` counted every theme in the file before creating this one.
@@ -1297,7 +1297,7 @@ impl JumpPadApp {
         self.editor_config.set_font_size(theme.editor.font.size);
         self.ui_text = ui_text(&theme.ui.font);
         // tiny-skia's damage tracking can otherwise skip presenting a change
-        // that moved no widget - a colorway or alpha swap, say.
+        // that moved no widget - a palette or alpha swap, say.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
     }
 
@@ -3044,11 +3044,15 @@ fn system_appearance(reported: iced::theme::Mode) -> Option<Appearance> {
     }
 }
 
-/// Matches a config-file colorway name against `Theme::ALL` by display name
+/// Matches a config-file palette name against `Theme::ALL` by display name
 /// (`"Dracula"`, `"Solarized Light"`, ...), case-insensitively so hand-edited
 /// TOML doesn't have to get the exact casing right. Falls back to `fallback`
 /// - and logs why - rather than failing startup over a typo.
-fn resolve_theme(name: &str, fallback: Theme) -> Theme {
+///
+/// An `iced::Theme` comes back because that is how iced carries a palette:
+/// each of its themes is one, named. JumpPad's own themes are the wider
+/// thing, in `jumppad_config`.
+fn resolve_palette(name: &str, fallback: Theme) -> Theme {
     let theme = Theme::ALL
         .iter()
         .find(|theme| theme.to_string().eq_ignore_ascii_case(name.trim()));
@@ -3062,7 +3066,7 @@ fn resolve_theme(name: &str, fallback: Theme) -> Theme {
                 .collect::<Vec<_>>()
                 .join(", ");
             eprintln!(
-                "jumppad: unknown colorway {name:?}, using default. Valid options: {valid}"
+                "jumppad: unknown palette {name:?}, using default. Valid options: {valid}"
             );
             fallback
         }
@@ -4331,18 +4335,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_config_swaps_the_colorway_and_arms_a_repaint() {
+    fn apply_config_swaps_the_palette_and_arms_a_repaint() {
         let mut app = test_app(1);
 
-        app.apply_config(config_with_theme(r#"colorway = "Dracula""#));
+        app.apply_config(config_with_theme(r#"palette = "Dracula""#));
         assert_eq!(app.theme.to_string(), "Dracula");
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
-    /// The colorway can be named by the slot instead of by a theme, so
+    /// The palette can be named by the slot instead of by a theme, so
     /// picking colors needs no `[themes]` entry at all.
     #[test]
-    fn a_slot_naming_a_colorway_paints_that_colorway() {
+    fn a_slot_naming_a_palette_paints_that_palette() {
         let mut app = test_app(1);
         let config: jumppad_config::Config = toml::from_str(
             "[mode]\ndetection = \"dark\"\ntheme.dark = \"Nord\"",
@@ -4422,12 +4426,12 @@ mod tests {
             theme.dark = "night"
 
             [themes.day]
-            colorway = "Solarized Light"
+            palette = "Solarized Light"
             editor.font.size = 15.0
             ui.font.size = 15.0
 
             [themes.night]
-            colorway = "Nord"
+            palette = "Nord"
             editor.font.size = 21.0
             ui.font.size = 21.0
             "#,
@@ -4439,7 +4443,7 @@ mod tests {
         let _ = app.update(Message::SystemAppearanceReported(reported));
     }
 
-    /// The guard on there being one apply path: colorway, editor font and
+    /// The guard on there being one apply path: palette, editor font and
     /// chrome font all move on the same message.
     #[test]
     fn an_os_switch_to_dark_swaps_the_whole_theme() {
@@ -4499,20 +4503,20 @@ mod tests {
     }
 
     #[test]
-    fn an_unknown_colorway_falls_back_to_the_one_it_was_handed() {
-        assert_eq!(resolve_theme("nonsense", Theme::Dark), Theme::Dark);
-        assert_eq!(resolve_theme("nonsense", Theme::Light), Theme::Light);
+    fn an_unknown_palette_falls_back_to_the_one_it_was_handed() {
+        assert_eq!(resolve_palette("nonsense", Theme::Dark), Theme::Dark);
+        assert_eq!(resolve_palette("nonsense", Theme::Light), Theme::Light);
     }
 
-    /// The two crates have to agree on how the default colorways are spelled,
+    /// The two crates have to agree on how the default palettes are spelled,
     /// and only this one can check the spelling.
     #[test]
-    fn both_default_colorway_names_are_real_colorways() {
+    fn both_default_palette_names_are_real_palettes() {
         for showing in [Appearance::Light, Appearance::Dark] {
-            let name = showing.default_colorway();
+            let name = showing.default_palette();
             assert!(
                 Theme::ALL.iter().any(|theme| theme.to_string() == name),
-                "{name:?} is not a colorway"
+                "{name:?} is not a palette"
             );
         }
     }

@@ -47,10 +47,10 @@ impl Config {
 
     /// The theme to draw with in the given appearance.
     ///
-    /// The slot names a theme, and failing that a colorway: a name with no
-    /// `[themes]` entry behind it is taken as a colorway to show the slot's
+    /// The slot names a theme, and failing that a palette: a name with no
+    /// `[themes]` entry behind it is taken as a palette to show the slot's
     /// default theme in, so choosing colors doesn't require defining a whole
-    /// theme. Themes are looked up first, so one named after a colorway wins
+    /// theme. Themes are looked up first, so one named after a palette wins
     /// its own name.
     pub fn theme_for(&self, showing: Appearance) -> ResolvedTheme {
         let name = match showing {
@@ -60,17 +60,17 @@ impl Config {
 
         match self.themes.get(name) {
             Some(theme) => ResolvedTheme {
-                colorway: theme
-                    .colorway
+                palette: theme
+                    .palette
                     .clone()
-                    .unwrap_or_else(|| showing.default_colorway().to_string()),
+                    .unwrap_or_else(|| showing.default_palette().to_string()),
                 background: theme.background,
                 foreground: theme.foreground,
                 editor: theme.editor.clone(),
                 ui: theme.ui.clone(),
             },
             None => ResolvedTheme {
-                colorway: name.clone(),
+                palette: name.clone(),
                 background: BackgroundConfig::default(),
                 foreground: ForegroundConfig::default(),
                 editor: EditorConfig::default(),
@@ -118,8 +118,8 @@ pub enum Appearance {
 }
 
 impl Appearance {
-    /// The colorway a slot falls back to when nothing names one.
-    pub fn default_colorway(self) -> &'static str {
+    /// The palette a slot falls back to when nothing names one.
+    pub fn default_palette(self) -> &'static str {
         match self {
             Self::Light => "Light",
             Self::Dark => "Dark",
@@ -145,7 +145,7 @@ impl Default for ModeConfig {
 }
 
 /// Which theme fills each of the two slots. A name here is a `[themes]`
-/// entry - or, when no theme carries it, a colorway to show that slot's
+/// entry - or, when no theme carries it, a palette to show that slot's
 /// default theme in.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -157,8 +157,8 @@ pub struct ThemeSlots {
 impl Default for ThemeSlots {
     fn default() -> Self {
         Self {
-            light: Appearance::Light.default_colorway().to_string(),
-            dark: Appearance::Dark.default_colorway().to_string(),
+            light: Appearance::Light.default_palette().to_string(),
+            dark: Appearance::Dark.default_palette().to_string(),
         }
     }
 }
@@ -190,7 +190,7 @@ pub enum Detection {
 }
 
 /// One named theme: everything about JumpPad's appearance that can differ
-/// between light and dark. A colorway supplies the colors; the rest is what
+/// between light and dark. A palette supplies the colors; the rest is what
 /// JumpPad layers on top of them.
 ///
 /// Every field is optional, including the nested ones. What isn't named here
@@ -201,10 +201,10 @@ pub struct ThemeConfig {
     /// The display name of an `iced::Theme` variant (e.g. `"Dracula"`),
     /// matched case-insensitively where it's applied - kept as a plain
     /// string so this crate doesn't need to depend on `iced`. Unnamed means
-    /// the slot's own colorway: `"Light"` in the light slot, `"Dark"` in the
+    /// the slot's own palette: `"Light"` in the light slot, `"Dark"` in the
     /// dark one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colorway: Option<String>,
+    pub palette: Option<String>,
     pub background: BackgroundConfig,
     pub foreground: ForegroundConfig,
     pub editor: EditorConfig,
@@ -215,7 +215,7 @@ pub struct ThemeConfig {
 /// actually draws with.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedTheme {
-    pub colorway: String,
+    pub palette: String,
     pub background: BackgroundConfig,
     pub foreground: ForegroundConfig,
     pub editor: EditorConfig,
@@ -829,23 +829,23 @@ mod tests {
     }
 
     #[test]
-    fn a_slot_naming_nothing_of_its_own_is_the_plain_colorway_for_it() {
+    fn a_slot_naming_nothing_of_its_own_is_the_plain_palette_for_it() {
         let config = Config::default();
         assert_eq!(
             config.theme_for(Appearance::Light),
             ResolvedTheme {
-                colorway: "Light".to_string(),
+                palette: "Light".to_string(),
                 background: BackgroundConfig::default(),
                 foreground: ForegroundConfig::default(),
                 editor: EditorConfig::default(),
                 ui: UiConfig::default(),
             }
         );
-        assert_eq!(config.theme_for(Appearance::Dark).colorway, "Dark");
+        assert_eq!(config.theme_for(Appearance::Dark).palette, "Dark");
     }
 
     #[test]
-    fn a_theme_with_no_colorway_takes_the_one_for_its_slot() {
+    fn a_theme_with_no_palette_takes_the_one_for_its_slot() {
         let config: Config = toml::from_str(
             r#"
             [mode]
@@ -857,34 +857,34 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.theme_for(Appearance::Light).colorway, "Light");
-        assert_eq!(config.theme_for(Appearance::Dark).colorway, "Dark");
+        assert_eq!(config.theme_for(Appearance::Light).palette, "Light");
+        assert_eq!(config.theme_for(Appearance::Dark).palette, "Dark");
         // The rest of the theme is the same either way.
         assert_eq!(config.theme_for(Appearance::Dark).background.alpha, 0.5);
     }
 
     #[test]
-    fn a_theme_named_after_a_colorway_wins_its_own_name() {
+    fn a_theme_named_after_a_palette_wins_its_own_name() {
         let config: Config = toml::from_str(
             r#"
             [mode]
             theme.dark = "Dracula"
 
             [themes.Dracula]
-            colorway = "Nord"
+            palette = "Nord"
             "#,
         )
         .unwrap();
-        assert_eq!(config.theme_for(Appearance::Dark).colorway, "Nord");
+        assert_eq!(config.theme_for(Appearance::Dark).palette, "Nord");
     }
 
     #[test]
-    fn a_slot_naming_no_theme_is_read_as_a_colorway() {
+    fn a_slot_naming_no_theme_is_read_as_a_palette() {
         let config: Config =
             toml::from_str("[mode]\ntheme.dark = \"Tokyo Night Storm\"")
                 .unwrap();
         let theme = config.theme_for(Appearance::Dark);
-        assert_eq!(theme.colorway, "Tokyo Night Storm");
+        assert_eq!(theme.palette, "Tokyo Night Storm");
         assert_eq!(theme.background, BackgroundConfig::default());
         assert_eq!(theme.foreground, ForegroundConfig::default());
         assert_eq!(theme.editor.font, FontConfig::default());
@@ -930,15 +930,15 @@ mod tests {
     }
 
     /// The default file defines no themes at all - `[mode]` names the two
-    /// plain colorways, which resolve without one.
+    /// plain palettes, which resolve without one.
     #[test]
-    fn the_written_default_file_names_the_two_colorways_and_no_themes() {
+    fn the_written_default_file_names_the_two_palettes_and_no_themes() {
         let written = toml::to_string_pretty(&Config::default()).unwrap();
         assert!(written.contains(r#"detection = "auto""#));
         assert!(written.contains("[mode.theme]"));
         assert!(written.contains(r#"light = "Light""#));
         assert!(written.contains(r#"dark = "Dark""#));
-        assert!(!written.contains("colorway"));
+        assert!(!written.contains("palette"));
         assert!(!written.contains("family"));
     }
 

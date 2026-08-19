@@ -79,7 +79,7 @@ pub(crate) fn config() -> Config {
 
     Config {
         // No `[themes]` of its own: the default `[mode]` names the "Light"
-        // and "Dark" colorways, which resolve without a theme behind them.
+        // and "Dark" palettes, which resolve without a theme behind them.
         mode: ModeConfig::default(),
         themes: BTreeMap::new(),
         visor: VisorConfig::default(),
