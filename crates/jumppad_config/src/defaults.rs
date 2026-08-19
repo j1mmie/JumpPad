@@ -1,6 +1,8 @@
+use std::collections::BTreeMap;
+
 use crate::{
-    AlphaConfig, CommentSyntax, Config, FilesConfig, FontConfig, HistoryConfig,
-    LanguageConfig, ScrollConfig, VisorConfig, WindowConfig,
+    CommentSyntax, Config, FilesConfig, HistoryConfig, LanguageConfig,
+    ModeConfig, ScrollConfig, VisorConfig, WindowConfig,
 };
 
 fn lang(
@@ -76,14 +78,15 @@ pub(crate) fn config() -> Config {
     ];
 
     Config {
-        theme: "Light".to_string(),
+        // No `[themes]` of its own: the default `[mode]` names the "Light"
+        // and "Dark" palettes, which resolve without a theme behind them.
+        mode: ModeConfig::default(),
+        themes: BTreeMap::new(),
         visor: VisorConfig::default(),
-        alpha: AlphaConfig::default(),
         window: WindowConfig::default(),
         scroll: ScrollConfig::default(),
         history: HistoryConfig::default(),
         files: FilesConfig::default(),
-        font: FontConfig::default(),
         languages,
     }
 }

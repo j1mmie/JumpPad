@@ -11,6 +11,7 @@ pub(crate) mod macos;
 mod reload;
 mod session;
 mod visor;
+mod window;
 #[cfg(target_os = "windows")]
 pub(crate) mod windows;
 
@@ -99,12 +100,9 @@ Options:
     };
 
     let config = jumppad_config::load();
-    let visor_enabled = config.visor.enabled;
-    // Visor mode wins: a drop-down visor is undecorated by definition.
-    let decorations = config.window.decorations && !visor_enabled;
-    // Skipped entirely (not just requested-then-ignored) at the default
-    // alpha of `1.0`, since transparent windows use a costlier compositing path.
-    let transparent = config.alpha.background < 1.0;
+    // The same description a `config.toml` reload builds to decide whether
+    // the window on screen still matches the file - see `window::replace`.
+    let window = window::settings(&config);
 
     // Defaults to `info` level (still overridable via `RUST_LOG`) so
     // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
@@ -116,7 +114,9 @@ Options:
     // Neither backend can do transparency on every platform, and the failure
     // is silent - the window just comes up solid, which reads as a rendering
     // bug rather than a wrong-binary problem. Say so up front instead.
-    if transparent && let Some(reason) = OPAQUE_WINDOW_REASON {
+    if window.transparent
+        && let Some(reason) = OPAQUE_WINDOW_REASON
+    {
         eprintln!("jumppad: {reason}");
     }
 
@@ -128,25 +128,15 @@ Options:
         JumpPadApp::view,
     )
     .title("JumpPad")
-    .window_size(iced::Size::new(900.0, 600.0))
-    .decorations(decorations)
-    .transparent(transparent)
+    .window(window)
     // iced defaults this on, but its MSAA only ever applies to triangle
     // primitives - meshes, canvases, gradient quads - and this app draws
     // none. Quads and text are always `count: 1` regardless. So it buys
     // nothing visually and costs pipelines plus a 4x-sampled render target.
     .antialiasing(false)
-    // The visor floats above whatever else has focus; an ordinary window doesn't.
-    .level(if visor_enabled {
-        iced::window::Level::AlwaysOnTop
-    } else {
-        iced::window::Level::Normal
-    })
     .subscription(JumpPadApp::subscription)
     .theme(JumpPadApp::theme)
     .style(JumpPadApp::style)
-    // Runs a last-ditch draft flush before actually closing the window.
-    .exit_on_close_request(false)
     .run()
 }
 
