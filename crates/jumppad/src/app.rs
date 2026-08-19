@@ -28,6 +28,7 @@ use crate::hotkey::{self, Hotkey};
 use crate::reload;
 use crate::session;
 use crate::visor::{self, Animation};
+use crate::window;
 
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -1102,11 +1103,12 @@ impl JumpPadApp {
     /// Reloads whichever config files settled out of a change burst. A file
     /// that no longer parses keeps the current in-memory settings and says
     /// so in the error banner - a save mid-edit must not reset anything.
-    fn reload_settled_configs(&mut self) {
+    fn reload_settled_configs(&mut self) -> Task<Message> {
+        let mut tasks = Vec::new();
         for file in self.config_watch.settled(Instant::now()) {
             let result = match file {
                 reload::WatchedFile::Config => jumppad_config::try_load()
-                    .map(|config| self.apply_config(config)),
+                    .map(|config| tasks.push(self.apply_config(config))),
                 reload::WatchedFile::Keybinds => {
                     jumppad_config::try_load_keybinds()
                         .map(|keybinds| self.apply_keybinds(keybinds))
@@ -1120,6 +1122,8 @@ impl JumpPadApp {
                 ));
             }
         }
+
+        Task::batch(tasks)
     }
 
     /// Every open file-backed tab's path, sorted and deduped - the watcher's
@@ -1218,7 +1222,7 @@ impl JumpPadApp {
     ///
     /// Nothing left here changes what is on screen by itself, so none of
     /// these arms arms the repaint nudge; `apply_theme` does its own.
-    fn apply_config(&mut self, new: jumppad_config::Config) {
+    fn apply_config(&mut self, new: jumppad_config::Config) -> Task<Message> {
         let current = &self.config;
         let appearance_changed =
             new.themes != current.themes || new.mode != current.mode;
@@ -1245,11 +1249,19 @@ impl JumpPadApp {
                 .set_comment_styles(build_comment_styles(&new));
         }
 
-        if new.window != current.window {
-            restart_required("[window] decorations");
-        }
+        // Settings a window is handed once, at creation. Nothing can reach
+        // the one on screen, so it gets replaced by one built to the new
+        // config - see `window::replace`.
+        let replacement = window::needs_replacing(current, &new);
         if new.visor.enabled != current.visor.enabled {
-            restart_required("[visor] enabled");
+            self.visor_enabled = new.visor.enabled;
+            // Registered only while the visor can be summoned, and dropped
+            // otherwise: holding the chord would keep it from every other app
+            // for a mode that isn't on.
+            self.hotkey = None;
+            if self.visor_enabled {
+                self.hotkey = Hotkey::register(self.keybinds.toggle);
+            }
         }
         if new.extension_to_grammar() != current.extension_to_grammar() {
             restart_required("[[languages]] extension-to-syntax mappings");
@@ -1262,6 +1274,17 @@ impl JumpPadApp {
         if appearance_changed {
             self.showing = self.config.mode.showing(self.os_appearance);
             self.apply_theme();
+        }
+
+        match self.window.filter(|_| replacement) {
+            // Ends at `WindowReady`, the same arm the first window arrives
+            // through, so a replacement is set up by the code that sets up
+            // every window.
+            Some(previous) => {
+                window::replace(previous, window::settings(&self.config))
+                    .map(|id| Message::WindowReady(Some(id)))
+            }
+            None => Task::none(),
         }
     }
 
@@ -1696,10 +1719,7 @@ impl JumpPadApp {
                 self.config_watch.note_event(file, Instant::now());
                 Task::none()
             }
-            Message::ConfigSettleTick => {
-                self.reload_settled_configs();
-                Task::none()
-            }
+            Message::ConfigSettleTick => self.reload_settled_configs(),
             Message::DocumentFileEvent => {
                 self.document_watch.note_event(Instant::now());
                 Task::none()
@@ -4338,7 +4358,7 @@ mod tests {
     fn apply_config_swaps_the_palette_and_arms_a_repaint() {
         let mut app = test_app(1);
 
-        app.apply_config(config_with_theme(r#"palette = "Dracula""#));
+        let _ = app.apply_config(config_with_theme(r#"palette = "Dracula""#));
         assert_eq!(app.theme.to_string(), "Dracula");
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
@@ -4353,7 +4373,7 @@ mod tests {
         )
         .unwrap();
 
-        app.apply_config(config);
+        let _ = app.apply_config(config);
         assert_eq!(app.theme.to_string(), "Nord");
         assert_eq!(app.editor_config.font_size(), 16.0, "default fonts stand");
     }
@@ -4364,14 +4384,14 @@ mod tests {
         let config = config_with_theme("background.alpha = 0.5");
 
         // Booted opaque: the surface can't turn translucent, so nothing moves.
-        app.apply_config(config.clone());
+        let _ = app.apply_config(config.clone());
         assert_eq!(app.background_alpha, 1.0);
         assert_eq!(app.editor_config.background_alpha(), 1.0);
 
         // Booted transparent: the window style and the editors both follow.
         app.window_transparent = true;
         app.config = jumppad_config::Config::default();
-        app.apply_config(config);
+        let _ = app.apply_config(config);
         assert_eq!(app.background_alpha, 0.5);
         assert_eq!(app.editor_config.background_alpha(), 0.5);
     }
@@ -4382,7 +4402,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_shared_text_size() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("editor.font.size = 22.0"));
+        let _ = app.apply_config(config_with_theme("editor.font.size = 22.0"));
         assert_eq!(app.editor_config.font_size(), 22.0);
         assert_eq!(app.editor_config.font(), Font::MONOSPACE);
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
@@ -4391,7 +4411,7 @@ mod tests {
     #[test]
     fn an_unreadable_configured_text_size_is_clamped_not_obeyed() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("editor.font.size = 0.0"));
+        let _ = app.apply_config(config_with_theme("editor.font.size = 0.0"));
         assert!(app.editor_config.font_size() >= 4.0);
     }
 
@@ -4405,7 +4425,7 @@ mod tests {
     #[test]
     fn apply_config_reaches_the_chrome_and_leaves_the_editor_alone() {
         let mut app = test_app(1);
-        app.apply_config(config_with_theme("ui.font.size = 20.0"));
+        let _ = app.apply_config(config_with_theme("ui.font.size = 20.0"));
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
         assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
         // The editor reads its own section, and that one didn't move.
@@ -4448,7 +4468,7 @@ mod tests {
     #[test]
     fn an_os_switch_to_dark_swaps_the_whole_theme() {
         let mut app = test_app(1);
-        app.apply_config(config_with_both_slots());
+        let _ = app.apply_config(config_with_both_slots());
         report(&mut app, iced::theme::Mode::Light);
         assert_eq!(app.theme.to_string(), "Solarized Light");
         assert_eq!(app.editor_config.font_size(), 15.0);
@@ -4467,7 +4487,7 @@ mod tests {
         let mut app = test_app(1);
         let mut config = config_with_both_slots();
         config.mode.detection = jumppad_config::Detection::Light;
-        app.apply_config(config);
+        let _ = app.apply_config(config);
         app.redraw_nudge_frames = 0;
 
         report(&mut app, iced::theme::Mode::Dark);
@@ -4484,11 +4504,11 @@ mod tests {
         let mut app = test_app(1);
         let mut pinned = config_with_both_slots();
         pinned.mode.detection = jumppad_config::Detection::Light;
-        app.apply_config(pinned);
+        let _ = app.apply_config(pinned);
         report(&mut app, iced::theme::Mode::Dark);
         assert_eq!(app.theme.to_string(), "Solarized Light");
 
-        app.apply_config(config_with_both_slots());
+        let _ = app.apply_config(config_with_both_slots());
         assert_eq!(app.theme.to_string(), "Nord");
     }
 
@@ -4496,7 +4516,7 @@ mod tests {
     #[test]
     fn an_os_with_no_preference_leaves_the_light_slot_showing() {
         let mut app = test_app(1);
-        app.apply_config(config_with_both_slots());
+        let _ = app.apply_config(config_with_both_slots());
         report(&mut app, iced::theme::Mode::None);
         assert_eq!(app.theme.to_string(), "Solarized Light");
         assert_eq!(app.os_appearance, None);
@@ -4572,7 +4592,7 @@ mod tests {
             ],
             ..Default::default()
         };
-        app.apply_config(config);
+        let _ = app.apply_config(config);
         assert_eq!(
             app.editor_config.comment_styles().get("zig"),
             Some(&jumppad_textarea::CommentStyle::Single("// ".to_string()))
@@ -4594,7 +4614,7 @@ mod tests {
         let mut config = jumppad_config::Config::default();
         config.languages[0].name = "Renamed".to_string();
 
-        app.apply_config(config);
+        let _ = app.apply_config(config);
         // Neither derived view moved, so the setter never ran.
         assert!(Arc::ptr_eq(&before, &app.editor_config.comment_styles()));
     }
@@ -4603,26 +4623,64 @@ mod tests {
     fn restart_required_settings_mutate_no_live_state() {
         let mut app = test_app(1);
         let theme_before = app.theme.to_string();
-        let mut config = jumppad_config::Config {
-            window: jumppad_config::WindowConfig { decorations: false },
-            visor: jumppad_config::VisorConfig { enabled: true },
-            ..Default::default()
-        };
-        // A new grammar mapping without a comment style: restart-required,
-        // nothing live to apply.
+        // A new grammar mapping without a comment style: the one setting
+        // still waiting on a restart, now that the window ones don't.
+        let mut config = jumppad_config::Config::default();
         config
             .languages
             .push(language("Zig", Some("zig"), &["zig"], None));
 
-        app.apply_config(config.clone());
+        let _ = app.apply_config(config.clone());
         assert_eq!(app.theme.to_string(), theme_before);
         assert_eq!(app.background_alpha, 1.0);
         assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
-        assert!(!app.visor_enabled);
         // The new values still become the diff baseline, so the
         // restart-required log fires once per transition rather than on
         // every later unrelated reload.
         assert_eq!(app.config, config);
+    }
+
+    /// A window setting can only be honored by a new window, and only when
+    /// there is an old one to replace.
+    #[test]
+    fn a_window_setting_asks_for_a_replacement_window() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        let config = jumppad_config::Config {
+            window: jumppad_config::WindowConfig { decorations: false },
+            ..Default::default()
+        };
+
+        // A `Task` only reports how much work it carries, so the check is
+        // that it carries some where a live-only reload carries none.
+        let replacement = app.apply_config(config);
+        assert_ne!(replacement.units(), 0, "no window replacement issued");
+    }
+
+    #[test]
+    fn a_live_only_reload_leaves_the_window_alone() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+
+        let live_only =
+            app.apply_config(config_with_theme(r#"palette = "Nord""#));
+        assert_eq!(live_only.units(), 0, "nothing to do to the window");
+        assert_eq!(app.theme.to_string(), "Nord", "but the theme still moved");
+    }
+
+    /// Turning the visor on takes a new window - undecorated and floating -
+    /// and the global hotkey that summons it.
+    #[test]
+    fn turning_the_visor_on_reaches_the_hotkey_as_well_as_the_window() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        let config = jumppad_config::Config {
+            visor: jumppad_config::VisorConfig { enabled: true },
+            ..Default::default()
+        };
+
+        let _ = app.apply_config(config);
+        assert!(app.visor_enabled);
     }
 
     fn key_press(
