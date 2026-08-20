@@ -1195,30 +1195,30 @@ spectacularly on the numbers: measured with `SOFTBUFFER_TRACE_AGE=1` (plus
 ~35ms to **0.02ms**, at both a 3/4-screen and a maximized window - it stopped
 scaling with window area at all, which was the entire point.
 
-It also renders incorrectly, so it is off.
+It also rendered incorrectly, which is why it is off - a strip of
+superimposed text above and below the editor while scrolling, refreshed on
+every caret blink. **That has since been diagnosed and fixed**, in
+`text_clip` (see "Clipping the text"): the editor paints the rows the edges
+cut through whole, and the software renderer was skipping the clip mask that
+should have stopped the overhang, so it landed outside the regions anything
+repaints. The prediction made here held - Windows and X11 report a real age
+and had the same strips all along, which is where the bug was finally
+reported from.
 
-`iced_graphics::text::editor::Internal`'s `PartialEq` compares font, bounds and
-line metrics, and nothing else. **Scrolling changes none of them**, so a
-scrolled editor compares equal to its own previous frame and contributes no
-damage at all. Whatever those unrepainted regions held stays there and
-successive frames pile up inside them - a strip of superimposed text above and
-below the editor, refreshed on every caret blink. There is no other field to
-lean on: `Internal::version` is the *font system's* version, which only moves
-when fonts load.
+The diagnosis written here at the time was that
+`iced_graphics::text::editor::Internal`'s `PartialEq` compares font, bounds
+and line metrics and nothing else, so a scrolled editor compares equal to its
+own previous frame and damages nothing. **That part is wrong**, and worth
+knowing before it sends someone chasing it again: `Editor::update` mints a
+fresh `Arc<Internal>` on every layout, so the previous frame's weak reference
+dangles and the comparison fails before it compares anything. The editor
+damages its own bounds every frame. What it never damaged was the band
+*outside* those bounds, which is exactly where the strips were.
 
-This is the same upstream defect recorded below against tab switching, and it
-has presumably always affected scrolling on Windows and X11, whose softbuffer
-backends report a real age. macOS was accidentally immune only because
-upstream's `age` was hardcoded to `0` - turning damage tracking on is what
-surfaced it.
-
-**To re-enable:** teach that `PartialEq` to compare
-`buffer_from_editor(&self.editor).scroll()` too, in the `j1mmie/iced` fork this
-workspace already patches `iced_graphics` from. Then set
-`SOFTBUFFER_DAMAGE_TRACKING=1`, which makes `age` report the real number
-without a rebuild, and check that scrolling is clean before making it the
-default. That fix may also retire `redraw_nudge`, which exists to work around
-the same comparison.
+**To re-enable:** set `SOFTBUFFER_DAMAGE_TRACKING=1`, which makes `age`
+report the real number without a rebuild, and check a scroll on a real Mac.
+Nothing in the iced fork needs changing first any more; `tests/repaint.rs`
+covers the failure this was reverted for, on the same damage-tracking path.
 
 The recycling half of this fork is unaffected and still pays for itself. It was
 always two wins; only the second one is blocked.
