@@ -1604,7 +1604,7 @@ scroll distance, defaulting to `1.0`. The shipped speed is deliberately
 rather than "×0.5 is normal" - the old speed is `2.0`. The range check
 lives in the widget (`clamp_scroll_sensitivity`), not in
 `jumppad_config`, which keeps this crate free of a `iced` dependency
-the same way `AlphaConfig` does. The multiplier is applied to a *float*
+the same way `BackgroundConfig` does. The multiplier is applied to a *float*
 line count, which is then turned into pixels and sent through
 `Content::scroll_by` - so a fractional sensitivity means fractional
 *movement*, not a banked remainder waiting to make a whole line. That is
@@ -1615,6 +1615,41 @@ Before pixel scrolling this knob could only make the wheel *slower*, not
 smoother: every event still moved the view a whole line or not at all,
 and a low sensitivity just meant more events that moved nothing. Anyone
 reintroducing a whole-line path should expect that complaint back.
+
+### Themes and the base theme
+
+`[themes.base]` is the defaults every other theme inherits, **property by
+property, not section by section**: `[themes.base] editor.font.family`
+plus `[themes.dark] editor.font.size` gives the dark theme both. A
+theme's own property wins, and what neither theme names takes JumpPad's
+own default.
+
+That per-leaf rule is the whole reason every leaf in `ThemeConfig` is an
+`Option` and `ResolvedTheme` is a separate flat type. `background.alpha
+= 1.0` over a translucent base has to be distinguishable from saying
+nothing at all, so `BackgroundConfig::default()` means *unset*, not
+*solid*. Anyone "simplifying" those `Option`s back to plain floats
+breaks a theme's ability to be solid over a see-through base, and no
+type error will say so.
+
+The two `[mode] theme` slots default to `light` and `dark`, so a file
+holding `[themes.base]`, `[themes.light]` and `[themes.dark]` needs no
+`[mode]` section at all. A slot naming no theme is still read as a
+palette name, and `theme_named` expresses that as a theme naming only
+that palette - which is what makes the slot's palette outrank the base
+theme's rather than the other way round. `Appearance::default_palette()`
+serves both readings with one lowercase string; palettes are matched
+case-insensitively where they're applied (`resolve_palette` in
+`app.rs`), theme keys are not.
+
+Two things that look like bugs and aren't. `wants_transparency` does not
+merge the base theme in first: base is itself a `[themes]` entry, so a
+translucency only it names is already counted, and every other theme's
+alpha is either its own or the one base contributed - which does mean a
+base a theme fully overrides still opens a transparent window, the same
+rule as any theme no slot names. And a theme literally called `base` is
+the feature, not a collision: an old config that happened to have one
+changes meaning.
 
 `[[languages]]` is the one place a language is described: `name` (for
 the file's readability), an optional `syntax` (the `<syntax>.wasm`

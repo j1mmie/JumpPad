@@ -7,8 +7,8 @@ use std::sync::{Mutex, OnceLock};
 use iced::Font;
 use iced::advanced::graphics;
 
-/// Fallback for an editor no config has reached yet. Mirrors `FontConfig`'s
-/// default, which in turn is iced's own default text size.
+/// Fallback for an editor no config has reached yet. Mirrors
+/// `DEFAULT_FONT_SIZE`, which in turn is iced's own default text size.
 pub const DEFAULT_SIZE: f32 = 16.0;
 
 /// Sizes a person could still read and still edit their way back out of. A

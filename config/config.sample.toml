@@ -9,23 +9,31 @@
 #   Moonfly, Nightfly, Oxocarbon, Ferra
 #
 
-[themes.jimmie_dark]
-palette = "Dark"
+# `base` is the theme every other theme inherits from, property by property.
+# What a theme below doesn't name comes from here; what neither names is
+# JumpPad's own default.
+
+[themes.base]
+palette = "Ferra"
 background.alpha = 0.925
 foreground.alpha = 1.0
 editor.font.family = "Consolas"
 editor.font.size = 16.0
 ui.font.family = "Comic Sans MS"
 
-[themes.jimmie_light]
-palette = "Light"
-editor.font.family = "Consolas"
-ui.font.family = "Comic Sans MS"
+# The two slots show `light` and `dark` unless `[mode]` names something else,
+# so themes named after the slots they fill need no `[mode] theme` lines.
+
+[themes.dark]
+palette = "Tokyo Night"
+
+[themes.light]
+palette = "Solarized Light"
+background.alpha = 1.0
 
 [mode]
+# "auto" follows the OS; "light" or "dark" pins one slot.
 detection = "auto"
-theme.light = "jimmie_light"
-theme.dark = "jimmie_dark"
 
 [window]
 decorations = true
