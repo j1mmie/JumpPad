@@ -431,6 +431,7 @@ impl JumpPadApp {
             build_key_resolver(keybind_overrides.clone()),
         );
         editor_config.set_scroll_sensitivity(config.scroll.sensitivity);
+        editor_config.set_drag_speed(config.scroll.drag_speed);
         editor_config.set_undo_depth(config.history.depth);
         editor_config.set_comment_styles(build_comment_styles(&config));
 
@@ -1217,11 +1218,15 @@ impl JumpPadApp {
         let appearance_changed =
             new.themes != current.themes || new.mode != current.mode;
 
-        // No repaint: nothing on screen changes until the next wheel event,
-        // and the widget reads the new value on the `view` that one causes.
+        // No repaint: nothing on screen changes until the next wheel event
+        // or selection drag, and the widget reads the new values on the
+        // `view` that one causes.
         if new.scroll.sensitivity != current.scroll.sensitivity {
             self.editor_config
                 .set_scroll_sensitivity(new.scroll.sensitivity);
+        }
+        if new.scroll.drag_speed != current.scroll.drag_speed {
+            self.editor_config.set_drag_speed(new.scroll.drag_speed);
         }
 
         // No repaint: tabs read the new depth on their next edit.

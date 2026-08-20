@@ -56,6 +56,9 @@ pub struct SharedEditorConfig {
     /// `f32` bits, same reason. Range-checked by the widget's
     /// `scroll_sensitivity` builder, not here.
     scroll_sensitivity: AtomicU32,
+    /// `f32` bits, as above. Range-checked by the widget's `drag_speed`
+    /// builder.
+    drag_speed: AtomicU32,
     /// Clamped by `History::set_depth`, not here.
     undo_depth: AtomicUsize,
     /// The typeface documents are drawn in. Behind a lock rather than in an
@@ -80,6 +83,7 @@ impl SharedEditorConfig {
                 background_alpha.clamp(0.0, 1.0).to_bits(),
             ),
             scroll_sensitivity: AtomicU32::new(1.0f32.to_bits()),
+            drag_speed: AtomicU32::new(1.0f32.to_bits()),
             undo_depth: AtomicUsize::new(history::DEFAULT_DEPTH),
             font: RwLock::new(Font::MONOSPACE),
             font_size: AtomicU32::new(font::DEFAULT_SIZE.to_bits()),
@@ -111,6 +115,17 @@ impl SharedEditorConfig {
     pub fn set_scroll_sensitivity(&self, sensitivity: f32) {
         self.scroll_sensitivity
             .store(sensitivity.to_bits(), Ordering::Relaxed);
+    }
+
+    /// The multiplier on how fast a selection drag held past the top or
+    /// bottom edge walks the view. `1.0` is the shipped speed; the widget
+    /// clamps whatever lands here to the same usable range as the wheel's.
+    pub fn drag_speed(&self) -> f32 {
+        f32::from_bits(self.drag_speed.load(Ordering::Relaxed))
+    }
+
+    pub fn set_drag_speed(&self, speed: f32) {
+        self.drag_speed.store(speed.to_bits(), Ordering::Relaxed);
     }
 
     /// Undo steps per tab. A step is a burst of typing, not a keystroke.
@@ -673,6 +688,7 @@ impl TextEditorWidget for TextArea {
             .size(self.settings.font_size())
             .height(Fill)
             .scroll_sensitivity(self.settings.scroll_sensitivity())
+            .drag_speed(self.settings.drag_speed())
             .style(move |theme, status| {
                 editor_style(theme, status, background_alpha, foreground_alpha)
             })

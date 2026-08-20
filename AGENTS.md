@@ -424,16 +424,42 @@ Windows or macOS text field does, and it is two mechanisms, not one:
   resolves a position past the text against its nearest row.
 - **`drag_scroll.rs` walks the view** while that position is past the top or
   bottom edge - `EDGE_SPEED` right at the edge, up to `TOP_SPEED` once the
-  pointer is `TOP_SPEED_REACH` beyond it. Each frame it scrolls, drags again
-  at the same pointer so the selection takes in the lines that came into
-  view, and asks for the next frame, which is what keeps a drag moving while
-  the pointer sits perfectly still outside the window.
+  pointer is `TOP_SPEED_REACH` beyond it, times `[scroll] drag_speed`. Each
+  frame it scrolls, drags again so the selection takes in the rows that came
+  into view, and asks for the next frame, which is what keeps a drag moving
+  while the pointer sits perfectly still outside the window. The distance is
+  measured in pixels and lands in the buffer through the same fractional
+  `scroll_by` the wheel uses, so the walk glides rather than stepping.
+
+**The ramp is squared, not straight.** A pointer just outside the window is
+asking to pick an exact line, which wants a line or two a second; a pointer
+flung to the far side of the screen is asking to cross the document. A
+straight ramp spends nearly all of its reach above the first of those and
+leaves a sliver for it.
 
 **A hit test only sees the rows that are on screen.** cosmic-text's
 `Buffer::layout_runs` yields visible runs only, so a drag above the view
 selects up to the top *visible* row and no further. The walk isn't a nicety
 on top of the unclamped position; it is the only way a selection reaches a
 line that was never drawn.
+
+**Gotcha - a walk must never drag at the pointer's own height.** cosmic-text
+scrolls to reveal a caret an edge is clipping (`shape_until_cursor`), and a
+pointer past the edge hit-tests onto exactly such a row - so the reveal added
+a whole line to whatever pixels the walk had just asked for. Measured before
+the fix: 2px asked, 20px moved, at every speed the ramp could name. So
+`Drag::selecting_at` pulls the caret back onto the nearest row the edge is
+*not* cutting through, and the two stop fighting. The pointer's own position
+is still what the selection follows everywhere else, including a pointer
+merely off to the side, and a partly-clipped row still reveals itself when
+the pointer is genuinely *on* it - that nudge is how a drag inside the window
+scrolls.
+
+**Gotcha - the drag has to aim at the rows the scroll is about to leave.**
+The scroll message reaches the document before the drag does, so
+`Walk::after_scrolling` advances the row geometry by the pixels in flight
+first. Aiming at the rows as they sit during the frame put the caret back on
+a clipped row at high speeds, and the reveal came straight back.
 
 **A drag ends on the button coming up or on the window losing focus, and
 there is no third way out.** The pointer grab goes back to the system along
@@ -1648,14 +1674,20 @@ scroll distance, defaulting to `1.0`. The shipped speed is deliberately
 *half* of upstream `iced_widget`'s (`LINES_PER_WHEEL_NOTCH` is 2, not
 4; `PIXELS_PER_LINE` is 8, not 4), so the knob reads as "×1 is normal"
 rather than "×0.5 is normal" - the old speed is `2.0`. The range check
-lives in the widget (`clamp_scroll_sensitivity`), not in
+lives in the widget (`clamp_scroll_multiplier`), not in
 `jumppad_config`, which keeps this crate free of a `iced` dependency
 the same way `BackgroundConfig` does. The multiplier is applied to a *float*
 line count, which is then turned into pixels and sent through
 `Content::scroll_by` - so a fractional sensitivity means fractional
 *movement*, not a banked remainder waiting to make a whole line. That is
-why the floor of `SCROLL_SENSITIVITY_RANGE` can sit as low as `0.05`
+why the floor of `SCROLL_MULTIPLIER_RANGE` can sit as low as `0.05`
 and still be a usable setting rather than a dead wheel.
+
+`[scroll] drag_speed` is the same shape of knob for the other way the view
+moves on its own: how fast a selection dragged past the top or bottom edge
+walks the document (see the text-area fork's section on selecting past the
+edges). It defaults to `1.0`, takes the same range through the same clamp,
+and is read live on each `view` like the rest of `SharedEditorConfig`.
 
 Before pixel scrolling this knob could only make the wheel *slower*, not
 smoother: every event still moved the view a whole line or not at all,
@@ -1759,10 +1791,10 @@ fail (above).
 Three things reach the *editor* widgets on reload, all via the
 `SharedEditorConfig` handle every `TextArea` reads per view (the app
 can't reach into a `Box<dyn TextEditorWidget>`): the editor keybind
-overrides, a theme's `background.alpha`, and `scroll.sensitivity`. The scroll
-sensitivity is the one that arms no repaint - nothing on screen changes
-until the next wheel event, and the `view` that event causes is where
-the widget picks the new value up. `foreground.alpha` rides the same
+overrides, a theme's `background.alpha`, and the two `[scroll]` speeds. The
+scroll speeds are the ones that arm no repaint - nothing on screen changes
+until the next wheel event or selection drag, and the `view` that one causes
+is where the widget picks the new value up. `foreground.alpha` rides the same
 setter but is stored in a static atomic (`to_format` must stay a bare
 `fn` pointer), and it also sits in `HighlighterSettings`' hand-written
 `PartialEq` - without that, syntax-colored spans keep their old alpha

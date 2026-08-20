@@ -63,10 +63,10 @@ const LINES_PER_WHEEL_NOTCH: f32 = 2.0;
 /// divisor halves the speed, to match `LINES_PER_WHEEL_NOTCH`.
 const PIXELS_PER_LINE: f32 = 8.0;
 
-/// The multiplier `[scroll] sensitivity` is held to. The ceiling is only
-/// there to keep a typo'd config from making the wheel useless; the floor is
-/// above zero so scrolling never stops entirely.
-const SCROLL_SENSITIVITY_RANGE: ops::RangeInclusive<f32> = 0.05..=20.0;
+/// The range `[scroll] sensitivity` and `[scroll] drag_speed` are held to.
+/// The ceiling is only there to keep a typo'd config from making scrolling
+/// useless; the floor is above zero so it never stops entirely.
+const SCROLL_MULTIPLIER_RANGE: ops::RangeInclusive<f32> = 0.05..=20.0;
 
 /// One wheel or trackpad event, in lines to scroll down by - fractional, so
 /// a sensitivity below `1.0` doesn't round every event to a standstill. The
@@ -109,14 +109,15 @@ fn text_position(
     )
 }
 
-/// [`TextEditor::scroll_sensitivity`]'s guard, split out so the range is
-/// enforced in one place. A non-finite value falls back to the default
-/// rather than clamping - `NaN` has no meaningful end of the range.
-fn clamp_scroll_sensitivity(sensitivity: f32) -> f32 {
-    if sensitivity.is_finite() {
-        sensitivity.clamp(
-            *SCROLL_SENSITIVITY_RANGE.start(),
-            *SCROLL_SENSITIVITY_RANGE.end(),
+/// The guard on [`TextEditor::scroll_sensitivity`] and
+/// [`TextEditor::drag_speed`], split out so the range is enforced in one
+/// place. A non-finite value falls back to the default rather than clamping -
+/// `NaN` has no meaningful end of the range.
+fn clamp_scroll_multiplier(multiplier: f32) -> f32 {
+    if multiplier.is_finite() {
+        multiplier.clamp(
+            *SCROLL_MULTIPLIER_RANGE.start(),
+            *SCROLL_MULTIPLIER_RANGE.end(),
         )
     } else {
         1.0
@@ -459,6 +460,9 @@ pub struct TextEditor<
     /// Multiplier on wheel and trackpad scroll distance - see
     /// [`TextEditor::scroll_sensitivity`].
     scroll_sensitivity: f32,
+    /// Multiplier on how fast a selection drag held past an edge walks the
+    /// view - see [`TextEditor::drag_speed`].
+    drag_speed: f32,
     class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -498,6 +502,7 @@ where
             padding: Padding::new(5.0),
             wrapping: Wrapping::default(),
             scroll_sensitivity: 1.0,
+            drag_speed: 1.0,
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
@@ -627,7 +632,15 @@ where
     /// a hand-edited `config.toml`, and a bad number should slow the wheel
     /// down, not break it.
     pub fn scroll_sensitivity(mut self, sensitivity: f32) -> Self {
-        self.scroll_sensitivity = clamp_scroll_sensitivity(sensitivity);
+        self.scroll_sensitivity = clamp_scroll_multiplier(sensitivity);
+        self
+    }
+
+    /// Scales how fast a selection drag held past the top or bottom edge
+    /// walks the view. `1.0` is the shipped speed; larger is faster. Clamped
+    /// the same way, and for the same reason, as `scroll_sensitivity`.
+    pub fn drag_speed(mut self, speed: f32) -> Self {
+        self.drag_speed = clamp_scroll_multiplier(speed);
         self
     }
 
@@ -655,6 +668,7 @@ where
             padding: self.padding,
             wrapping: self.wrapping,
             scroll_sensitivity: self.scroll_sensitivity,
+            drag_speed: self.drag_speed,
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
@@ -1059,6 +1073,26 @@ where
             .0
     }
 
+    /// The text a selection drag is walking over: the rows it is scrolling,
+    /// where the top edge is cutting through them, and the speed the config
+    /// asks for.
+    fn walk(
+        &self,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+    ) -> drag_scroll::Walk {
+        let line_height = self.absolute_line_height(renderer);
+        let scrolled =
+            self.content.0.borrow().editor.buffer().scroll().vertical;
+
+        drag_scroll::Walk {
+            text_height: layout.bounds().shrink(self.padding).height,
+            line_height,
+            clipped_top: scrolled.rem_euclid(line_height),
+            speed: self.drag_speed,
+        }
+    }
+
     /// The scrollbar's geometry against the widget's laid-out bounds.
     fn scrollbar(
         &self,
@@ -1096,7 +1130,7 @@ where
     fn advance_selection_drag(
         &self,
         state: &mut State<Highlighter>,
-        text_height: f32,
+        walk: drag_scroll::Walk,
         now: Instant,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
@@ -1104,20 +1138,20 @@ where
         let Some(on_edit) = self.on_edit.as_ref() else {
             return;
         };
-        let Some((step, pointer)) = state
-            .selection_drag
-            .as_mut()
-            .map(|drag| (drag.scroll_step(text_height, now), drag.pointer()))
-        else {
+        let Some(mut drag) = state.selection_drag else {
             return;
         };
+        let step = drag.scroll_step(walk, now);
+        state.selection_drag = Some(drag);
 
         match step {
             drag_scroll::Step::Still => return,
             drag_scroll::Step::Waiting => {}
             drag_scroll::Step::Scroll(pixels) => {
                 self.publish_scroll(pixels, state, renderer, shell);
-                shell.publish(on_edit(Action::Drag(pointer)));
+                shell.publish(on_edit(Action::Drag(
+                    drag.selecting_at(walk.after_scrolling(pixels)),
+                )));
             }
         }
 
@@ -1327,7 +1361,7 @@ where
 
                 self.advance_selection_drag(
                     state,
-                    layout.bounds().shrink(self.padding).height,
+                    self.walk(layout, renderer),
                     *now,
                     renderer,
                     shell,
@@ -1448,11 +1482,16 @@ where
                     shell.capture_event();
                 }
                 Update::Drag(position) => {
-                    if let Some(drag) = &mut state.selection_drag {
-                        drag.move_to(position);
-                    }
+                    let walk = self.walk(layout, renderer);
+                    let selecting_at = match &mut state.selection_drag {
+                        Some(drag) => {
+                            drag.move_to(position);
+                            drag.selecting_at(walk)
+                        }
+                        None => position,
+                    };
 
-                    shell.publish(on_edit(Action::Drag(position)));
+                    shell.publish(on_edit(Action::Drag(selecting_at)));
                 }
                 Update::Release => {
                     state.selection_drag = None;
@@ -2912,7 +2951,7 @@ mod tests {
         // The floor in `wheel_lines` is on the notch count, not on the
         // result, so a small multiplier keeps its fraction - which
         // `partial_scroll` banks - instead of rounding to a dead wheel.
-        let lines = wheel_lines(notch(-1.0), *SCROLL_SENSITIVITY_RANGE.start());
+        let lines = wheel_lines(notch(-1.0), *SCROLL_MULTIPLIER_RANGE.start());
         assert!(lines > 0.0 && lines < 1.0, "{lines}");
     }
 
@@ -2925,23 +2964,24 @@ mod tests {
     }
 
     #[test]
-    fn a_nonsense_sensitivity_lands_somewhere_usable() {
-        assert_eq!(clamp_scroll_sensitivity(1.0), 1.0);
+    fn a_nonsense_multiplier_lands_somewhere_usable() {
+        assert_eq!(clamp_scroll_multiplier(1.0), 1.0);
         assert_eq!(
-            clamp_scroll_sensitivity(0.0),
-            *SCROLL_SENSITIVITY_RANGE.start()
+            clamp_scroll_multiplier(0.0),
+            *SCROLL_MULTIPLIER_RANGE.start()
         );
         assert_eq!(
-            clamp_scroll_sensitivity(-3.0),
-            *SCROLL_SENSITIVITY_RANGE.start()
+            clamp_scroll_multiplier(-3.0),
+            *SCROLL_MULTIPLIER_RANGE.start()
         );
         assert_eq!(
-            clamp_scroll_sensitivity(1e9),
-            *SCROLL_SENSITIVITY_RANGE.end()
+            clamp_scroll_multiplier(1e9),
+            *SCROLL_MULTIPLIER_RANGE.end()
         );
         // No end of the range to clamp `NaN` to, so it takes the default.
-        assert_eq!(clamp_scroll_sensitivity(f32::NAN), 1.0);
+        assert_eq!(clamp_scroll_multiplier(f32::NAN), 1.0);
     }
+
     /// Every line long enough to wrap at the harness width, so visual rows
     /// and buffer lines come apart - which is what the widget actually runs
     /// (`Wrapping::default()` is `Word`, and nothing overrides it).

@@ -457,19 +457,24 @@ pub struct UiConfig {
     pub font: FontConfig,
 }
 
-/// Mouse-wheel and trackpad scrolling. `sensitivity` is a plain multiplier
-/// on the distance JumpPad scrolls per unit of wheel input: `1.0` is the
-/// shipped speed, `2.0` twice as far, `0.5` half. Clamped where applied,
-/// not here, so this crate doesn't need an `iced` dependency.
+/// Scrolling speed, as plain multipliers: `1.0` is the shipped speed, `2.0`
+/// twice as fast, `0.5` half. `sensitivity` is the distance per unit of wheel
+/// or trackpad input; `drag_speed` is how fast the view moves while a
+/// selection is dragged past the top or bottom edge. Both are clamped where
+/// applied, not here, so this crate doesn't need an `iced` dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ScrollConfig {
     pub sensitivity: f32,
+    pub drag_speed: f32,
 }
 
 impl Default for ScrollConfig {
     fn default() -> Self {
-        Self { sensitivity: 1.0 }
+        Self {
+            sensitivity: 1.0,
+            drag_speed: 1.0,
+        }
     }
 }
 
@@ -1619,6 +1624,7 @@ mod tests {
         let config: Config = toml::from_str("").unwrap();
         assert_eq!(config.scroll, ScrollConfig::default());
         assert_eq!(config.scroll.sensitivity, 1.0);
+        assert_eq!(config.scroll.drag_speed, 1.0);
     }
 
     #[test]
@@ -1628,10 +1634,26 @@ mod tests {
 
             [scroll]
             sensitivity = 2.5
+            drag_speed = 0.5
             "#,
         )
         .unwrap();
         assert_eq!(config.scroll.sensitivity, 2.5);
+        assert_eq!(config.scroll.drag_speed, 0.5);
+    }
+
+    #[test]
+    fn one_scroll_speed_can_be_set_without_the_other() {
+        let config: Config = toml::from_str(
+            r#"
+
+            [scroll]
+            drag_speed = 0.25
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.scroll.drag_speed, 0.25);
+        assert_eq!(config.scroll.sensitivity, 1.0);
     }
 
     #[test]

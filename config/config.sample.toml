@@ -42,7 +42,11 @@ decorations = true
 enabled = false
 
 [scroll]
+# Multipliers on the shipped speed: 2.0 is twice as fast, 0.5 half.
+# `sensitivity` is the wheel and trackpad; `drag_speed` is how fast the view
+# scrolls while a selection is dragged past the top or bottom edge.
 sensitivity = 0.5
+drag_speed = 1.0
 
 [files]
 save_conflict_resolution = "ask"

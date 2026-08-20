@@ -47,14 +47,19 @@ struct Window {
     now: Instant,
     /// When the editor asked to be drawn again, as of the last event.
     redraw_request: window::RedrawRequest,
+    /// `[scroll] drag_speed`, as the app would have set it.
+    drag_speed: f32,
 }
 
 impl Window {
     fn new() -> Self {
+        Self::at_drag_speed(1.0)
+    }
+
+    fn at_drag_speed(drag_speed: f32) -> Self {
         let content = Content::with_text(&document());
-        let tree = Tree::new(
-            &editor(&content) as &dyn Widget<Message, Theme, Renderer>
-        );
+        let tree = Tree::new(&editor(&content, drag_speed)
+            as &dyn Widget<Message, Theme, Renderer>);
 
         let mut window = Self {
             content,
@@ -63,6 +68,7 @@ impl Window {
             pointer: Point::ORIGIN,
             now: Instant::now(),
             redraw_request: window::RedrawRequest::Wait,
+            drag_speed,
         };
         // The first shape, which is what gives the document the line metrics
         // that hit tests and scrolls are measured against.
@@ -77,7 +83,7 @@ impl Window {
 
         {
             let mut shell = Shell::new(&mut messages);
-            let mut widget = editor(&self.content);
+            let mut widget = editor(&self.content, self.drag_speed);
 
             widget.update(
                 &mut self.tree,
@@ -108,7 +114,7 @@ impl Window {
 
     fn lay_out(&mut self) {
         let node = {
-            let mut widget = editor(&self.content);
+            let mut widget = editor(&self.content, self.drag_speed);
 
             widget.layout(
                 &mut self.tree,
@@ -142,12 +148,9 @@ impl Window {
         )))
     }
 
-    /// Draws a frame, one 60fps tick after the last one - and never behind
-    /// the real clock, which is the one the widget stamps a drag with when
-    /// the press lands.
+    /// Draws a frame, one 60fps tick after the last one.
     fn frame(&mut self) -> Vec<Message> {
-        self.now =
-            self.now.max(Instant::now()) + Duration::from_millis(FRAME_MILLIS);
+        self.now += Duration::from_millis(FRAME_MILLIS);
 
         self.feed(Event::Window(window::Event::RedrawRequested(self.now)))
     }
@@ -169,9 +172,14 @@ impl Window {
     }
 
     /// A press inside the text, which is what starts a selection drag.
+    ///
+    /// The widget stamps the drag with the real clock as the press lands, so
+    /// the frame clock starts from there - after that the frames are the only
+    /// thing that moves time, and a step is exactly as long as it looks.
     fn start_drag(&mut self) {
         self.pointer = Point::new(ORIGIN.x + 50.0, ORIGIN.y + 50.0);
         let _ = self.press();
+        self.now = Instant::now();
     }
 
     fn hold_pointer_below_the_text(&mut self) {
@@ -196,8 +204,10 @@ fn document() -> String {
 
 fn editor(
     content: &Content<Renderer>,
+    drag_speed: f32,
 ) -> TextEditor<'_, highlighter::PlainText, Message, Theme, Renderer> {
     text_editor(content)
+        .drag_speed(drag_speed)
         .font(Font::MONOSPACE)
         .size(14.0)
         .line_height(LineHeight::Absolute(LINE_HEIGHT.into()))
@@ -442,11 +452,91 @@ fn a_position_far_above_the_text_selects_up_to_the_top_row() {
     let mut window = Window::new();
     window.start_drag();
 
-    let _ = window.move_pointer_to(ORIGIN.x + 50.0, -500.0);
+    // Up and out of the window's top left corner, so the row it reaches is
+    // taken in whole rather than cut at whatever column the pointer is over.
+    let _ = window.move_pointer_to(-200.0, -500.0);
 
     assert!(
         window.selection().starts_with("line 0"),
         "the selection should reach the top visible line: {:?}",
         window.selection()
+    );
+}
+
+/// The trap the walk fell into: dragging at the pointer's own height puts
+/// the caret on the row the bottom edge is cutting through, and cosmic-text
+/// scrolls to reveal a caret it has clipped - so the view moved a whole line
+/// per frame however few pixels the walk had asked for, however far out the
+/// pointer was.
+#[test]
+fn the_view_moves_by_what_the_walk_asked_for() {
+    for past_edge in [5.0, 60.0, 240.0] {
+        let mut window = Window::new();
+        window.start_drag();
+        let _ = window.move_pointer_to(
+            ORIGIN.x + 50.0,
+            ORIGIN.y + SIZE.height + past_edge,
+        );
+
+        for _ in 0..12 {
+            let before = window.scrolled_to();
+            let asked = scrolled_by(&window.frame()).expect("a scroll");
+            let moved = (window.scrolled_to() - before) * LINE_HEIGHT;
+
+            assert!(
+                (moved - asked).abs() < 0.01,
+                "{past_edge}px past the edge: asked for {asked}px, \
+                 the view moved {moved}px"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_further_out_the_pointer_the_faster_the_view_moves() {
+    let mut walked = Vec::new();
+
+    for past_edge in [5.0, 60.0, 240.0] {
+        let mut window = Window::new();
+        window.start_drag();
+        let _ = window.move_pointer_to(
+            ORIGIN.x + 50.0,
+            ORIGIN.y + SIZE.height + past_edge,
+        );
+        window.frames(10);
+
+        walked.push(window.scrolled_to());
+    }
+
+    assert!(
+        walked.windows(2).all(|pair| pair[1] > pair[0] * 1.5),
+        "each step out should walk clearly further in the same ten frames: \
+         {walked:?}"
+    );
+}
+
+#[test]
+fn a_halved_drag_speed_walks_half_as_far() {
+    let mut walked = Vec::new();
+
+    for speed in [1.0, 0.5] {
+        let mut window = Window::at_drag_speed(speed);
+        window.start_drag();
+        window.hold_pointer_below_the_text();
+        // One frame to take up the slack between the press and the frame
+        // clock, so what follows is ten frames of exactly one tick each.
+        let _ = window.frame();
+        let from = window.scrolled_to();
+        window.frames(10);
+
+        walked.push(window.scrolled_to() - from);
+    }
+
+    let [full, half] = walked[..] else {
+        unreachable!()
+    };
+    assert!(
+        (half - full / 2.0).abs() < full / 100.0,
+        "half the speed should walk half as far: {half} against {full}"
     );
 }
