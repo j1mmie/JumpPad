@@ -515,6 +515,27 @@ nothing lands outside the text area, driving the compositor's damage
 tracking the way the Windows build does. It is the only test here that looks
 at pixels; a fix for this that isn't in `text_clip` should keep it passing.
 
+**Not the same bug as the tab-switch ghosting**, though they share a
+framework. That one is iced computing *too little* damage - its editor
+comparison looks at font, bounds and metrics and never at the text, so a
+switched tab could be declared unchanged (see "Known upstream rendering
+bug"). This one is the editor painting *outside the damage it asked for*.
+Both come of `iced_graphics::text::editor` misdescribing the editor: once by
+saying it is unchanged when it isn't, once by saying it fits inside bounds it
+paints past. That crate is already in the patch set, so one honest `Internal`
+- a comparison that includes the document's version, and bounds that cover
+what is actually painted - would retire `text_clip` and `redraw_nudge_frames`
+together.
+
+**The comparison the tab-switch fix is written against no longer fires.**
+`Editor::update` mints a fresh `Arc<Internal>` on every layout, so the
+previous frame's weak reference dangles and the comparison fails before it
+compares anything - the editor damages itself every frame, whatever changed.
+`a_different_document_under_the_same_widget_repaints` in `tests/repaint.rs`
+is the tripwire on that. It means `redraw_nudge_frames` is very likely dead
+weight now; it is cheap and harmless, so it stays until somebody measures
+the app itself rather than the widget in isolation.
+
 ### Revealing the cursor after a change
 
 `safe_area.rs` defines the region all of this aims at: the rows of the viewport

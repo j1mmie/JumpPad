@@ -211,6 +211,13 @@ impl Window {
     }
 }
 
+fn other_document() -> String {
+    (0..DOCUMENT_LINES)
+        .map(|line| format!("a different line {line}, with other words"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn document() -> String {
     (0..DOCUMENT_LINES)
         .map(|line| format!("line {line} with some words on it"))
@@ -305,5 +312,40 @@ fn the_editor_still_paints_its_text() {
     assert!(
         window.painted_inside_the_editor() > 1_000,
         "the document should be on screen"
+    );
+}
+
+/// The failure the redraw nudge in `app.rs` exists for: switching tabs puts a
+/// different document under the same widget, with the same font, bounds and
+/// metrics - and those three are all iced's editor comparison looks at, so it
+/// can conclude nothing changed and repaint nothing.
+///
+/// It does repaint today, but by accident rather than by that comparison:
+/// `Editor::update` mints a fresh `Arc` on every layout, which leaves the
+/// previous frame's weak reference dangling and makes the comparison fail
+/// before it can compare anything. This is the tripwire for that accident
+/// going away.
+#[test]
+fn a_different_document_under_the_same_widget_repaints() {
+    let mut window = Window::new();
+    let _ = window.present();
+    let before = window.pixels.clone();
+
+    window.content = Content::with_text(&other_document());
+    let damage = window.present();
+
+    assert!(
+        damage.iter().any(|region| region.width > SIZE.width / 2.0),
+        "the editor should be asking for a repaint: {damage:?}"
+    );
+    let repainted = before
+        .chunks(4)
+        .zip(window.pixels.chunks(4))
+        .filter(|(was, now)| was != now)
+        .count();
+    assert!(
+        repainted > 1_000,
+        "the new document should be on screen, not the old one: \
+         {repainted} pixels changed"
     );
 }
