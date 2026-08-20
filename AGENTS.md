@@ -479,6 +479,42 @@ Only the vertical edges walk. The widget wraps (`Wrapping::default()` is
 `Word`, and nothing overrides it), so there is never anything to scroll
 sideways to.
 
+### Clipping the text (and why the tab bar collected old text)
+
+The editor hands `fill_editor` a clip a sliver shorter than the text area
+(`text_clip` in `text_editor.rs`), and that sliver is load-bearing.
+
+`iced_tiny_skia` builds a clip mask for text only when the text's own bounds
+reach past the clip it was given; text that fits inside its bounds, it
+reasons, cannot paint outside them. An editor breaks that reasoning. Its
+declared bounds are the text area exactly, but cosmic-text draws the rows the
+top and bottom edges cut through *whole* - that is what scrolling by pixels
+means - so the overhang lands outside the editor with no mask to stop it. It
+also skips the damage region that way, which is how the overhang reaches the
+tab bar at all.
+
+On Windows that overhang is permanent. `softbuffer` reports `age() == 1`
+there, so the compositor repaints only the regions its damage tracking names,
+and nothing ever damages the band above the editor - each scroll leaves
+another sliver of text up there until the band is a smear of old rows. macOS
+never shows it because the fork reports `age() == 0` (see the softbuffer
+section), so every frame is a full repaint; `wgpu` never shows it because it
+clips with a scissor rectangle instead.
+
+**A clip the editor demonstrably doesn't fit inside is what gets the mask
+built.** A tenth of a pixel does it, and costs nothing: the mask is not
+anti-aliased, so a pixel belongs to it by its centre, and no centre moves.
+
+The bottom half of this predates pixel scrolling - a view whose height isn't
+a whole number of rows always cuts its last row - and it landed in the
+editor's own padding, which is why it read as a smudge at the bottom edge
+rather than as text.
+
+`tests/repaint.rs` paints real frames through `iced_tiny_skia` and asserts
+nothing lands outside the text area, driving the compositor's damage
+tracking the way the Windows build does. It is the only test here that looks
+at pixels; a fix for this that isn't in `text_clip` should keep it passing.
+
 ### Revealing the cursor after a change
 
 `safe_area.rs` defines the region all of this aims at: the rows of the viewport

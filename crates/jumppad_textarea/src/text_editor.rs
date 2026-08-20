@@ -109,6 +109,33 @@ fn text_position(
     )
 }
 
+/// How much shorter than the text area the clip handed to the renderer is -
+/// see [`text_clip`]. A tenth of a pixel, well under the half a pixel that
+/// would change which pixels the clip covers.
+const TEXT_CLIP_SHORTFALL: f32 = 0.1;
+
+/// The rectangle the document's text is clipped to: the text area, a sliver
+/// shorter.
+///
+/// That sliver is the whole point. The software renderer builds a clip mask
+/// for text only when the text's own bounds reach past the clip it was given,
+/// on the assumption that text inside its bounds cannot paint outside them.
+/// A pixel-scrolled editor breaks the assumption: the rows the top and bottom
+/// edges cut through are drawn whole, overhanging the editor by whatever the
+/// edge cut off, and an unclipped overhang lands on the tab bar - where
+/// nothing repaints it (see AGENTS.md). A clip the editor demonstrably
+/// doesn't fit inside is what gets the mask built, and with it the overhang
+/// clipped.
+///
+/// It costs no pixel of real text: the mask is not anti-aliased, so a pixel
+/// belongs to it by its centre, and the sliver is far too thin to move one.
+fn text_clip(text_bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        height: (text_bounds.height - TEXT_CLIP_SHORTFALL).max(0.0),
+        ..text_bounds
+    }
+}
+
 /// The guard on [`TextEditor::scroll_sensitivity`] and
 /// [`TextEditor::drag_speed`], split out so the range is enforced in one
 /// place. A non-finite value falls back to the default rather than clamping -
@@ -1750,7 +1777,7 @@ where
                 &internal.editor,
                 text_bounds.position(),
                 style.value,
-                text_bounds,
+                text_clip(text_bounds),
             );
         }
 
@@ -2866,6 +2893,49 @@ mod tests {
         shape(&mut editor, bounds);
 
         assert_eq!(scrolled_to(&editor), Some(2.0));
+    }
+
+    fn text_area() -> Rectangle {
+        Rectangle::new(Point::new(25.0, 65.0), Size::new(450.0, 290.0))
+    }
+
+    #[test]
+    fn the_text_clip_is_one_the_editor_does_not_fit_inside() {
+        // The whole reason it exists: a clip the text fits inside is one the
+        // renderer skips building a mask for, and an editor's rows overhang
+        // its bounds.
+        assert!(!text_area().is_within(&text_clip(text_area())));
+    }
+
+    #[test]
+    fn the_text_clip_still_covers_every_pixel_of_the_text() {
+        // The mask is not anti-aliased, so a pixel is in it if its centre is.
+        for height in [290.0, 289.5, 17.3, 1.0] {
+            let text_bounds = Rectangle {
+                height,
+                ..text_area()
+            };
+            let last_pixel_centre =
+                (text_bounds.y + text_bounds.height).floor() - 0.5;
+            let clip = text_clip(text_bounds);
+
+            assert!(
+                clip.y + clip.height > last_pixel_centre,
+                "a {height}px text area lost its last row of pixels"
+            );
+        }
+    }
+
+    #[test]
+    fn a_text_area_too_short_to_shorten_stays_a_rectangle() {
+        // Negative dimensions panic on their way into the renderer, and a
+        // sliver of an editor is not worth one.
+        let sliver = Rectangle {
+            height: 0.05,
+            ..text_area()
+        };
+
+        assert_eq!(text_clip(sliver).height, 0.0);
     }
 
     /// A widget sitting somewhere other than the window's corner - a tab bar

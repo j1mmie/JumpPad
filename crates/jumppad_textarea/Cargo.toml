@@ -12,3 +12,10 @@ iced_core.workspace = true
 editor_core.workspace = true
 jumppad_actions.workspace = true
 syntax_registry.workspace = true
+
+[dev-dependencies]
+# The software renderer, so a test can paint a real frame and look at the
+# pixels. A dev-dependency only: which backend the app ships is decided by
+# `jumppad`'s features, and nothing here may pull one in.
+iced_tiny_skia = "0.14"
+tiny-skia = "0.11"
