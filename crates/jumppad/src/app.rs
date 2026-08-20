@@ -33,20 +33,6 @@ use crate::window;
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
 
-/// How many consecutive frames to hold a nudged background color for after the
-/// active tab changes (see AGENTS.md's stale-content bug). One frame is not
-/// enough: `softbuffer` presents through several buffers in rotation, and
-/// `iced_tiny_skia` only repaints the one it was handed. The buffers it skipped
-/// still hold the previous tab's text, and come back around a frame or two
-/// later. Nudging for several frames running repaints every buffer in the
-/// rotation.
-///
-/// Zero on the wgpu backend: it has no damage tracking to defeat (it clears and
-/// redraws the whole surface every frame), so a nudge there buys nothing and
-/// the forced frames are pure waste. Zero also switches the whole mechanism
-/// off, since `theme()` and `subscription()` both gate on the counter.
-const REDRAW_NUDGE_FRAMES: u8 = if cfg!(feature = "tiny-skia") { 4 } else { 0 };
-
 /// How many presented frames to wait before refreshing the macOS window
 /// shadow after the content changes (see `macos.rs`). Refreshing on the same
 /// frame re-caches the outgoing content; a couple of frames later, the new
@@ -103,9 +89,6 @@ pub struct JumpPadApp {
     theme: Theme,
     ui_text: UiText,
     background_alpha: f32,
-    /// Frames left to hold a nudged background color for, counted down from
-    /// `REDRAW_NUDGE_FRAMES` every time the active tab changes.
-    redraw_nudge_frames: u8,
     /// Frames left until the macOS window shadow is refreshed - see
     /// `SHADOW_REFRESH_FRAMES`.
     shadow_refresh_frames: u8,
@@ -285,8 +268,6 @@ pub enum Message {
     HotkeyEvent(GlobalHotKeyEvent),
     /// Advances the visor's slide animation by one frame.
     AnimationTick,
-    /// One presented frame elapsed - counts down `redraw_nudge_frames`.
-    RedrawNudgeFrame,
     /// One presented frame elapsed - counts down `shadow_refresh_frames`,
     /// refreshing the macOS window shadow when it hits zero.
     ShadowRefreshFrame,
@@ -482,7 +463,6 @@ impl JumpPadApp {
             theme: Theme::Light,
             ui_text: ui_text(&jumppad_config::ResolvedFont::default()),
             background_alpha: 1.0,
-            redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir,
@@ -516,10 +496,6 @@ impl JumpPadApp {
         // The task is dropped rather than batched: there is no window yet
         // to tell anything to, and `WindowReady` tells the one that arrives.
         let _ = app.apply_theme();
-        // Nothing has been drawn yet, so the nudge `apply_theme` arms for a
-        // live change would only burn frames on the way up.
-        app.redraw_nudge_frames = 0;
-
         // Both asked once, here. Later changes to either arrive through
         // `subscription` instead.
         let boot_tasks = Task::batch([
@@ -645,10 +621,9 @@ impl JumpPadApp {
         if index != self.active {
             return self.switch_active(index);
         }
-        // The very first tab, or the stand-in for a closed last one: the index
-        // didn't move, so `switch_active` would call it a no-op, but the editor
-        // sitting at it is brand new and still needs focus and a repaint.
-        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
+        // The very first tab, or the stand-in for a closed last one: the
+        // index didn't move, so `switch_active` would call it a no-op, but
+        // the editor sitting at it is brand new and still needs focus.
         self.arm_shadow_refresh();
         self.sync_session_metadata();
         focus_editor()
@@ -742,7 +717,6 @@ impl JumpPadApp {
         self.tabs[self.active].restamp();
         // The index didn't move, so `switch_active` would call it a no-op -
         // the same situation `new_tab` handles above.
-        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         self.arm_shadow_refresh();
         self.sync_session_metadata();
         self.refresh_find();
@@ -982,7 +956,6 @@ impl JumpPadApp {
             self.previous_active_id = Some(previous.id);
         }
         self.active = index;
-        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
         if let Some(tab) = self.tabs.get_mut(index) {
             let (line, column) = tab.last_cursor;
             match tab.last_selection {
@@ -1211,8 +1184,6 @@ impl JumpPadApp {
     /// carries belongs in `apply_theme` instead, which an OS light/dark
     /// switch calls too.
     ///
-    /// Nothing left here changes what is on screen by itself, so none of
-    /// these arms arms the repaint nudge; `apply_theme` does its own.
     fn apply_config(&mut self, new: jumppad_config::Config) -> Task<Message> {
         let current = &self.config;
         let appearance_changed =
@@ -1318,9 +1289,6 @@ impl JumpPadApp {
         ));
         self.editor_config.set_font_size(theme.editor_font.size);
         self.ui_text = ui_text(&theme.ui_font);
-        // tiny-skia's damage tracking can otherwise skip presenting a change
-        // that moved no widget - a palette or alpha swap, say.
-        self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
 
         if self.background_alpha < 1.0 && !was_translucent {
             self.turn_translucent()
@@ -1998,11 +1966,6 @@ impl JumpPadApp {
                 self.arm_shadow_refresh();
                 Task::none()
             }
-            Message::RedrawNudgeFrame => {
-                self.redraw_nudge_frames =
-                    self.redraw_nudge_frames.saturating_sub(1);
-                Task::none()
-            }
             Message::ShadowRefreshFrame => {
                 self.shadow_refresh_frames =
                     self.shadow_refresh_frames.saturating_sub(1);
@@ -2431,11 +2394,7 @@ impl JumpPadApp {
     }
 
     pub fn theme(&self) -> Theme {
-        if self.redraw_nudge_frames > 0 {
-            nudge_background(&self.theme, self.redraw_nudge_frames)
-        } else {
-            self.theme.clone()
-        }
+        self.theme.clone()
     }
 
     /// Scales the window's base `background_color` by `background_alpha` -
@@ -2538,14 +2497,6 @@ impl JumpPadApp {
             subscriptions.push(
                 iced::time::every(VISOR_ANIM_TICK)
                     .map(|_| Message::AnimationTick),
-            );
-        }
-
-        // Real presented frames, not a wall-clock tick - the point is to outlast
-        // the platform's buffer rotation, which is counted in frames.
-        if self.redraw_nudge_frames > 0 {
-            subscriptions.push(
-                iced::window::frames().map(|_| Message::RedrawNudgeFrame),
             );
         }
 
@@ -3019,16 +2970,6 @@ fn modal_dialog_style(theme: &Theme) -> container::Style {
 /// show the rest of the app is blocked.
 fn modal_scrim_style(_theme: &Theme) -> container::Style {
     container::Style::default().background(Color::from_rgba(0.0, 0.0, 0.0, 0.5))
-}
-
-/// Nudges the theme's background alpha by an invisible amount, just enough to
-/// force a full repaint on tab switch - see AGENTS.md's tiny-skia stale-content
-/// bug. Scaling the nudge by `frames_left` makes every frame of the countdown a
-/// *different* color, so each one repaints rather than only the first.
-fn nudge_background(theme: &Theme, frames_left: u8) -> Theme {
-    let mut palette = theme.palette();
-    palette.background.a -= 0.001 * f32::from(frames_left);
-    Theme::custom("jumppad (redraw nudge)".to_string(), palette)
 }
 
 /// Whether this build has to premultiply the window's clear color before
@@ -3528,7 +3469,6 @@ mod tests {
                 jumppad_config::DEFAULT_FONT_SIZE,
             ),
             background_alpha: 1.0,
-            redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir: PathBuf::from("/tmp"),
@@ -4414,12 +4354,11 @@ mod tests {
     }
 
     #[test]
-    fn apply_config_swaps_the_palette_and_arms_a_repaint() {
+    fn apply_config_swaps_the_palette() {
         let mut app = test_app(1);
 
         let _ = app.apply_config(config_with_theme(r#"palette = "Dracula""#));
         assert_eq!(app.theme.to_string(), "Dracula");
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     /// The palette can be named by the slot instead of by a theme, so
@@ -4464,7 +4403,6 @@ mod tests {
         let _ = app.apply_config(config_with_theme("editor.font.size = 22.0"));
         assert_eq!(app.editor_config.font_size(), 22.0);
         assert_eq!(app.editor_config.font(), Font::MONOSPACE);
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     #[test]
@@ -4486,7 +4424,6 @@ mod tests {
         let mut app = test_app(1);
         let _ = app.apply_config(config_with_theme("ui.font.size = 20.0"));
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
         // The editor reads its own section, and that one didn't move.
         assert_eq!(
             app.editor_config.font_size(),
@@ -4533,12 +4470,10 @@ mod tests {
         assert_eq!(app.editor_config.font_size(), 15.0);
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 15.0));
 
-        app.redraw_nudge_frames = 0;
         report(&mut app, iced::theme::Mode::Dark);
         assert_eq!(app.theme.to_string(), "Nord");
         assert_eq!(app.editor_config.font_size(), 21.0);
         assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 21.0));
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     #[test]
@@ -4547,11 +4482,9 @@ mod tests {
         let mut config = config_with_both_slots();
         config.mode.detection = jumppad_config::Detection::Light;
         let _ = app.apply_config(config);
-        app.redraw_nudge_frames = 0;
 
         report(&mut app, iced::theme::Mode::Dark);
         assert_eq!(app.theme.to_string(), "Solarized Light");
-        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
         // Recorded anyway - the test below is what that buys.
         assert_eq!(app.os_appearance, Some(Appearance::Dark));
     }
@@ -4672,10 +4605,8 @@ mod tests {
         let _ = app.apply_config(before);
         assert_eq!(app.theme.to_string(), "Nord");
 
-        app.redraw_nudge_frames = 0;
         let _ = app.apply_config(after);
         assert_eq!(app.theme.to_string(), "Dracula");
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     /// What the plan for replacing windows rests on: the caret lives in the
@@ -4869,7 +4800,6 @@ mod tests {
                 right: "-->".to_string(),
             })
         );
-        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
     }
 
     #[test]
@@ -4898,7 +4828,6 @@ mod tests {
         let _ = app.apply_config(config.clone());
         assert_eq!(app.theme.to_string(), theme_before);
         assert_eq!(app.background_alpha, 1.0);
-        assert_eq!(app.redraw_nudge_frames, 0, "nothing visual changed");
         // The new values still become the diff baseline, so the
         // restart-required log fires once per transition rather than on
         // every later unrelated reload.
@@ -6347,66 +6276,25 @@ mod tests {
         );
     }
 
+    /// `switch_active` treats an unmoved index as a no-op, but the first tab
+    /// at startup - and the stand-in for a closed last tab - lands on one with
+    /// a brand-new editor under it.
     #[test]
-    fn every_frame_of_the_nudge_countdown_gets_its_own_background_color() {
-        // The compositor only bypasses its (text-blind) per-widget damage check
-        // when the frame's background color differs from the last frame's, so
-        // the countdown has to move it every frame, not just on the first.
-        let mut app = test_app(2);
-        app.background_alpha = 0.7;
-
-        let mut seen = Vec::new();
-        for frames in 0..=REDRAW_NUDGE_FRAMES {
-            app.redraw_nudge_frames = frames;
-            seen.push(app.style(&app.theme()).background_color);
-        }
-
-        for (index, color) in seen.iter().enumerate() {
-            for other in &seen[index + 1..] {
-                assert_ne!(
-                    color, other,
-                    "two frames share a background color: {seen:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn switching_tabs_arms_the_full_nudge_countdown() {
-        let mut app = test_app(2);
-        let _ = app.switch_active(1);
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
-    }
-
-    #[test]
-    fn creating_a_tab_at_the_already_active_index_still_arms_the_nudge() {
-        // `switch_active` treats an unmoved index as a no-op, but the first tab
-        // at startup - and the stand-in for a closed last tab - lands on one
-        // with a brand-new editor under it that has to be painted.
+    fn creating_a_tab_at_the_already_active_index_still_lands_on_it() {
         let mut app = test_app(0);
         let _ = app.new_tab();
+
         assert_eq!(app.tabs.len(), 1);
         assert_eq!(app.active, 0);
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     #[test]
-    fn closing_the_last_tab_arms_the_nudge_for_its_replacement() {
+    fn closing_the_last_tab_replaces_it() {
         let mut app = test_app(1);
-        app.redraw_nudge_frames = 0;
-        let _ = app.close_tab(0);
-        assert_eq!(app.tabs.len(), 1); // replaced, never left empty
-        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
-    }
 
-    #[test]
-    fn the_nudge_countdown_stops_at_zero() {
-        let mut app = test_app(2);
-        app.redraw_nudge_frames = 1;
-        let _ = app.update(Message::RedrawNudgeFrame);
-        assert_eq!(app.redraw_nudge_frames, 0);
-        let _ = app.update(Message::RedrawNudgeFrame);
-        assert_eq!(app.redraw_nudge_frames, 0);
+        let _ = app.close_tab(0);
+
+        assert_eq!(app.tabs.len(), 1, "replaced, never left empty");
     }
 
     #[test]

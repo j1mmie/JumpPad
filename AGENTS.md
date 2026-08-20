@@ -518,23 +518,12 @@ at pixels; a fix for this that isn't in `text_clip` should keep it passing.
 **Not the same bug as the tab-switch ghosting**, though they share a
 framework. That one is iced computing *too little* damage - its editor
 comparison looks at font, bounds and metrics and never at the text, so a
-switched tab could be declared unchanged (see "Known upstream rendering
-bug"). This one is the editor painting *outside the damage it asked for*.
+switched tab could be declared unchanged (see "The repaint nudge, and why it
+is gone"). This one is the editor painting *outside the damage it asked for*.
 Both come of `iced_graphics::text::editor` misdescribing the editor: once by
 saying it is unchanged when it isn't, once by saying it fits inside bounds it
-paints past. That crate is already in the patch set, so one honest `Internal`
-- a comparison that includes the document's version, and bounds that cover
-what is actually painted - would retire `text_clip` and `redraw_nudge_frames`
-together.
-
-**The comparison the tab-switch fix is written against no longer fires.**
-`Editor::update` mints a fresh `Arc<Internal>` on every layout, so the
-previous frame's weak reference dangles and the comparison fails before it
-compares anything - the editor damages itself every frame, whatever changed.
-`a_different_document_under_the_same_widget_repaints` in `tests/repaint.rs`
-is the tripwire on that. It means `redraw_nudge_frames` is very likely dead
-weight now; it is cheap and harmless, so it stays until somebody measures
-the app itself rather than the widget in isolation.
+paints past. That crate is already in the patch set, so bounds that cover what
+is actually painted would retire `text_clip` outright.
 
 ### Revealing the cursor after a change
 
@@ -1184,9 +1173,10 @@ Gotchas, all of them load-bearing:
   out again.
 - **The release callback can run on any thread.** Core Graphics gives no
   guarantee about which, hence the `Mutex` rather than a `RefCell`.
-- **`REDRAW_NUDGE_FRAMES` is 4**, comfortably above the rotation depth, so the
-  tab-switch nudge still repaints every buffer. If `MAX_POOLED_BUFFERS` ever
-  grows past 4, raise it to match.
+- **Rotation depth is what damage tracking is measured against.** A frame is
+  diffed against whatever the buffer it lands in still holds, which is
+  `MAX_POOLED_BUFFERS` frames ago - `a_document_swap_repaints_through_a_rotating_swapchain`
+  in `jumppad_textarea`'s `tests/repaint.rs` covers that case.
 
 **Gotcha - `age` deliberately reports `0` today, and the reason is not in this
 crate.** The pool tracks the real age correctly and reporting it works
@@ -1215,10 +1205,28 @@ dangles and the comparison fails before it compares anything. The editor
 damages its own bounds every frame. What it never damaged was the band
 *outside* those bounds, which is exactly where the strips were.
 
-**To re-enable:** set `SOFTBUFFER_DAMAGE_TRACKING=1`, which makes `age`
-report the real number without a rebuild, and check a scroll on a real Mac.
-Nothing in the iced fork needs changing first any more; `tests/repaint.rs`
-covers the failure this was reverted for, on the same damage-tracking path.
+**To re-enable, in order:**
+
+1. On a Mac, `SOFTBUFFER_DAMAGE_TRACKING=1 cargo run_release`. The variable
+   makes `age` report the real number without a rebuild.
+2. Scroll a syntax-highlighted file for a while, at speed and by single
+   lines, and watch the bands directly above and below the text. Leave it
+   sitting still afterwards - the caret blink is what used to bring the old
+   strips back. Switch tabs a few times too, now that nothing forces a full
+   repaint there any more.
+3. If it is clean, make it the default in the `j1mmie/softbuffer` fork
+   (`jumppad/buffer-pool`): `age` becomes `self.age` with the
+   `damage_tracking_enabled()` gate and its two helpers deleted, and this
+   section becomes a note that it is on. `cargo update -p softbuffer` brings
+   it in.
+4. Re-measure. The number this buys back is idle drawing at 0.02ms instead of
+   ~35ms; **give it the ~150 frames it takes to settle** (see the gotcha
+   below), or the measurement will say it did nothing.
+
+Nothing in the iced fork needs changing first any more, and
+`jumppad_textarea`'s `tests/repaint.rs` covers the failure this was reverted
+for, on the same damage-tracking path - but it covers the widget, not the
+window, which is why steps 1 and 2 are still a real Mac.
 
 The recycling half of this fork is unaffected and still pays for itself. It was
 always two wins; only the second one is blocked.
@@ -1306,76 +1314,32 @@ Three things worth knowing before optimising against this:
   a non-zero `age`; two buffers is the exact rotation depth, with no slack for
   Core Animation holding one longer.
 
-## Known upstream rendering bug (tiny-skia + tab switching)
+## The repaint nudge, and why it is gone
 
-`iced`'s tiny-skia compositor skips presenting a frame it thinks looks
-identical to the last one (a damage-tracking optimization). Its equality
-check for a `text_editor`'s rendered content
-(`iced_graphics::text::editor::Internal::eq`, in the `iced` crate itself,
-confirmed still present as of iced 0.14.0) only compares font, bounds, and
-line metrics - **never the actual text**. Switching JumpPad's active tab
-lands on a different editor with identical font/bounds/metrics (same
-pane), so the compositor concludes nothing changed and skips the repaint -
-the old tab's text stays on screen until some unrelated redraw (hovering
-a button, resizing the window) happens to touch that region for real.
+`JumpPadApp` used to hold a `redraw_nudge_frames` counter that dropped the
+theme's background alpha by an invisible amount for a few frames after a tab
+switch. The compositor repaints everything when a frame's background color
+differs from the last one's, so that bought a full repaint - working around
+`iced_graphics::text::editor::Internal`'s `PartialEq`, which compares font,
+bounds and line metrics and never the text, and so could call a switched tab
+unchanged.
 
-There is no `redraw()`/`invalidate()`/dirty-flag hook exposed to
-`Program::update` or `view` for this specific per-widget check - but there
-*is* a coarser, application-reachable bypass one level up. Before
-`iced_tiny_skia` even runs the per-widget check above, it compares the
-whole frame's reported background color against last frame's
-(`surface.background_color == background_color` in
-`iced_tiny_skia::window::compositor::present`); if that differs at all, it
-skips the per-widget check entirely and repaints the *entire* viewport.
-That's the lever JumpPad actually uses (see below). This was also not fixed
-by switching to `wgpu`-only (that backend has no damage-tracking at all
-and isn't a real option here anyway - `tiny-skia`'s memory footprint is
-the whole point of this project, see `README.md`).
+**That comparison never runs.** `Editor::update` mints a fresh
+`Arc<Internal>` on every layout, so the previous frame's weak reference
+dangles and `Weak::eq` fails before reaching it - the editor damages its own
+bounds every frame, whatever changed. `tests/repaint.rs` in `jumppad_textarea`
+pins the three things the nudge was covering, on the real damage-tracking
+path: a document swap repaints, a document swap repaints through a rotating
+swapchain, and a palette change repaints. So the counter, its message, its
+`window::frames()` subscription and `nudge_background` are all gone.
 
-**The fix in place:** `JumpPadApp::redraw_nudge_frames: u8` is set to
-`REDRAW_NUDGE_FRAMES` every time the active tab changes (`switch_active`
-and `new_tab`, `crates/jumppad/src/app.rs`). `JumpPadApp::theme()` checks it:
-while it's non-zero, it returns the app's real theme run through
-`nudge_background`, which drops the palette's background alpha by
-`0.001 * frames_left` and rebuilds it as `Theme::custom(...)`. That's an
-`f32` difference big enough for `Color`'s `==` to see, but small enough
-to be invisible - the background quad it's drawn as blends against a
-backdrop the compositor already cleared to that same base color moments
-earlier, and mixing a color with itself at less than full opacity still
-produces that same color.
-
-**Gotcha - one nudged frame is not enough.** `softbuffer` presents through
-several buffers in rotation, and `present()` only ever draws into the one
-it's handed (`buffer_mut()`), using `buffer.age()` to decide what that
-buffer already contains. Repainting a single frame therefore fixes exactly
-one buffer; the others still hold the *previous* tab's text and come back
-around a frame or two later, which is the faint ghost text seen on macOS.
-Scaling the nudge by `frames_left` is what makes each frame of the
-countdown a *different* color, so all of them repaint instead of just the
-first - a plain flip-flop bool gives the same value on consecutive frames
-and the compositor goes straight back to its damage check. The countdown
-is driven by `iced::window::frames()` (real presented frames, not a
-wall-clock tick - buffer rotation is counted in frames), gated on the
-counter being non-zero so there's no idle cost, same as the other timers
-in `subscription()`. If ghosting ever reappears on a platform with a
-deeper swapchain, raise `REDRAW_NUDGE_FRAMES`; that's the knob.
-
-**Gotcha - `switch_active` no-ops when the index doesn't move,** so it
-can't be the only thing arming the nudge. Two paths land on an unchanged
-index with a brand-new editor underneath: the first tab at startup
-(`tabs` starts empty, `active` is already 0) and the replacement for a
-closed last tab (`close_tab` -> `new_tab`). Both went unpainted *and*
-unfocused before `new_tab` learned to arm the nudge itself.
-
-Two things were tried and found insufficient before landing on this,
-worth knowing so they aren't re-attempted as if untested:
-- A per-tab `bool` toggling one pixel of container padding on the active
-  editor (changing its `Internal.bounds`, one of the three fields the
-  per-widget check *does* compare) - worked, but visibly janky (a
-  perceptible 1px shift each switch).
-- Re-focusing the editor on switch (still done today - see below for why)
-  on the theory that it reproduces what a real click does - confirmed
-  insufficient on its own; content still went stale.
+**If ghosting ever comes back, it is one of two things, and they are worth
+telling apart before reaching for a nudge again.** Content that is stale
+*inside* the editor means that comparison started mattering again - fix it in
+the `iced_graphics` fork by comparing the buffer's scroll and the document's
+version, rather than by defeating the check from outside. Old text *outside*
+the editor is the overhang instead (see "Clipping the text"), and no amount of
+repainting fixes it - the paint is going where nothing repaints on purpose.
 
 **Also in `switch_active`, for an unrelated reason:** it saves the
 outgoing tab's cursor and selection (`Tab::last_cursor`/`last_selection`)
@@ -1855,9 +1819,10 @@ is where the widget picks the new value up. `foreground.alpha` rides the same
 setter but is stored in a static atomic (`to_format` must stay a bare
 `fn` pointer), and it also sits in `HighlighterSettings`' hand-written
 `PartialEq` - without that, syntax-colored spans keep their old alpha
-until an unrelated edit, same bug class as the find-state fields. Any
-visual apply also arms `redraw_nudge_frames`, since tiny-skia's damage
-tracking can otherwise skip presenting a change that moved no widget.
+until an unrelated edit, same bug class as the find-state fields. A visual
+apply needs nothing else to reach the screen: every one of them moves a color
+the compositor compares, and `a_theme_change_repaints_the_editor` in
+`jumppad_textarea`'s `tests/repaint.rs` pins that.
 
 ## Where the grammar files live
 

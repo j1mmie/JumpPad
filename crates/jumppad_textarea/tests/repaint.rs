@@ -40,11 +40,22 @@ struct Window {
     pixels: Vec<u8>,
     mask: tiny_skia::Mask,
     viewport: Viewport,
-    last_layers: Option<Vec<iced_tiny_skia::Layer>>,
+    /// One entry per frame, newest first - the compositor's own record of
+    /// what each buffer in rotation still holds.
+    layer_stack: Vec<Vec<iced_tiny_skia::Layer>>,
+    /// How many frames back the buffer this frame lands in was last painted,
+    /// which is what `softbuffer` reports as its age. Windows and X11 say 1.
+    age: usize,
+    theme: Theme,
 }
 
 impl Window {
     fn new() -> Self {
+        Self::with_buffers(1)
+    }
+
+    /// A window whose platform presents through `age` buffers in rotation.
+    fn with_buffers(age: usize) -> Self {
         let content = Content::with_text(&document());
         let renderer = Renderer::new(Font::MONOSPACE, Pixels(14.0));
         let tree =
@@ -59,7 +70,9 @@ impl Window {
             mask: tiny_skia::Mask::new(WINDOW.width, WINDOW.height)
                 .expect("a clip mask"),
             viewport: Viewport::with_physical_size(WINDOW, 1.0),
-            last_layers: None,
+            layer_stack: Vec::new(),
+            age,
+            theme: Theme::Dark,
         };
         window.lay_out();
 
@@ -93,7 +106,7 @@ impl Window {
             widget.draw(
                 &self.tree,
                 &mut self.renderer,
-                &Theme::Dark,
+                &self.theme,
                 &core_renderer::Style {
                     text_color: Color::WHITE,
                 },
@@ -104,19 +117,20 @@ impl Window {
         }
 
         let layers = self.renderer.layers().to_vec();
-        let damage = match &self.last_layers {
-            // The first frame has nothing to compare against, so everything
-            // is painted - as it is after a resize, or whenever the app's
-            // background color changes (the redraw nudge).
+        // What the buffer this frame lands in still holds. Nothing, until the
+        // rotation has come all the way round once - and then everything is
+        // painted, as it is after a resize.
+        let damage = match self.layer_stack.get(self.age - 1) {
             None => vec![Rectangle::with_size(self.viewport.logical_size())],
-            Some(last) => damage::diff(
-                last,
+            Some(held) => damage::diff(
+                held,
                 &layers,
                 |layer| vec![layer.bounds],
                 iced_tiny_skia::Layer::damage,
             ),
         };
-        self.last_layers = Some(layers);
+        self.layer_stack.insert(0, layers);
+        self.layer_stack.truncate(self.age);
 
         let damage = damage::group(
             damage,
@@ -327,7 +341,45 @@ fn the_editor_still_paints_its_text() {
 /// going away.
 #[test]
 fn a_different_document_under_the_same_widget_repaints() {
+    assert_repaints_a_document_swap(Window::new());
+}
+
+/// The same, on a platform that presents through several buffers: the one a
+/// frame lands in was last painted three frames ago, so that is what its
+/// damage is measured against. The nudge in `app.rs` scales itself by a frame
+/// counter for exactly this reason.
+#[test]
+fn a_document_swap_repaints_through_a_rotating_swapchain() {
+    let mut window = Window::with_buffers(3);
+    for _ in 0..4 {
+        let _ = window.present();
+    }
+
+    assert_repaints_a_document_swap(window);
+}
+
+/// A palette swap moves no widget, which is the other thing the nudge in
+/// `app.rs` exists for: the colors have to be enough on their own.
+#[test]
+fn a_theme_change_repaints_the_editor() {
     let mut window = Window::new();
+    let _ = window.present();
+    let before = window.pixels.clone();
+
+    window.theme = Theme::SolarizedLight;
+    let damage = window.present();
+
+    assert!(
+        !damage.is_empty(),
+        "a palette swap should ask for a repaint"
+    );
+    assert!(
+        changed_pixels(&before, &window.pixels) > 1_000,
+        "the new palette should be on screen"
+    );
+}
+
+fn assert_repaints_a_document_swap(mut window: Window) {
     let _ = window.present();
     let before = window.pixels.clone();
 
@@ -338,14 +390,18 @@ fn a_different_document_under_the_same_widget_repaints() {
         damage.iter().any(|region| region.width > SIZE.width / 2.0),
         "the editor should be asking for a repaint: {damage:?}"
     );
-    let repainted = before
-        .chunks(4)
-        .zip(window.pixels.chunks(4))
-        .filter(|(was, now)| was != now)
-        .count();
+    let repainted = changed_pixels(&before, &window.pixels);
     assert!(
         repainted > 1_000,
         "the new document should be on screen, not the old one: \
          {repainted} pixels changed"
     );
+}
+
+fn changed_pixels(before: &[u8], after: &[u8]) -> usize {
+    before
+        .chunks(4)
+        .zip(after.chunks(4))
+        .filter(|(was, now)| was != now)
+        .count()
 }
