@@ -1037,6 +1037,41 @@ impl JumpPadApp {
         Task::none()
     }
 
+    /// Pins the window's appearance to the slot the config names, or clears
+    /// it while the config is following the OS - a pinned appearance is
+    /// precisely what stops the OS from being heard (see
+    /// `macos::pin_appearance`) - and takes the OS's own answer on the way
+    /// past. A session that spent time pinned has heard nothing from the OS
+    /// in the meantime, so that answer is stale exactly when `auto` comes
+    /// back on.
+    #[cfg(target_os = "macos")]
+    fn sync_window_appearance(&self) -> Task<Message> {
+        let Some(id) = self.window else {
+            return Task::none();
+        };
+        let pinned = self.config.mode.pinned();
+
+        iced::window::run(id, move |window| {
+            crate::macos::pin_appearance(window, pinned);
+            crate::macos::system_appearance()
+        })
+        // Travelling as the runtime's own report, so a read and a switch
+        // arrive by the same road.
+        .map(|appearance| match appearance {
+            Some(Appearance::Light) => iced::theme::Mode::Light,
+            Some(Appearance::Dark) => iced::theme::Mode::Dark,
+            None => iced::theme::Mode::None,
+        })
+        .map(Message::SystemAppearanceReported)
+    }
+
+    /// Nothing to do elsewhere: no other platform lets a pinned appearance
+    /// silence the OS, and winit reports the switch on its own.
+    #[cfg(not(target_os = "macos"))]
+    fn sync_window_appearance(&self) -> Task<Message> {
+        Task::none()
+    }
+
     /// Drops the Windows 11 system backdrop from behind a translucent window
     /// (see `windows.rs`). Runs once, as soon as the window exists - winit has
     /// already set `DWMSBT_AUTO` by then, so this is strictly an override.
@@ -1322,11 +1357,13 @@ impl JumpPadApp {
         // that moved no widget - a palette or alpha swap, say.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
 
-        if self.background_alpha < 1.0 && !was_translucent {
+        let translucency = if self.background_alpha < 1.0 && !was_translucent {
             self.turn_translucent()
         } else {
             Task::none()
-        }
+        };
+
+        Task::batch([translucency, self.sync_window_appearance()])
     }
 
     /// What a window has to be told once it is actually going to be seen
@@ -1979,6 +2016,9 @@ impl JumpPadApp {
                     // Every window arrives here, the first one included, so
                     // this is the only place focus is handed to a new one.
                     self.restore_focus(),
+                    // And the only place a fresh window's appearance is,
+                    // since iced pins one from the theme as it opens.
+                    self.sync_window_appearance(),
                 ])
             }
             Message::HotkeyEvent(event) => {

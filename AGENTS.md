@@ -1729,6 +1729,34 @@ rule as any theme no slot names. And a theme literally called `base` is
 the feature, not a collision: an old config that happened to have one
 changes meaning.
 
+**`[mode] detection = "auto"` needs the window's appearance left alone, on
+macOS.** winit reports a light/dark switch by watching the window's
+`effectiveAppearance` and deliberately says nothing while an appearance is
+pinned - a pinned one only ever changes because the app changed it. iced pins
+one from `theme()`'s mode as every window opens, so the switch never reached
+the runtime, nothing was broadcast, `system::theme_changes()` never fired, and
+the theme sat where it was for the rest of the session.
+
+`macos::pin_appearance` is what settles it, from `sync_window_appearance` in
+`app.rs`: the appearance is pinned to the slot `[mode]` names, and cleared
+whenever `detection` is `auto`. That reads as one rule - **the window's chrome
+is pinned exactly when the theme is** - and it keeps the title bar honest in
+both directions, since a following theme already agrees with the OS.
+
+The same call takes the OS's own answer on the way past
+(`macos::system_appearance`, read from `NSApp` rather than from a window,
+which would answer with its pin). That is not belt and braces: a session that
+has been pinned heard nothing from the OS while it was, so its answer is stale
+exactly when a reload turns `auto` back on. The read travels as
+`Message::SystemAppearanceReported`, the same message the runtime's own report
+arrives as.
+
+**No other platform needs this.** Windows keeps its `preferred_theme` at
+whatever the *window attributes* said, which iced never sets, so
+`WM_SETTINGCHANGE` still reports switches whatever `set_theme` did to the
+title bar; Linux reads the XDG portal instead. The rule above is a no-op
+there, and `sync_window_appearance` is a no-op function.
+
 `[[languages]]` is the one place a language is described: `name` (for
 the file's readability), an optional `syntax` (the `<syntax>.wasm`
 grammar its extensions highlight with), `extensions`, and an optional
