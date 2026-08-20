@@ -479,7 +479,7 @@ impl JumpPadApp {
             // Placeholders until the `apply_theme` below, which is what
             // actually resolves them.
             theme: Theme::Light,
-            ui_text: ui_text(&jumppad_config::FontConfig::default()),
+            ui_text: ui_text(&jumppad_config::ResolvedFont::default()),
             background_alpha: 1.0,
             redraw_nudge_frames: 0,
             shadow_refresh_frames: 0,
@@ -1296,23 +1296,23 @@ impl JumpPadApp {
         // `run()` counted every theme in the file before creating this one.
         // So this only bites when a reload introduces translucency to a
         // session that started without any.
-        if theme.background.alpha < 1.0 && !self.window_transparent {
+        if theme.background_alpha < 1.0 && !self.window_transparent {
             restart_required(
                 "[alpha] background below 1.0, in a session whose window started opaque",
             );
         } else {
-            self.background_alpha = theme.background.alpha.clamp(0.0, 1.0);
+            self.background_alpha = theme.background_alpha.clamp(0.0, 1.0);
             self.editor_config
-                .set_background_alpha(theme.background.alpha);
+                .set_background_alpha(theme.background_alpha);
         }
         self.editor_config
-            .set_foreground_alpha(theme.foreground.alpha);
+            .set_foreground_alpha(theme.foreground_alpha);
         self.editor_config.set_font(resolve_font(
-            theme.editor.font.family.as_deref(),
+            theme.editor_font.family.as_deref(),
             Font::MONOSPACE,
         ));
-        self.editor_config.set_font_size(theme.editor.font.size);
-        self.ui_text = ui_text(&theme.ui.font);
+        self.editor_config.set_font_size(theme.editor_font.size);
+        self.ui_text = ui_text(&theme.ui_font);
         // tiny-skia's damage tracking can otherwise skip presenting a change
         // that moved no widget - a palette or alpha swap, say.
         self.redraw_nudge_frames = REDRAW_NUDGE_FRAMES;
@@ -3170,10 +3170,10 @@ pub(crate) fn resolve_font(family: Option<&str>, fallback: Font) -> Font {
 /// sans face rather than the editor's monospace one: chrome set in a
 /// monospaced face because a family was misspelled would look like a
 /// different bug than the one it is.
-pub(crate) fn ui_text(config: &jumppad_config::FontConfig) -> UiText {
+pub(crate) fn ui_text(font: &jumppad_config::ResolvedFont) -> UiText {
     UiText::new(
-        resolve_font(config.family.as_deref(), Font::DEFAULT),
-        config.size,
+        resolve_font(font.family.as_deref(), Font::DEFAULT),
+        font.size,
     )
 }
 
@@ -4583,16 +4583,94 @@ mod tests {
     }
 
     /// The two crates have to agree on how the default palettes are spelled,
-    /// and only this one can check the spelling.
+    /// and only this one can check the spelling. Asserted through
+    /// `resolve_palette` rather than against the display names, since the
+    /// slots spell them the way `[themes.light]` and `[themes.dark]` do.
     #[test]
-    fn both_default_palette_names_are_real_palettes() {
-        for showing in [Appearance::Light, Appearance::Dark] {
-            let name = showing.default_palette();
-            assert!(
-                Theme::ALL.iter().any(|theme| theme.to_string() == name),
-                "{name:?} is not a palette"
-            );
-        }
+    fn both_default_palette_names_resolve_to_their_palettes() {
+        assert_eq!(
+            resolve_palette(
+                Appearance::Light.default_palette(),
+                Theme::Dracula
+            ),
+            Theme::Light
+        );
+        assert_eq!(
+            resolve_palette(Appearance::Dark.default_palette(), Theme::Dracula),
+            Theme::Dark
+        );
+    }
+
+    /// The example the base theme exists for, through the app: no `[mode]`
+    /// section, one palette named once, and the two slots differing only in
+    /// the alpha they ask for.
+    #[test]
+    fn a_config_with_no_mode_section_shows_the_themes_named_after_the_slots() {
+        let mut app = test_app(1);
+        app.window_transparent = true;
+        let config: jumppad_config::Config = toml::from_str(
+            r#"
+            [themes.base]
+            palette = "Ferra"
+
+            [themes.dark]
+            background.alpha = 0.95
+
+            [themes.light]
+            background.alpha = 1.0
+            "#,
+        )
+        .unwrap();
+
+        let _ = app.apply_config(config);
+        assert_eq!(app.theme.to_string(), "Ferra");
+        assert_eq!(app.background_alpha, 1.0);
+
+        report(&mut app, iced::theme::Mode::Dark);
+        assert_eq!(app.theme.to_string(), "Ferra", "one palette, both slots");
+        assert_eq!(app.background_alpha, 0.95);
+    }
+
+    #[test]
+    fn apply_config_takes_the_fonts_the_base_theme_names() {
+        let mut app = test_app(1);
+        let config: jumppad_config::Config = toml::from_str(
+            r#"
+            [themes.base]
+            editor.font.size = 22.0
+
+            [themes.light]
+            ui.font.size = 20.0
+            "#,
+        )
+        .unwrap();
+
+        let _ = app.apply_config(config);
+        assert_eq!(app.editor_config.font_size(), 22.0);
+        assert_eq!(app.ui_text, UiText::new(Font::DEFAULT, 20.0));
+    }
+
+    /// `apply_config` diffs the whole `[themes]` table, so the base theme
+    /// needs no arm of its own to reach the screen.
+    #[test]
+    fn editing_only_the_base_theme_reapplies_the_showing_theme() {
+        let mut app = test_app(1);
+        let before: jumppad_config::Config = toml::from_str(
+            "[themes.base]\npalette = \"Nord\"\n\n[themes.light]",
+        )
+        .unwrap();
+        let after: jumppad_config::Config = toml::from_str(
+            "[themes.base]\npalette = \"Dracula\"\n\n[themes.light]",
+        )
+        .unwrap();
+
+        let _ = app.apply_config(before);
+        assert_eq!(app.theme.to_string(), "Nord");
+
+        app.redraw_nudge_frames = 0;
+        let _ = app.apply_config(after);
+        assert_eq!(app.theme.to_string(), "Dracula");
+        assert_eq!(app.redraw_nudge_frames, REDRAW_NUDGE_FRAMES);
     }
 
     /// What the plan for replacing windows rests on: the caret lives in the

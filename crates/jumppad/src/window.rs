@@ -127,6 +127,12 @@ mod tests {
         assert!(settings(&translucent).transparent);
     }
 
+    #[test]
+    fn a_translucent_base_theme_asks_for_a_transparent_window() {
+        let shared = config("[themes.base]\nbackground.alpha = 0.9");
+        assert!(settings(&shared).transparent);
+    }
+
     /// Even a theme no `[mode]` slot names: the slots are live-editable, so
     /// any theme in the file can reach the screen without a restart.
     #[test]
