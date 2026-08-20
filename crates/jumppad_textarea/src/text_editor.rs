@@ -26,6 +26,7 @@ use iced_core::{
     Pixels, Point, Rectangle, Shell, Size, SmolStr, Theme, Vector,
 };
 
+use crate::drag_scroll;
 use crate::safe_area::SafeArea;
 use crate::scrollbar;
 use iced::advanced::graphics;
@@ -86,6 +87,26 @@ fn wheel_lines(delta: mouse::ScrollDelta, sensitivity: f32) -> f32 {
             // A precise device: `y` is already pixels of intended travel.
             mouse::ScrollDelta::Pixels { y, .. } => -y / PIXELS_PER_LINE,
         }
+}
+
+/// Where the pointer sits relative to the text, with the widget's own
+/// position and padding taken off - the coordinates every editor action is
+/// written in.
+///
+/// Deliberately unclamped, unlike a hit test for a click: a selection drag
+/// keeps following a pointer that has left the widget, and the window with
+/// it, and the editor resolves a position outside the text against its
+/// nearest row. `None` only when the pointer's position is unknown, which is
+/// what the platform reports when it isn't on this window at all.
+fn text_position(
+    cursor: mouse::Cursor,
+    bounds: Rectangle,
+    padding: Padding,
+) -> Option<Point> {
+    Some(
+        cursor.position()?
+            - Vector::new(bounds.x + padding.left, bounds.y + padding.top),
+    )
 }
 
 /// [`TextEditor::scroll_sensitivity`]'s guard, split out so the range is
@@ -957,7 +978,10 @@ pub struct State<Highlighter: text::Highlighter> {
     focus: Option<Focus>,
     preedit: Option<input_method::Preedit>,
     last_click: Option<mouse::Click>,
-    drag_click: Option<mouse::click::Kind>,
+    /// The selection drag in progress, if any. Set by a single click, and the
+    /// only thing that makes a pointer move count as a drag - a double or
+    /// triple click selects outright and leaves this empty.
+    selection_drag: Option<drag_scroll::Drag>,
     partial_scroll: f32,
     scrollbar: scrollbar::State,
     last_theme: RefCell<Option<String>>,
@@ -1058,6 +1082,78 @@ where
             .and_then(|scrollbar| scrollbar.thumb)
             .is_some_and(|thumb| thumb.contains(position))
     }
+
+    /// Carries a selection drag held past the top or bottom edge of the text
+    /// forward by one frame: the view walks that way and the drag lands again
+    /// at the same pointer, so the selection takes in the lines that scrolled
+    /// under it. Nothing happens while the pointer is on the text - there the
+    /// pointer's own movement is all the selection needs.
+    ///
+    /// Asks for another frame for as long as the pointer is out there, even
+    /// on one too short to have moved the view: a pointer sitting still
+    /// outside the window sends nothing of its own, so the frames are the
+    /// only thing left to walk on.
+    fn advance_selection_drag(
+        &self,
+        state: &mut State<Highlighter>,
+        text_height: f32,
+        now: Instant,
+        renderer: &Renderer,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        let Some(on_edit) = self.on_edit.as_ref() else {
+            return;
+        };
+        let Some((step, pointer)) = state
+            .selection_drag
+            .as_mut()
+            .map(|drag| (drag.scroll_step(text_height, now), drag.pointer()))
+        else {
+            return;
+        };
+
+        match step {
+            drag_scroll::Step::Still => return,
+            drag_scroll::Step::Waiting => {}
+            drag_scroll::Step::Scroll(pixels) => {
+                self.publish_scroll(pixels, state, renderer, shell);
+                shell.publish(on_edit(Action::Drag(pointer)));
+            }
+        }
+
+        shell.request_redraw();
+    }
+
+    /// Moves the view by `pixels`, however the app asked to hear about it:
+    /// through the pixel handler when one is set, and otherwise in whole
+    /// lines through `on_edit`, with the remainder banked until it makes one.
+    fn publish_scroll(
+        &self,
+        pixels: f32,
+        state: &mut State<Highlighter>,
+        renderer: &Renderer,
+        shell: &mut Shell<'_, Message>,
+    ) {
+        if let Some(on_scroll) = self.on_scroll.as_ref() {
+            if pixels != 0.0 {
+                shell.publish(on_scroll(pixels));
+            }
+            return;
+        }
+
+        let Some(on_edit) = self.on_edit.as_ref() else {
+            return;
+        };
+
+        let lines =
+            pixels / self.absolute_line_height(renderer) + state.partial_scroll;
+        state.partial_scroll = lines.fract();
+
+        let lines = lines as i32;
+        if lines != 0 {
+            shell.publish(on_edit(Action::Scroll { lines }));
+        }
+    }
 }
 
 // Pinned to the concrete graphics editor, rather than generic over
@@ -1080,7 +1176,7 @@ where
             focus: None,
             preedit: None,
             last_click: None,
-            drag_click: None,
+            selection_drag: None,
             partial_scroll: 0.0,
             scrollbar: scrollbar::State::default(),
             last_theme: RefCell::default(),
@@ -1199,6 +1295,10 @@ where
                 if let Some(focus) = &mut state.focus {
                     focus.is_window_focused = false;
                 }
+                // The pointer grab a drag rides on goes back to the system
+                // along with the focus, so no release is coming and there is
+                // nothing left to follow.
+                state.selection_drag = None;
             }
             Event::Window(window::Event::Focused) => {
                 if let Some(focus) = &mut state.focus {
@@ -1224,6 +1324,14 @@ where
                             + Duration::from_millis(millis_until_redraw as u64),
                     );
                 }
+
+                self.advance_selection_drag(
+                    state,
+                    layout.bounds().shrink(self.padding).height,
+                    *now,
+                    renderer,
+                    shell,
+                );
             }
             _ => {}
         }
@@ -1330,16 +1438,24 @@ where
 
                     state.focus = Some(Focus::now());
                     state.last_click = Some(click);
-                    state.drag_click = Some(click.kind());
+                    state.selection_drag =
+                        matches!(click.kind(), mouse::click::Kind::Single)
+                            .then(|| {
+                                drag_scroll::Drag::new(click.position(), now)
+                            });
 
                     shell.publish(on_edit(action));
                     shell.capture_event();
                 }
                 Update::Drag(position) => {
+                    if let Some(drag) = &mut state.selection_drag {
+                        drag.move_to(position);
+                    }
+
                     shell.publish(on_edit(Action::Drag(position)));
                 }
                 Update::Release => {
-                    state.drag_click = None;
+                    state.selection_drag = None;
                 }
                 Update::Scroll(lines) => {
                     let bounds = self.content.0.borrow().editor.bounds();
@@ -1348,29 +1464,15 @@ where
                         return;
                     }
 
-                    if let Some(on_scroll) = self.on_scroll.as_ref() {
-                        // The whole point: hand the distance over in pixels
-                        // so the view can land between two lines. No
-                        // accumulator, because nothing is being rounded off -
-                        // a tenth of a line scrolls a tenth of a line.
-                        let pixels =
-                            lines * self.absolute_line_height(renderer);
-
-                        if pixels != 0.0 {
-                            shell.publish(on_scroll(pixels));
-                        }
-                    } else {
-                        // No pixel handler: fall back to upstream's
-                        // whole-line behavior, banking the remainder until
-                        // it makes a line.
-                        let lines = lines + state.partial_scroll;
-                        state.partial_scroll = lines.fract();
-
-                        let lines = lines as i32;
-                        if lines != 0 {
-                            shell.publish(on_edit(Action::Scroll { lines }));
-                        }
-                    }
+                    // Pixels, so the view can land between two lines: a
+                    // tenth of a line scrolls a tenth of a line, wherever
+                    // the app has a pixel handler to hear it.
+                    self.publish_scroll(
+                        lines * self.absolute_line_height(renderer),
+                        state,
+                        renderer,
+                        shell,
+                    );
                     shell.capture_event();
                 }
                 Update::InputMethod(update) => match update {
@@ -1414,7 +1516,7 @@ where
                         match binding {
                             Binding::Unfocus => {
                                 state.focus = None;
-                                state.drag_click = None;
+                                state.selection_drag = None;
                             }
                             Binding::Copy => {
                                 if let Some(selection) = content.selection() {
@@ -1942,15 +2044,11 @@ impl<Message> Update<Message> {
                 mouse::Event::ButtonReleased(mouse::Button::Left) => {
                     Some(Update::Release)
                 }
-                mouse::Event::CursorMoved { .. } => match state.drag_click {
-                    Some(mouse::click::Kind::Single) => {
-                        let cursor_position = cursor.position_in(bounds)?
-                            - Vector::new(padding.left, padding.top);
-
-                        Some(Update::Drag(cursor_position))
-                    }
-                    _ => None,
-                },
+                mouse::Event::CursorMoved { .. }
+                    if state.selection_drag.is_some() =>
+                {
+                    Some(Update::Drag(text_position(cursor, bounds, padding)?))
+                }
                 mouse::Event::WheelScrolled { delta }
                     if cursor.is_over(bounds) =>
                 {
@@ -2729,6 +2827,49 @@ mod tests {
         shape(&mut editor, bounds);
 
         assert_eq!(scrolled_to(&editor), Some(2.0));
+    }
+
+    /// A widget sitting somewhere other than the window's corner - a tab bar
+    /// above it, say - so a pointer's window coordinates and its coordinates
+    /// in the text can't be mistaken for each other.
+    fn widget_bounds() -> Rectangle {
+        Rectangle::new(Point::new(30.0, 50.0), Size::new(400.0, 400.0))
+    }
+
+    /// Where a pointer at `(x, y)` in the window lands in the text.
+    fn pointed_at(x: f32, y: f32) -> Option<Point> {
+        text_position(
+            mouse::Cursor::Available(Point::new(x, y)),
+            widget_bounds(),
+            Padding::new(5.0),
+        )
+    }
+
+    #[test]
+    fn a_pointer_on_the_text_lands_inside_it() {
+        assert_eq!(pointed_at(35.0, 55.0), Some(Point::ORIGIN));
+        assert_eq!(pointed_at(135.0, 155.0), Some(Point::new(100.0, 100.0)));
+    }
+
+    #[test]
+    fn a_pointer_off_the_widget_keeps_its_place_past_the_edges() {
+        // What a selection drag out of the window rides on: a position past
+        // the text rather than no position at all, so the editor can carry
+        // on hit-testing it against its nearest row.
+        assert_eq!(pointed_at(0.0, 0.0), Some(Point::new(-35.0, -55.0)));
+        assert_eq!(pointed_at(1000.0, 1000.0), Some(Point::new(965.0, 945.0)));
+    }
+
+    #[test]
+    fn a_pointer_the_window_cannot_place_has_no_position() {
+        assert_eq!(
+            text_position(
+                mouse::Cursor::Unavailable,
+                widget_bounds(),
+                Padding::new(5.0),
+            ),
+            None,
+        );
     }
 
     fn notch(y: f32) -> mouse::ScrollDelta {

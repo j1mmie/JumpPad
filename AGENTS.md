@@ -407,6 +407,52 @@ Two things not to reach for if the patch ever has to go away:
   taller than the view or the bottom edge gaps. Strictly more moving parts
   than one patched method.
 
+### Selecting past the edges of the text
+
+A selection drag follows the pointer wherever it goes - over the tab bar, out
+of the window, off the screen - and while the pointer sits above or below the
+text the view walks that way until the button comes up. That is what a native
+Windows or macOS text field does, and it is two mechanisms, not one:
+
+- **The pointer's position is read unclamped** (`text_position` in
+  `text_editor.rs`). Upstream asks `cursor.position_in(bounds)`, which is
+  `None` the moment the pointer leaves the widget - that is what used to
+  freeze a selection as soon as the pointer crossed onto the tab bar. The
+  platforms keep the moves coming: winit grabs the pointer for the duration
+  of a press on Windows and macOS alike, so `CursorMoved` keeps arriving with
+  coordinates outside the window, negative ones included, and cosmic-text
+  resolves a position past the text against its nearest row.
+- **`drag_scroll.rs` walks the view** while that position is past the top or
+  bottom edge - `EDGE_SPEED` right at the edge, up to `TOP_SPEED` once the
+  pointer is `TOP_SPEED_REACH` beyond it. Each frame it scrolls, drags again
+  at the same pointer so the selection takes in the lines that came into
+  view, and asks for the next frame, which is what keeps a drag moving while
+  the pointer sits perfectly still outside the window.
+
+**A hit test only sees the rows that are on screen.** cosmic-text's
+`Buffer::layout_runs` yields visible runs only, so a drag above the view
+selects up to the top *visible* row and no further. The walk isn't a nicety
+on top of the unclamped position; it is the only way a selection reaches a
+line that was never drawn.
+
+**A drag ends on the button coming up or on the window losing focus, and
+there is no third way out.** The pointer grab goes back to the system along
+with the focus and no release ever arrives, so a drag left running would walk
+the view on its own until the next click.
+
+**Gotcha - the next frame has to be asked for even on a frame that moved
+nothing.** iced re-runs the redraw event at the same instant after a widget
+publishes anything, and keeps the *last* pass's redraw request. The second
+pass has no time in it, so it earns no pixels - and a `request_redraw` made
+only when the view actually moved is thrown away with the first pass's
+answer, leaving the walk to advance at the caret blink's pace. That is what
+`Step::Waiting` is for: past an edge, nothing to scroll yet, still worth a
+frame.
+
+Only the vertical edges walk. The widget wraps (`Wrapping::default()` is
+`Word`, and nothing overrides it), so there is never anything to scroll
+sideways to.
+
 ### Revealing the cursor after a change
 
 `safe_area.rs` defines the region all of this aims at: the rows of the viewport

@@ -1,4 +1,5 @@
 mod comment;
+mod drag_scroll;
 pub mod font;
 mod history;
 mod lines;
