@@ -468,11 +468,18 @@ impl Layout {
             (metrics.max_position() > 0.0 && track.height > 0.0).then(|| {
                 let proportional =
                     track.height * (metrics.viewport / metrics.content);
-                let height = proportional
-                    .clamp(MIN_THUMB_HEIGHT, track.height * MAX_THUMB_FRACTION)
-                    // A track too short for the minimum still gets a thumb, just
-                    // the whole track's height rather than one hanging off the end.
-                    .min(track.height);
+                // A window dragged down to a few rows leaves a track the two
+                // bounds cannot both fit inside, so they are ordered here
+                // rather than handed to `clamp` to disagree over - a floor
+                // above its ceiling is a panic, not a narrow thumb. Which one
+                // gives way: a track too short for the minimum still gets a
+                // thumb, just the whole track's height rather than one hanging
+                // off the end, and between there and a track the fraction can
+                // fill, being big enough to see and grab wins over reading as
+                // a position indicator.
+                let shortest = MIN_THUMB_HEIGHT.min(track.height);
+                let tallest = (track.height * MAX_THUMB_FRACTION).max(shortest);
+                let height = proportional.clamp(shortest, tallest);
 
                 Rectangle {
                     y: track.y + (track.height - height) * metrics.progress(),
@@ -759,6 +766,71 @@ mod tests {
             .thumb
             .unwrap();
         assert_eq!(barely.height, track.height * MAX_THUMB_FRACTION);
+    }
+
+    /// A window shrunk far enough that `MAX_THUMB_FRACTION` of the track is
+    /// shorter than `MIN_THUMB_HEIGHT`. The minimum is the one that holds:
+    /// there is still room for it, and a thumb too small to grab is worse than
+    /// one that fills more of its track than it should.
+    #[test]
+    fn a_track_too_short_for_the_maximum_keeps_the_minimum() {
+        let bounds = Rectangle {
+            // A track of 44.67px, whose 60% is the 26.8px of the crash report.
+            height: MIN_THUMB_HEIGHT / MAX_THUMB_FRACTION - 2.0 + INSET * 2.0,
+            ..BOUNDS
+        };
+        let layout =
+            Layout::new(bounds, metrics(0.0, 1000.0, 20.0), TEST_WIDTH);
+
+        assert!(layout.track.height * MAX_THUMB_FRACTION < MIN_THUMB_HEIGHT);
+        assert_eq!(layout.thumb.unwrap().height, MIN_THUMB_HEIGHT);
+    }
+
+    /// Shrunk past even the minimum, the thumb is the whole track rather than
+    /// one hanging off the end of it.
+    #[test]
+    fn a_track_too_short_for_the_minimum_fills_itself() {
+        let bounds = Rectangle {
+            height: MIN_THUMB_HEIGHT - 8.0 + INSET * 2.0,
+            ..BOUNDS
+        };
+        let layout =
+            Layout::new(bounds, metrics(0.0, 1000.0, 20.0), TEST_WIDTH);
+
+        assert!(layout.track.height < MIN_THUMB_HEIGHT);
+        assert_eq!(layout.thumb.unwrap().height, layout.track.height);
+    }
+
+    /// Every height a window dragged down to nothing passes through, a tenth
+    /// of a pixel at a time. The bounds cross on the way, which used to hand
+    /// `f32::clamp` a floor above its ceiling and panic the app.
+    #[test]
+    fn shrinking_a_window_to_nothing_never_leaves_the_track() {
+        for tenths in 0..=1000u32 {
+            let bounds = Rectangle {
+                height: tenths as f32 / 10.0,
+                ..BOUNDS
+            };
+
+            for position in [0.0, 500.0, 980.0] {
+                let layout = Layout::new(
+                    bounds,
+                    metrics(position, 1000.0, 20.0),
+                    TEST_WIDTH,
+                );
+                let track = layout.track;
+                let Some(thumb) = layout.thumb else {
+                    continue;
+                };
+
+                assert!(thumb.height > 0.0, "{thumb:?} at {bounds:?}");
+                assert!(thumb.y >= track.y, "{thumb:?} above {track:?}");
+                assert!(
+                    thumb.y + thumb.height <= track.y + track.height,
+                    "{thumb:?} past the end of {track:?}"
+                );
+            }
+        }
     }
 
     #[test]
