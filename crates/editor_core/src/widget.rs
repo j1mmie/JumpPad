@@ -111,6 +111,11 @@ pub enum EditorMessage {
     Undo,
     /// Mirror of `Undo`, restoring the most recently undone entry.
     Redo,
+    /// Insert one indent over any selection. Like `Undo`, not a
+    /// `text_editor::Action`: what an indent is made of is the widget's own
+    /// business, and in the spaces style it depends on where the caret is
+    /// drawn.
+    Indent,
     /// Comment or uncomment the cursor's line / the selection's lines.
     /// Like `Undo`, not a `text_editor::Action` - the transformation is the
     /// widget's own logic.

@@ -415,6 +415,7 @@ impl JumpPadApp {
         editor_config.set_drag_speed(config.scroll.drag_speed);
         editor_config.set_undo_depth(config.history.depth);
         editor_config.set_comment_styles(build_comment_styles(&config));
+        editor_config.set_indentation(build_indentation(&config));
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -1248,6 +1249,14 @@ impl JumpPadApp {
         {
             self.editor_config
                 .set_comment_styles(build_comment_styles(&new));
+        }
+
+        // Unlike the two above this one does change what is on screen - the
+        // width every tab is drawn at - but it still needs no repaint of its
+        // own: the editor damages its own bounds on every layout, whatever
+        // changed (see AGENTS.md on the repaint nudge).
+        if new.indentation != current.indentation {
+            self.editor_config.set_indentation(build_indentation(&new));
         }
 
         // Settings a window is handed once, at creation. Nothing can reach
@@ -3088,6 +3097,24 @@ fn build_comment_styles(
         .collect()
 }
 
+/// Mirror of `build_comment_styles` for `[indentation]`, and here for the
+/// same reason: the widget crate names its own indentation types so it
+/// doesn't have to depend on `jumppad_config`. The width is range-checked
+/// on the way through, by the only constructor there is.
+fn build_indentation(
+    config: &jumppad_config::Config,
+) -> jumppad_textarea::Indentation {
+    let style = match config.indentation.style {
+        jumppad_config::IndentationStyle::Tabs => {
+            jumppad_textarea::IndentationStyle::Tabs
+        }
+        jumppad_config::IndentationStyle::Spaces => {
+            jumppad_textarea::IndentationStyle::Spaces
+        }
+    };
+    jumppad_textarea::Indentation::new(style, config.indentation.width)
+}
+
 /// A reloaded setting that only applies at startup. Logged, not shown in
 /// the banner: the change is valid, it just waits for the next start.
 fn restart_required(what: &str) {
@@ -4840,6 +4867,55 @@ mod tests {
                 right: "-->".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn a_new_app_starts_on_the_configured_indentation() {
+        let app = test_app(1);
+        assert_eq!(
+            app.editor_config.indentation(),
+            jumppad_textarea::Indentation::default(),
+            "the shipped default is tabs at four"
+        );
+    }
+
+    #[test]
+    fn apply_config_reaches_the_shared_indentation() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            indentation: jumppad_config::IndentationConfig {
+                style: jumppad_config::IndentationStyle::Spaces,
+                width: 2,
+            },
+            ..Default::default()
+        };
+
+        let _ = app.apply_config(config);
+
+        let indentation = app.editor_config.indentation();
+        assert_eq!(
+            indentation.style(),
+            jumppad_textarea::IndentationStyle::Spaces
+        );
+        assert_eq!(indentation.width(), 2);
+    }
+
+    #[test]
+    fn an_out_of_range_indentation_width_is_pulled_into_range() {
+        // The config crate holds no range of its own, so this is the only
+        // thing standing between a typo and a buffer that ignores it.
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            indentation: jumppad_config::IndentationConfig {
+                style: jumppad_config::IndentationStyle::Tabs,
+                width: 0,
+            },
+            ..Default::default()
+        };
+
+        let _ = app.apply_config(config);
+
+        assert_eq!(app.editor_config.indentation().width(), 1);
     }
 
     #[test]

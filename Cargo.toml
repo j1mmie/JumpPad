@@ -54,9 +54,12 @@ jumppad_config = { path = "crates/jumppad_config" }
 jumppad_actions = { path = "crates/jumppad_actions" }
 jumppad_keybinds = { path = "crates/jumppad_keybinds" }
 
-# `iced_graphics` 0.14.0 plus one additive method, `Editor::scroll_by(pixels)`,
-# which is what makes scrolling pixel-granular rather than line-snapped (see
-# AGENTS.md). Branched from the `0.14.0` tag, not `master`: master is
+# `iced_graphics` 0.14.0 plus two additive methods on the concrete
+# `graphics::text::Editor`: `scroll_by(pixels)`, which makes scrolling
+# pixel-granular rather than line-snapped, and `set_tab_width(width)`, which
+# is the only way up to the cosmic-text buffer's tab stops - `buffer()` hands
+# out a shared reference (see AGENTS.md). Branched from the `0.14.0` tag,
+# not `master`: master is
 # `0.15.0-dev`, and a patch has to keep satisfying the `^0.14` requirements
 # every other iced crate states, or Cargo refuses it.
 #

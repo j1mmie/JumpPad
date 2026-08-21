@@ -27,6 +27,7 @@ use iced_core::{
 };
 
 use crate::drag_scroll;
+use crate::indent;
 use crate::safe_area::SafeArea;
 use crate::scrollbar;
 use iced::advanced::graphics;
@@ -490,6 +491,9 @@ pub struct TextEditor<
     /// Multiplier on how fast a selection drag held past an edge walks the
     /// view - see [`TextEditor::drag_speed`].
     drag_speed: f32,
+    /// Columns between tab stops, for drawing - see
+    /// [`TextEditor::tab_width`].
+    tab_width: u16,
     class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     key_binding: Option<Box<dyn Fn(KeyPress) -> Option<Binding<Message>> + 'a>>,
@@ -530,6 +534,7 @@ where
             wrapping: Wrapping::default(),
             scroll_sensitivity: 1.0,
             drag_speed: 1.0,
+            tab_width: indent::DEFAULT_WIDTH,
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
@@ -671,6 +676,19 @@ where
         self
     }
 
+    /// Sets how many columns a tab character covers when it is drawn. The
+    /// same width the document is indented at, so tabs already in a file
+    /// line up with the ones typed into it.
+    ///
+    /// Range-checked by [`Indentation`], which is the only thing that builds
+    /// one.
+    ///
+    /// [`Indentation`]: crate::Indentation
+    pub fn tab_width(mut self, width: u16) -> Self {
+        self.tab_width = width;
+        self
+    }
+
     /// Highlights the [`TextEditor`] with the given [`Highlighter`] and
     /// a strategy to turn its highlights into some text format.
     pub fn highlight_with<H: text::Highlighter>(
@@ -696,6 +714,7 @@ where
             wrapping: self.wrapping,
             scroll_sensitivity: self.scroll_sensitivity,
             drag_speed: self.drag_speed,
+            tab_width: self.tab_width,
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
@@ -1293,7 +1312,11 @@ where
             self.text_size.unwrap_or_else(|| renderer.default_size());
         let line_height = self.line_height;
         let wrapping = self.wrapping;
+        let tab_width = self.tab_width;
         let shape = |editor: &mut Renderer::Editor| {
+            // Before the update, so a width that just changed is in effect
+            // for the shaping it triggers rather than the one after it.
+            editor.set_tab_width(tab_width);
             editor.update(
                 text_bounds,
                 font,
@@ -2341,6 +2364,61 @@ mod tests {
         shape(&mut editor, bounds);
 
         (editor, bounds)
+    }
+
+    /// Wide enough that nothing under test comes near wrapping, which would
+    /// measure the bounds rather than the text.
+    const MEASURE_BOUNDS: Size = Size::new(400.0, 400.0);
+
+    /// How wide a one-line document lays out. `Wrapping::None`, so this is
+    /// the text's natural width rather than the bounds it was given.
+    fn drawn_width(text: &str, tab_width: u16) -> f32 {
+        let mut editor = graphics::text::Editor::with_text(text);
+        editor.set_tab_width(tab_width);
+        shape(&mut editor, MEASURE_BOUNDS);
+
+        editor.min_bounds().width
+    }
+
+    #[test]
+    fn a_tab_is_drawn_as_wide_as_the_tab_width_asks() {
+        // The face is monospace, so a tab reaching a stop `width` columns
+        // away covers exactly that many spaces - which is the only reason
+        // this is measurable rather than merely bigger-than.
+        for width in [2u16, 4, 8] {
+            let spaces = " ".repeat(usize::from(width));
+            assert_eq!(
+                drawn_width("\tx", width),
+                drawn_width(&format!("{spaces}x"), width),
+                "a tab at width {width}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_wider_tab_width_draws_a_wider_tab() {
+        // Guards the direction as well as the arithmetic above: a stop table
+        // read backwards would still make tabs and spaces agree.
+        assert!(drawn_width("\tx", 8) > drawn_width("\tx", 2));
+    }
+
+    #[test]
+    fn changing_the_tab_width_redraws_a_line_already_shaped() {
+        // What a `config.toml` reload needs: the buffer caches a line's
+        // shaping, and a width that only applied to lines shaped afterwards
+        // would leave every open document at whatever it opened with.
+        let mut editor = graphics::text::Editor::with_text("\tx");
+        editor.set_tab_width(2);
+        shape(&mut editor, MEASURE_BOUNDS);
+        let narrow = editor.min_bounds().width;
+
+        editor.set_tab_width(8);
+        shape(&mut editor, MEASURE_BOUNDS);
+
+        assert!(
+            editor.min_bounds().width > narrow,
+            "the shaped line kept its old tab width"
+        );
     }
 
     fn document_text() -> String {

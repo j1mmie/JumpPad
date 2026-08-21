@@ -51,6 +51,14 @@ drag_speed = 1.0
 [files]
 save_conflict_resolution = "ask"
 
+[indentation]
+# "tabs" inserts one tab character; "spaces" inserts however many spaces
+# reach the next stop from where the caret is. `width` is the columns
+# between stops either way, and is also how wide a tab is drawn - so a file
+# full of tabs lines up at this width whichever style is set.
+style = "spaces"
+width = 2
+
 [[languages]]
 name = "Markdown"
 syntax = "markdown"

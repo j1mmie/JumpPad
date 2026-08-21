@@ -111,6 +111,7 @@ actions! {
         "select_document_end", "Select to End", Editor, EditorFocused;
     Undo => "undo", "Undo", Editor, EditorFocused;
     Redo => "redo", "Redo", Editor, EditorFocused;
+    Indent => "indent", "Indent", Editor, EditorFocused;
     ToggleComment =>
         "toggle_comment", "Toggle Comment", Editor, EditorFocused;
     DeleteLine => "delete_line", "Delete Line", Editor, EditorFocused;

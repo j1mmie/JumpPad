@@ -1690,7 +1690,7 @@ dependencies = [
 [[package]]
 name = "iced_core"
 version = "0.14.0"
-source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#6d3069b6607123c2ca7eba0de6ffb6cbe7d1bca8"
+source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#561720656634dba35ae28883b408d8f96c008023"
 dependencies = [
  "bitflags 2.13.1",
  "bytes",
@@ -1718,7 +1718,7 @@ dependencies = [
 [[package]]
 name = "iced_futures"
 version = "0.14.0"
-source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#6d3069b6607123c2ca7eba0de6ffb6cbe7d1bca8"
+source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#561720656634dba35ae28883b408d8f96c008023"
 dependencies = [
  "futures",
  "iced_core",
@@ -1732,7 +1732,7 @@ dependencies = [
 [[package]]
 name = "iced_graphics"
 version = "0.14.0"
-source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#6d3069b6607123c2ca7eba0de6ffb6cbe7d1bca8"
+source = "git+https://github.com/j1mmie/iced?branch=jumppad%2Ffractional-scroll#561720656634dba35ae28883b408d8f96c008023"
 dependencies = [
  "bitflags 2.13.1",
  "bytemuck",

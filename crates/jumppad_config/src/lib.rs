@@ -36,6 +36,8 @@ pub struct Config {
     pub history: HistoryConfig,
     #[serde(skip_serializing_if = "is_default")]
     pub files: FilesConfig,
+    #[serde(skip_serializing_if = "is_default")]
+    pub indentation: IndentationConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -527,6 +529,41 @@ impl SaveConflictResolution {
     pub fn asks(self) -> bool {
         matches!(self, Self::Ask)
     }
+}
+
+/// What the Tab key inserts, and how wide a tab character is drawn. `width`
+/// means columns in both modes: the stops a tab advances to, and the stops
+/// the spaces reach. Clamped where applied, not here, so this crate doesn't
+/// need to know what the editor considers a usable range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct IndentationConfig {
+    pub style: IndentationStyle,
+    pub width: u16,
+}
+
+impl Default for IndentationConfig {
+    fn default() -> Self {
+        Self {
+            style: IndentationStyle::Tabs,
+            width: 4,
+        }
+    }
+}
+
+/// Whether an indent is one tab character or a run of spaces. A file's
+/// existing tabs are drawn at `width` under either, since the setting
+/// describes the document as much as the keystroke.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum IndentationStyle {
+    /// One tab character, however many columns that covers.
+    #[default]
+    Tabs,
+    /// However many spaces reach the next stop from where the caret is.
+    Spaces,
 }
 
 /// The typeface and text size one surface is drawn with. The same shape
@@ -1623,6 +1660,13 @@ mod tests {
             toml::from_str(include_str!("../../../config/config.sample.toml"))
                 .unwrap();
         assert!(!config.languages.is_empty());
+        // Parsing is not enough on its own: an unknown key is skipped in
+        // silence and leaves the default standing, so a sample naming a key
+        // that no longer exists would still parse and still be wrong. The
+        // sample sets both indentation keys away from their defaults, which
+        // is what makes them worth reading back.
+        assert_eq!(config.indentation.style, IndentationStyle::Spaces);
+        assert_eq!(config.indentation.width, 2);
         let _: KeybindsConfig = toml::from_str(include_str!(
             "../../../config/keybinds.sample.toml"
         ))
@@ -1716,6 +1760,57 @@ mod tests {
             SaveConflictResolution::Overwrite
         );
         assert!(!config.files.save_conflict_resolution.asks());
+    }
+
+    #[test]
+    fn config_toml_with_no_indentation_section_indents_with_tabs() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.indentation, IndentationConfig::default());
+        assert_eq!(config.indentation.style, IndentationStyle::Tabs);
+        assert_eq!(config.indentation.width, 4);
+    }
+
+    #[test]
+    fn config_toml_can_ask_for_spaces() {
+        let config: Config = toml::from_str(
+            r#"
+
+            [indentation]
+            style = "spaces"
+            width = 2
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.indentation.style, IndentationStyle::Spaces);
+        assert_eq!(config.indentation.width, 2);
+    }
+
+    #[test]
+    fn an_indentation_width_can_be_set_without_the_style() {
+        let config: Config = toml::from_str(
+            r#"
+
+            [indentation]
+            width = 8
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.indentation.style, IndentationStyle::Tabs);
+        assert_eq!(config.indentation.width, 8);
+    }
+
+    #[test]
+    fn an_unknown_indentation_style_fails_the_files_parse() {
+        // Loudly, like every other string-valued enum: a typo here would
+        // otherwise indent with something the user never asked for.
+        let parsed: Result<Config, _> = toml::from_str(
+            r#"
+
+            [indentation]
+            style = "tab"
+            "#,
+        );
+        assert!(parsed.is_err());
     }
 
     #[test]

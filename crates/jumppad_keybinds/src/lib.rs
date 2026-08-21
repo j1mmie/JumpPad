@@ -218,6 +218,9 @@ pub const DEFAULT_KEYS: &[(Action, &[Chord])] = &[
         Action::Redo,
         &[latin(Mods::COMMAND_SHIFT, 'z'), latin(Mods::COMMAND, 'y')],
     ),
+    // Plain Tab, which nothing else can claim: `Mods::matches` is exact, so
+    // the Ctrl+Tab above passes this by rather than shadowing it.
+    (Action::Indent, &[named(Mods::NONE, key::Named::Tab)]),
     (Action::ToggleComment, &[latin(Mods::COMMAND, '/')]),
     (Action::DeleteLine, &[latin(Mods::COMMAND, 'd')]),
     (Action::MoveLineUp, &[named(Mods::ALT, key::Named::ArrowUp)]),
@@ -565,6 +568,60 @@ mod tests {
                 Context::Always
             ),
             Some(Action::SelectPreviousActiveTab)
+        );
+    }
+
+    #[test]
+    fn plain_tab_indents_without_disturbing_ctrl_tab() {
+        // The two share a key and are told apart by modifiers alone, which
+        // only holds while `Mods::matches` stays exact.
+        assert_eq!(
+            action_for(
+                &Key::Named(key::Named::Tab),
+                key::Physical::Code(key::Code::Tab),
+                Modifiers::empty(),
+                Context::EditorFocused
+            ),
+            Some(Action::Indent)
+        );
+        assert_eq!(
+            action_for(
+                &Key::Named(key::Named::Tab),
+                key::Physical::Code(key::Code::Tab),
+                Modifiers::CTRL,
+                Context::EditorFocused
+            ),
+            Some(Action::SelectPreviousActiveTab)
+        );
+    }
+
+    #[test]
+    fn tab_does_not_indent_with_the_editor_unfocused() {
+        // So Tab stays free for whatever the chrome wants it for - a dialog
+        // already cycles its buttons with it.
+        assert_eq!(
+            action_for(
+                &Key::Named(key::Named::Tab),
+                key::Physical::Code(key::Code::Tab),
+                Modifiers::empty(),
+                Context::Always
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn shift_tab_is_unbound() {
+        // Deliberate: outdent is not built yet, and an exact modifier match
+        // is what keeps Shift+Tab from falling through to plain Tab.
+        assert_eq!(
+            action_for(
+                &Key::Named(key::Named::Tab),
+                key::Physical::Code(key::Code::Tab),
+                Modifiers::SHIFT,
+                Context::EditorFocused
+            ),
+            None
         );
     }
 }

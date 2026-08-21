@@ -298,11 +298,20 @@ whole line further down.
 This needs one thing iced doesn't ship, so the workspace root carries a
 `[patch.crates-io]` pointing `iced_graphics` at
 `j1mmie/iced`, branch `jumppad/fractional-scroll`. The branch is the
-`0.14.0` **tag** plus a single additive method:
+`0.14.0` **tag** plus two additive methods, both on the concrete
+`graphics::text::Editor`:
 
 ```rust
 pub fn scroll_by(&mut self, pixels: f32)
+pub fn set_tab_width(&mut self, tab_width: u16)
 ```
+
+The second is what `[indentation] width` reaches the screen through, and it
+is here for the same reason the first is: `Editor::buffer()` hands out a
+shared reference and nothing else on the editor reaches the buffer, so the
+tab stops sat at cosmic-text's default of eight for the life of the program.
+The branch name has outlived its subject; it stays put because renaming it
+would break every checkout's `Cargo.lock`.
 
 Three things about that patch are load-bearing:
 
@@ -1714,6 +1723,47 @@ Before pixel scrolling this knob could only make the wheel *slower*, not
 smoother: every event still moved the view a whole line or not at all,
 and a low sensitivity just meant more events that moved nothing. Anyone
 reintroducing a whole-line path should expect that complaint back.
+
+`[indentation]` is one setting with two halves, deliberately: `style` decides
+what Tab inserts - one tab character, or the spaces that reach the next stop
+from where the caret is drawn - and `width` is the columns between stops. The
+width applies in **both** styles, because it is also how wide every tab already
+in the file is drawn; a document whose tabs draw at one width and indent at
+another is the thing this exists to prevent. It defaults to tabs at 4, and
+reaching the screen at all needs `Editor::set_tab_width` from the
+`iced_graphics` fork (see the patch section above).
+
+**`style`, not `mode`.** `[mode]` is already a section of this file - the
+theme's light/dark `detection` - so a second, unrelated "mode" in the same
+config read as the same word twice. Nothing else answers to `style` here.
+
+The range check lives in `Indentation::new` (`jumppad_textarea`'s `indent.rs`),
+which is the only constructor there is, so a width out of range cannot reach
+either the arithmetic or the buffer - the same division of labour as
+`clamp_scroll_multiplier` and `font::clamp_size`, and for the same reason:
+`jumppad_config` stays free of any opinion the widget owns. Zero matters more
+than the ceiling does, since cosmic-text ignores a zero outright and the drawn
+width would then disagree with the inserted one.
+
+**Tab is an `Action`, not a `Binding::Insert('\t')`.** The spaces style needs
+a string computed from the caret's *visual* column, which `binding_for` cannot
+see, so `Action::Indent` arrives as `EditorMessage::Indent` and `TextArea::
+indent` builds it. Visual, not byte: `indent.rs`'s `visual_column` walks the
+line counting a tab as a jump to its stop, so an indent typed after existing
+tabs lands on a stop rather than a byte count. That is exact in the monospace
+face the editor defaults to and approximate in a proportional one, where
+cosmic-text puts its stops at multiples of a space's advance instead.
+
+The indent rides the undo history the way any other whitespace does - back
+with the word it followed, closing the step behind it - which `Edit::Insert`
+gets from `ends_undo_step` for free and `Edit::Paste` does not, hence the
+explicit `end_burst` in `indent`. Teaching `Paste` to end a step instead would
+change what the clipboard does.
+
+Shift+Tab is deliberately unbound: outdent, multi-line indent, indent-aware
+Enter, autodetection and a status readout are all still to come, and
+`Mods::matches` being exact is what keeps Shift+Tab from falling through to
+plain Tab in the meantime.
 
 ### Themes and the base theme
 

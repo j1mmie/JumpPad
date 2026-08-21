@@ -2,6 +2,7 @@ mod comment;
 mod drag_scroll;
 pub mod font;
 mod history;
+mod indent;
 mod lines;
 mod safe_area;
 mod scrollbar;
@@ -9,6 +10,7 @@ mod text_delta;
 pub mod text_editor;
 
 pub use comment::CommentStyle;
+pub use indent::{Indentation, IndentationStyle};
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -74,6 +76,10 @@ pub struct SharedEditorConfig {
     /// Extension -> comment style, flattened from the config by the app.
     /// Keys are lowercase; look up lowercased.
     comment_styles: RwLock<Arc<HashMap<String, CommentStyle>>>,
+    /// What Tab inserts and how wide a tab draws. Behind a lock rather than
+    /// in an atomic because it is two fields, like [`Self::font`]; read once
+    /// per view and once per Tab press, neither of them hot.
+    indentation: RwLock<Indentation>,
 }
 
 impl SharedEditorConfig {
@@ -89,6 +95,7 @@ impl SharedEditorConfig {
             font_size: AtomicU32::new(font::DEFAULT_SIZE.to_bits()),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
+            indentation: RwLock::new(Indentation::default()),
         })
     }
 
@@ -174,6 +181,20 @@ impl SharedEditorConfig {
 
     pub fn set_comment_styles(&self, styles: HashMap<String, CommentStyle>) {
         *self.comment_styles.write().unwrap() = Arc::new(styles);
+    }
+
+    /// What one press of Tab inserts, and the width every tab in every open
+    /// document is drawn at. Tabs at four columns until a config says
+    /// otherwise.
+    pub fn indentation(&self) -> Indentation {
+        *self.indentation.read().unwrap()
+    }
+
+    /// Range-checked by [`Indentation::new`], the way a font size is by
+    /// [`font::clamp_size`] - so a nonsense `config.toml` width can't reach
+    /// the buffer that draws the tabs.
+    pub fn set_indentation(&self, indentation: Indentation) {
+        *self.indentation.write().unwrap() = indentation;
     }
 }
 
@@ -409,6 +430,70 @@ impl TextArea {
                 text_editor::LineEnding::default()
             }
             Some(ending) => ending,
+        }
+    }
+
+    /// Performs one editor action, keeping the source cache, the
+    /// highlighter's resume line and the undo history in step with it.
+    ///
+    /// Only an `Edit` changes the document's text. `Move`, `Select`, `Click`,
+    /// `Drag` and `Scroll` just move the cursor or the viewport, so the
+    /// `source` cache stays valid across all of them - which is what keeps a
+    /// selection drag, the whole reason the cache exists, off the rebuild
+    /// path.
+    fn perform_action(&mut self, action: text_editor::Action) -> bool {
+        let is_edit = action.is_edit();
+        let ends_step = ends_undo_step(&action);
+        // Before the action moves the caret, and not on a drag.
+        let touched_before = is_edit.then(|| self.topmost_touched_line());
+        if is_edit {
+            // The pre-edit text is already sitting in the cache. The caret
+            // goes with it so undo can re-select whatever this edit is about
+            // to replace.
+            self.history
+                .record_before_edit(&self.source, self.cursor_state());
+        }
+        self.content.perform(action);
+        if let Some(touched_before) = touched_before {
+            self.resync_source();
+            self.edited_from =
+                Some(touched_before.min(self.topmost_touched_line()));
+        }
+        if ends_step {
+            self.history.end_burst();
+        }
+        is_edit
+    }
+
+    /// Inserts one indent over any selection: a tab character, or the spaces
+    /// that reach the next stop from where the caret is drawn. Always an
+    /// edit - the narrowest indent is still one character - so there is no
+    /// no-op case to guard.
+    fn indent(&mut self) -> bool {
+        let indentation = self.settings.indentation();
+        let (line, column) = self.indent_origin();
+        let line_text = self.line_text(line).unwrap_or_default();
+        let text =
+            indentation.text_at(indentation.visual_column(&line_text, column));
+        let changed = self.perform_action(text_editor::Action::Edit(
+            text_editor::Edit::Paste(Arc::new(text)),
+        ));
+        // An indent closes a typing burst, the way inserting any other
+        // whitespace already does. `Edit::Paste` doesn't on its own, and
+        // teaching it to would change what the clipboard does too.
+        self.history.end_burst();
+        changed
+    }
+
+    /// Where an indent lands: the start of the selection it replaces, or the
+    /// caret. A word or line selection reports its anchor rather than its
+    /// start, so this reads a column or two late for one - worth a space or
+    /// two in spaces mode, and nothing at all in tabs mode.
+    fn indent_origin(&self) -> (usize, usize) {
+        let cursor = self.cursor_position();
+        match self.selection() {
+            Some(selection) => selection.anchor.min(cursor),
+            None => cursor,
         }
     }
 
@@ -689,6 +774,7 @@ impl TextEditorWidget for TextArea {
             .height(Fill)
             .scroll_sensitivity(self.settings.scroll_sensitivity())
             .drag_speed(self.settings.drag_speed())
+            .tab_width(self.settings.indentation().width())
             .style(move |theme, status| {
                 editor_style(theme, status, background_alpha, foreground_alpha)
             })
@@ -703,35 +789,7 @@ impl TextEditorWidget for TextArea {
         // Live, so a config reload reaches tabs that already exist.
         self.history.set_depth(self.settings.undo_depth());
         match message {
-            EditorMessage::Action(action) => {
-                // Only an `Edit` changes the document's text. `Move`,
-                // `Select`, `Click`, `Drag` and `Scroll` just move the cursor
-                // or the viewport, so the `source` cache stays valid across
-                // all of them - which is what keeps a selection drag, the
-                // whole reason the cache exists, off the rebuild path.
-                let is_edit = action.is_edit();
-                let ends_step = ends_undo_step(&action);
-                // Before the action moves the caret, and not on a drag.
-                let touched_before =
-                    is_edit.then(|| self.topmost_touched_line());
-                if is_edit {
-                    // The pre-edit text is already sitting in the cache. The
-                    // caret goes with it so undo can re-select whatever this
-                    // edit is about to replace.
-                    self.history
-                        .record_before_edit(&self.source, self.cursor_state());
-                }
-                self.content.perform(action);
-                if let Some(touched_before) = touched_before {
-                    self.resync_source();
-                    self.edited_from =
-                        Some(touched_before.min(self.topmost_touched_line()));
-                }
-                if ends_step {
-                    self.history.end_burst();
-                }
-                is_edit
-            }
+            EditorMessage::Action(action) => self.perform_action(action),
             EditorMessage::Scroll(pixels) => {
                 // Moves the view, never the text - so no `source` rebuild,
                 // for the same reason `Scroll`'s action counterpart needs
@@ -741,6 +799,7 @@ impl TextEditorWidget for TextArea {
             }
             EditorMessage::Undo => self.apply_history(History::undo),
             EditorMessage::Redo => self.apply_history(History::redo),
+            EditorMessage::Indent => self.indent(),
             EditorMessage::ToggleComment => self.toggle_comment(),
             EditorMessage::DeleteLine => self.delete_line(),
             EditorMessage::MoveLineUp => self.move_line_up(),
@@ -1270,6 +1329,7 @@ pub fn binding_for(action: Action) -> Option<Binding<EditorMessage>> {
         Action::SelectDocumentEnd => Some(Binding::Select(Motion::DocumentEnd)),
         Action::Undo => custom(EditorMessage::Undo),
         Action::Redo => custom(EditorMessage::Redo),
+        Action::Indent => custom(EditorMessage::Indent),
         Action::ToggleComment => custom(EditorMessage::ToggleComment),
         Action::DeleteLine => custom(EditorMessage::DeleteLine),
         Action::MoveLineUp => custom(EditorMessage::MoveLineUp),
@@ -1901,6 +1961,127 @@ mod tests {
                 right: "-->".to_string(),
             },
         )
+    }
+
+    /// An editor whose `[indentation]` is set the way a config would set it.
+    fn indented_editor(
+        text: &str,
+        style: IndentationStyle,
+        width: u16,
+    ) -> TextArea {
+        let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+        let settings =
+            SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
+        settings.set_indentation(Indentation::new(style, width));
+        TextArea::new(text, &registry, None, settings)
+    }
+
+    #[test]
+    fn the_tabs_style_indents_with_one_tab_character() {
+        let mut editor = indented_editor("", IndentationStyle::Tabs, 4);
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\t");
+        assert_eq!(editor.cursor_position(), (0, 1));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn the_tabs_style_inserts_one_character_however_wide_it_draws() {
+        // The width is a drawing instruction here, not a count of anything
+        // that reaches the document.
+        for width in [2, 8] {
+            let mut editor = indented_editor("", IndentationStyle::Tabs, width);
+            editor.update(EditorMessage::Indent);
+            assert_eq!(editor.text(), "\t", "at width {width}");
+        }
+    }
+
+    #[test]
+    fn the_spaces_style_indents_to_the_next_stop() {
+        let mut editor = indented_editor("ab", IndentationStyle::Spaces, 4);
+        editor.move_cursor_to(0, 2);
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "ab  ", "two spaces reach column 4");
+        assert_eq!(editor.cursor_position(), (0, 4));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn the_spaces_style_counts_from_the_caret_not_the_line_start() {
+        let mut editor =
+            indented_editor("abcdefghijkl", IndentationStyle::Spaces, 8);
+        // The user-facing spec example: caret at column 12, next stop at 16.
+        editor.move_cursor_to(0, 12);
+        editor.update(EditorMessage::Indent);
+        assert_eq!(editor.text(), "abcdefghijkl    ");
+    }
+
+    #[test]
+    fn the_spaces_style_measures_a_tabbed_line_as_it_is_drawn() {
+        // The line already holds a tab, which covers four columns of its own
+        // - so the caret after it is on a stop and gets a whole width.
+        let mut editor = indented_editor("\t", IndentationStyle::Spaces, 4);
+        editor.move_cursor_to(0, 1);
+        editor.update(EditorMessage::Indent);
+        assert_eq!(editor.text(), "\t    ");
+    }
+
+    #[test]
+    fn an_indent_replaces_the_selection_it_lands_on() {
+        let mut editor =
+            indented_editor("keep drop", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 5), (0, 9));
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "keep \t");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn an_indent_over_a_selection_counts_from_where_it_starts() {
+        // Not from the caret at the far end: the spaces land where the
+        // selection did, so they have to reach the stop from there.
+        let mut editor = indented_editor("abc", IndentationStyle::Spaces, 4);
+        // Dragged right to left, so the caret is the *earlier* end here and
+        // the anchor the later one - the indent has to take the smaller.
+        select_range(&mut editor, (0, 3), (0, 1));
+        editor.update(EditorMessage::Indent);
+        assert_eq!(editor.text(), "a   ", "three spaces from column 1");
+    }
+
+    #[test]
+    fn an_indent_rides_with_the_word_before_it_and_closes_the_step() {
+        // The rule every other whitespace follows (see `ends_undo_step`):
+        // the indent goes back with the word it followed, and what is typed
+        // after it is a step of its own. Both styles, since only one of them
+        // gets that for free from `Edit::Insert`.
+        for (style, indented) in [
+            (IndentationStyle::Tabs, "ab\t"),
+            (IndentationStyle::Spaces, "ab  "),
+        ] {
+            let mut editor = indented_editor("", style, 4);
+            type_out(&mut editor, "ab");
+            editor.update(EditorMessage::Indent);
+            assert_eq!(editor.text(), indented, "{style:?}");
+            type_out(&mut editor, "c");
+
+            assert!(editor.update(EditorMessage::Undo));
+            assert_eq!(editor.text(), indented, "{style:?}");
+            assert!(editor.update(EditorMessage::Undo));
+            assert_eq!(editor.text(), "", "{style:?}");
+            assert_source_is_synced(&editor);
+        }
+    }
+
+    #[test]
+    fn typing_after_an_indent_is_its_own_undo_step() {
+        let mut editor = indented_editor("", IndentationStyle::Tabs, 4);
+        editor.update(EditorMessage::Indent);
+        type_out(&mut editor, "x");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "\t");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "");
     }
 
     #[test]
@@ -2760,6 +2941,30 @@ mod tests {
             key_binding(event, &resolving(Some(Action::MoveLineUp))),
             Some(Binding::Custom(EditorMessage::MoveLineUp))
         ));
+    }
+
+    #[test]
+    fn a_tab_press_becomes_an_indent_instead_of_going_nowhere() {
+        // The bug this fixes: Tab arrives carrying "\t", and iced's own
+        // dispatch drops it as a control character - so an unresolved Tab
+        // produced no binding, was never captured, and did nothing at all.
+        // Resolving it first is what gets it a binding.
+        let tab = || {
+            press_with_text(
+                keyboard::Modifiers::empty(),
+                key::Code::Tab,
+                keyboard::Key::Named(key::Named::Tab),
+                Some("\t"),
+            )
+        };
+        assert!(matches!(
+            key_binding(tab(), &resolving(Some(Action::Indent))),
+            Some(Binding::Custom(EditorMessage::Indent))
+        ));
+        assert!(
+            key_binding(tab(), &resolving(None)).is_none(),
+            "iced's own dispatch still has nothing for Tab"
+        );
     }
 
     #[test]
