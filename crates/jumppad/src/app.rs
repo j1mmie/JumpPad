@@ -2840,7 +2840,7 @@ impl UiText {
     }
 
     fn close_button_diameter(self) -> f32 {
-        (self.control_size() * ICON_SCALE * 1.4).round()
+        (self.control_size() * ICON_SCALE * 1.7).round()
     }
 
     /// The new-tab button's, a quarter wider again. It is the strip's one

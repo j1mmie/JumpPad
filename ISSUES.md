@@ -1,10 +1,5 @@
 # Known issues:
 
-New tab button background color is same as active tab background color.
-New tab button background should be same as tab bar background color.
-
---
-
 With example text:
 ```
 ABC

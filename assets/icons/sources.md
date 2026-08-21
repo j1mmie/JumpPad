@@ -1,0 +1,2 @@
+- x.svg: https://lucide.dev/icons/x
+- plus.svg https://lucide.dev/icons/plus
