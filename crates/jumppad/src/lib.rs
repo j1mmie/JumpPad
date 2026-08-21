@@ -129,6 +129,10 @@ Options:
     )
     .title("JumpPad")
     .window(window)
+    // The icon glyphs the tab bar draws with. iced loads faces by bytes at
+    // startup and then finds them by family, which is what `ICON_FONT` in
+    // `app.rs` names.
+    .font(jumppad_icons::FONT)
     // iced defaults this on, but its MSAA only ever applies to triangle
     // primitives - meshes, canvases, gradient quads - and this app draws
     // none. Quads and text are always `count: 1` regardless. So it buys

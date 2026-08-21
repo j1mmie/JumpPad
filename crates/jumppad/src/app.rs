@@ -11,7 +11,7 @@ use global_hotkey::{GlobalHotKeyEvent, HotKeyState};
 use iced::advanced::widget::{Id, operate, operation};
 use iced::keyboard::key;
 use iced::widget::{
-    button, center, column, container, keyed_column, mouse_area, row,
+    Text, button, center, column, container, keyed_column, mouse_area, row,
     scrollable, stack, text, text_input,
 };
 use iced::{
@@ -29,6 +29,17 @@ use crate::reload;
 use crate::session;
 use crate::visor::{self, Animation};
 use crate::window;
+
+/// The face the icon glyphs are drawn in, selected by the family name the
+/// font records. `run` registers the font itself at startup.
+const ICON_FONT: Font = Font::with_name(jumppad_icons::FAMILY_NAME);
+
+/// How much larger an icon is drawn than the text it sits among. A letter's
+/// ink fills about half its em box and an icon's fills a little more, so at
+/// a matched size the icon still reads as the smaller of the two; this lifts
+/// it back to about the height of a capital. Only the size scales - the line
+/// height stays the text's, so the tab strip keeps its whole-pixel height.
+const ICON_SCALE: f32 = 1.25;
 
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -2201,8 +2212,8 @@ impl JumpPadApp {
             None => text("").into(),
         };
 
-        let step = |label: &'static str, message: Message| {
-            button(ui.control_text(label))
+        let step = |content: Text<'static>, message: Message| {
+            button(content)
                 .padding([4, 6])
                 .style(find_button_style)
                 .on_press(message)
@@ -2212,9 +2223,12 @@ impl JumpPadApp {
             row![
                 query,
                 counter,
-                step("\u{2191}", Message::FindPrevious),
-                step("\u{2193}", Message::FindNext),
-                step("\u{2715}", Message::CloseFind),
+                step(ui.control_text("\u{2191}"), Message::FindPrevious),
+                step(ui.control_text("\u{2193}"), Message::FindNext),
+                step(
+                    ui.control_icon(jumppad_icons::CLOSE),
+                    Message::CloseFind,
+                ),
             ]
             .spacing(6)
             .align_y(Center),
@@ -2236,7 +2250,7 @@ impl JumpPadApp {
                 })
                 .on_press(Message::SelectTab(index));
 
-            let close = button(ui.control_text("x"))
+            let close = button(ui.control_icon(jumppad_icons::CLOSE))
                 .padding([6, 8])
                 .style(move |theme, status| {
                     tab_close_style(theme, status, is_active)
@@ -2249,13 +2263,13 @@ impl JumpPadApp {
                 container(row![title, close].spacing(0).align_y(Center))
                     .style(move |theme| tab_frame_style(theme, is_active));
 
-            // Middle-click closes it too, same as the "x".
+            // Middle-click closes it too, same as the close button.
             mouse_area(frame)
                 .on_middle_press(Message::CloseTab(index))
                 .into()
         });
 
-        let new_tab_button = button(ui.tab_text("+"))
+        let new_tab_button = button(ui.tab_icon(jumppad_icons::ADD))
             .padding([6, 10])
             .style(new_tab_style)
             .on_press(Message::NewTab);
@@ -2761,12 +2775,32 @@ impl UiText {
         self,
         content: impl iced::widget::text::IntoFragment<'a>,
     ) -> iced::widget::Text<'a> {
-        let size = self.base * 0.75;
+        let size = self.control_size();
 
         text(content)
             .font(self.font)
             .size(size)
             .line_height(Pixels((size * 1.3).ceil()))
+    }
+
+    fn control_size(self) -> f32 {
+        self.base * 0.75
+    }
+
+    /// An icon at tab-title size. The face is the icon font rather than the
+    /// configured UI one, because these codepoints sit in the Private Use
+    /// Area, where every other face draws nothing.
+    fn tab_icon<'a>(self, icon: char) -> Text<'a> {
+        self.tab_text(icon.to_string())
+            .font(ICON_FONT)
+            .size(self.base * ICON_SCALE)
+    }
+
+    /// An icon at the compact controls' size.
+    fn control_icon<'a>(self, icon: char) -> Text<'a> {
+        self.control_text(icon.to_string())
+            .font(ICON_FONT)
+            .size(self.control_size() * ICON_SCALE)
     }
 
     /// Full sentences - dialog prompts, the error banner, the empty and
@@ -2855,7 +2889,7 @@ fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
     }
 }
 
-/// The "+" new-tab button: transparent and dim at rest so it doesn't
+/// The new-tab button: transparent and dim at rest so it doesn't
 /// compete with the tabs themselves, brightening on hover/press as the
 /// only affordance that it's interactive.
 fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {

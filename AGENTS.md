@@ -2043,21 +2043,27 @@ They start at U+E000 in the Private Use Area and are assigned in
 between releases; these never move, so re-vendoring a drawing cannot quietly
 change what the UI draws.
 
+The font is stored in Git LFS. A clone made without it leaves a text
+pointer where the font should be, and nothing downstream would say so - a
+face that fails to parse is declined, `.notdef` is empty on purpose, and
+every icon draws as nothing at all. `jumppad_icons` checks the sfnt tag at
+compile time so that clone fails with a sentence instead.
+
 ### Drawing one
 
-Register the font once at startup and select it by family:
+`run` hands the bytes to iced at startup; `app.rs` selects the face by the
+family name the font records, and `UiText::tab_icon`/`control_icon` draw a
+glyph at the size of the text it sits among:
 
 ```rust
-iced::application(..)
-    .font(include_bytes!("../../../assets/fonts/jumppad-icons.ttf").as_slice())
+button(ui.control_icon(jumppad_icons::CLOSE))
 ```
 
-```rust
-text(jumppad_icons::CLOSE).font(Font::with_name(jumppad_icons::FAMILY_NAME))
-```
-
-The app does not register it yet - the pipeline landed before any UI used
-it, so that call is still to be added.
+Icons are drawn a little larger than that text - `ICON_SCALE` - because a
+letter's ink fills about half its em box while an icon's fills a bit more,
+so at a matched size an icon reads as the smaller of the two. Only the size
+scales: the line height stays the text's, so the tab strip keeps the
+whole-pixel height the transparent-window seams depend on.
 
 [Lucide]: https://lucide.dev
 

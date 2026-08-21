@@ -2145,6 +2145,7 @@ dependencies = [
  "iced",
  "jumppad_actions",
  "jumppad_config",
+ "jumppad_icons",
  "jumppad_keybinds",
  "jumppad_textarea",
  "log",
