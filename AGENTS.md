@@ -2046,8 +2046,11 @@ change what the UI draws.
 The font is stored in Git LFS. A clone made without it leaves a text
 pointer where the font should be, and nothing downstream would say so - a
 face that fails to parse is declined, `.notdef` is empty on purpose, and
-every icon draws as nothing at all. `jumppad_icons` checks the sfnt tag at
-compile time so that clone fails with a sentence instead.
+every icon draws as nothing at all. `jumppad`'s `ICON_FONT_BYTES` checks the
+sfnt tag at compile time so that clone fails with a sentence instead. The
+check lives with the app rather than with `jumppad_icons` on purpose:
+`build_fonts` reads that manifest to write the font, so a check there would
+stop the tool that fixes the problem from compiling.
 
 ### Drawing one
 
@@ -2059,11 +2062,25 @@ glyph at the size of the text it sits among:
 button(ui.control_icon(jumppad_icons::CLOSE))
 ```
 
-Icons are drawn a little larger than that text - `ICON_SCALE` - because a
-letter's ink fills about half its em box while an icon's fills a bit more,
-so at a matched size an icon reads as the smaller of the two. Only the size
-scales: the line height stays the text's, so the tab strip keeps the
+`ICON_SCALE` sets how large an icon draws relative to that text. Only the
+size scales: the line height stays the text's, so the tab strip keeps the
 whole-pixel height the transparent-window seams depend on.
+
+### The round buttons
+
+A tab's close button and the new-tab button are circles, sized rather than
+padded - padding around a glyph whose box is taller than it is wide gives an
+oval. `UiText` fixes both diameters from the icon size, so they track the
+configured UI size, and the hover highlight is the circle: each style
+rounds its border to half the diameter it was handed.
+
+The new-tab button sits in a container painted with `tab_bar_style`. It
+paints no surface of its own, and without that container what showed through
+was the window background - which is exactly the active tab's colour, so the
+button read as a tab. Its height is `UiText::strip_height` rather than
+`Fill`: it lives inside the horizontal `scrollable`, where `Fill` resolves
+against the window rather than the row and stretches the strip down the
+whole window.
 
 [Lucide]: https://lucide.dev
 

@@ -15,8 +15,8 @@ use iced::widget::{
     scrollable, stack, text, text_input,
 };
 use iced::{
-    Center, Color, Element, Fill, Font, Pixels, Point, Right, Subscription,
-    Task, Theme, Top, keyboard,
+    Border, Center, Color, Element, Fill, Font, Padding, Pixels, Point, Right,
+    Subscription, Task, Theme, Top, keyboard,
 };
 
 use jumppad_actions::{Action, Context};
@@ -31,15 +31,43 @@ use crate::visor::{self, Animation};
 use crate::window;
 
 /// The face the icon glyphs are drawn in, selected by the family name the
-/// font records. `run` registers the font itself at startup.
+/// font records. `run` registers [`ICON_FONT_BYTES`] at startup.
 const ICON_FONT: Font = Font::with_name(jumppad_icons::FAMILY_NAME);
 
-/// How much larger an icon is drawn than the text it sits among. A letter's
-/// ink fills about half its em box and an icon's fills a little more, so at
-/// a matched size the icon still reads as the smaller of the two; this lifts
-/// it back to about the height of a capital. Only the size scales - the line
-/// height stays the text's, so the tab strip keeps its whole-pixel height.
+/// The font `cargo build_fonts` writes, embedded for `run` to hand to iced.
+pub(crate) const ICON_FONT_BYTES: &[u8] =
+    include_bytes!("../../../assets/fonts/jumppad-icons.ttf");
+
+// The font is kept in Git LFS, and a clone made without it leaves a short
+// text pointer at that path instead of the file. Nothing downstream would
+// say so: iced declines a face it cannot parse, `.notdef` is empty on
+// purpose, and every icon draws as nothing at all. Checking the sfnt
+// version tag lets the build fail with a sentence instead.
+//
+// It belongs here rather than in `jumppad_icons` because `build_fonts`
+// reads that manifest to write this very file, and a check there would stop
+// the tool that fixes the problem from compiling.
+const _: () = assert!(
+    ICON_FONT_BYTES.len() > 4
+        && ICON_FONT_BYTES[0] == 0x00
+        && ICON_FONT_BYTES[1] == 0x01
+        && ICON_FONT_BYTES[2] == 0x00
+        && ICON_FONT_BYTES[3] == 0x00,
+    "assets/fonts/jumppad-icons.ttf is a Git LFS pointer rather than a font - run `git lfs pull`"
+);
+
+/// How much larger an icon is drawn than the text it sits among. An icon's
+/// ink fills a little over half its em box and a letter's fills about half,
+/// so the two come out close at the matched size this is set to; raising it
+/// brings an icon up toward the height of a capital instead. Only the size
+/// scales - the line height stays the text's, so the tab strip keeps its
+/// whole-pixel height whatever this is.
 const ICON_SCALE: f32 = 1.0;
+
+/// The space above and below a tab's title, and so half of what sets the
+/// tab strip's height. Everything else standing in the strip matches it
+/// rather than choosing its own, so the strip keeps one straight edge.
+const TAB_VERTICAL_PADDING: f32 = 6.0;
 
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
@@ -2244,24 +2272,27 @@ impl JumpPadApp {
             let is_active = index == self.active;
 
             let title = button(ui.tab_text(tab.title()))
-                .padding([6, 10])
+                .padding([TAB_VERTICAL_PADDING, 10.0])
                 .style(move |theme, status| {
                     tab_title_style(theme, status, is_active)
                 })
                 .on_press(Message::SelectTab(index));
 
-            let close = button(ui.control_icon(jumppad_icons::CLOSE))
-                .padding([6, 8])
-                .style(move |theme, status| {
-                    tab_close_style(theme, status, is_active)
-                })
-                .on_press(Message::CloseTab(index));
+            let close_diameter = ui.close_button_diameter();
+            let close = round_icon_button(
+                ui.control_icon(jumppad_icons::CLOSE),
+                close_diameter,
+            )
+            .style(move |theme, status| {
+                tab_close_style(theme, status, is_active, close_diameter)
+            })
+            .on_press(Message::CloseTab(index));
 
             // The frame is the only thing that paints this tab's background -
             // title and close stay fully transparent so there's one seamless surface.
-            let frame =
-                container(row![title, close].spacing(0).align_y(Center))
-                    .style(move |theme| tab_frame_style(theme, is_active));
+            let frame = container(row![title, close].align_y(Center))
+                .padding(Padding::ZERO.right(8))
+                .style(move |theme| tab_frame_style(theme, is_active));
 
             // Middle-click closes it too, same as the close button.
             mouse_area(frame)
@@ -2269,10 +2300,21 @@ impl JumpPadApp {
                 .into()
         });
 
-        let new_tab_button = button(ui.tab_icon(jumppad_icons::ADD))
-            .padding([6, 10])
-            .style(new_tab_style)
-            .on_press(Message::NewTab);
+        let new_tab_diameter = ui.new_tab_button_diameter();
+        let new_tab_button = container(
+            round_icon_button(
+                ui.tab_icon(jumppad_icons::ADD),
+                new_tab_diameter,
+            )
+            .style(move |theme, status| {
+                new_tab_style(theme, status, new_tab_diameter)
+            })
+            .on_press(Message::NewTab),
+        )
+        .padding(Padding::ZERO.left(6).right(6))
+        .height(ui.strip_height())
+        .align_y(Center)
+        .style(tab_bar_style);
 
         let tabs_row =
             row(tab_chips.chain(std::iter::once(new_tab_button.into())))
@@ -2285,7 +2327,7 @@ impl JumpPadApp {
         // chip, matching `title`'s padding and line height so its height lines
         // up without relying on flex cross-axis sizing.
         let filler = container(ui.tab_text(""))
-            .padding([6, 10])
+            .padding([TAB_VERTICAL_PADDING, 10.0])
             .width(Fill)
             .style(tab_bar_style);
 
@@ -2787,6 +2829,27 @@ impl UiText {
         self.base * 0.75
     }
 
+    /// The round button behind a tab's close icon. Only a little wider than
+    /// the glyph, so it reads as a target around the icon rather than a
+    /// button the icon happens to sit in, and rounded to whole pixels so its
+    /// edge lands on the grid.
+    /// How tall the tab strip stands: a title's line box plus the padding
+    /// above and below it.
+    fn strip_height(self) -> f32 {
+        TAB_VERTICAL_PADDING * 2.0 + (self.base * 1.3).floor()
+    }
+
+    fn close_button_diameter(self) -> f32 {
+        (self.control_size() * ICON_SCALE * 1.4).round()
+    }
+
+    /// The new-tab button's, a quarter wider again. It is the strip's one
+    /// standing control rather than something that appears beside a title,
+    /// so it can carry more weight.
+    fn new_tab_button_diameter(self) -> f32 {
+        (self.close_button_diameter() * 1.25).round()
+    }
+
     /// An icon at tab-title size. The face is the icon font rather than the
     /// configured UI one, because these codepoints sit in the Private Use
     /// Area, where every other face draws nothing.
@@ -2860,6 +2923,7 @@ fn tab_close_style(
     theme: &Theme,
     status: button::Status,
     is_active: bool,
+    diameter: f32,
 ) -> button::Style {
     let text_color = tab_text_color(theme, is_active);
     let background = match status {
@@ -2871,6 +2935,7 @@ fn tab_close_style(
     button::Style {
         background,
         text_color,
+        border: Border::default().rounded(diameter / 2.0),
         ..button::Style::default()
     }
 }
@@ -2889,20 +2954,27 @@ fn tab_frame_style(theme: &Theme, is_active: bool) -> container::Style {
     }
 }
 
-/// The new-tab button: transparent and dim at rest so it doesn't
-/// compete with the tabs themselves, brightening on hover/press as the
-/// only affordance that it's interactive.
-fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
-    let palette = theme.extended_palette();
-    let text_color = match status {
+/// The new-tab button: transparent and dim at rest so it doesn't compete
+/// with the tabs themselves, taking the same round highlight a close button
+/// does on hover. It paints nothing of its own at rest, so what shows
+/// through is the tab row's background - which is why it sits in a container
+/// styled with `tab_bar_style` rather than directly on the window.
+fn new_tab_style(
+    theme: &Theme,
+    status: button::Status,
+    diameter: f32,
+) -> button::Style {
+    let text = theme.extended_palette().background.base.text;
+    let (text_color, background) = match status {
         button::Status::Hovered | button::Status::Pressed => {
-            palette.background.base.text
+            (text, Some(text.scale_alpha(0.15).into()))
         }
-        _ => palette.background.base.text.scale_alpha(0.4),
+        _ => (text.scale_alpha(0.4), None),
     };
     button::Style {
-        background: None,
+        background,
         text_color,
+        border: Border::default().rounded(diameter / 2.0),
         ..button::Style::default()
     }
 }
@@ -2912,6 +2984,20 @@ fn new_tab_style(theme: &Theme, status: button::Status) -> button::Style {
 fn tab_bar_style(theme: &Theme) -> container::Style {
     container::Style::default()
         .background(darkening_wash(theme, TAB_ROW_DARKEN))
+}
+
+/// A round icon button: a circle of `diameter` with the glyph centred in
+/// it, which is the shape its hover highlight takes. Sized rather than
+/// padded, because padding around a glyph whose own box is taller than it is
+/// wide would give an oval.
+fn round_icon_button<'a>(
+    icon: Text<'a>,
+    diameter: f32,
+) -> button::Button<'a, Message> {
+    button(icon.width(Fill).height(Fill).center())
+        .width(diameter)
+        .height(diameter)
+        .padding(0)
 }
 
 /// One modal choice button, shared by both dialogs - they differ only in

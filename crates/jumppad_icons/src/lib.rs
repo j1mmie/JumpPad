@@ -6,11 +6,15 @@
 //! shapes as geometry would want the multisampling `jumppad::run` turns off
 //! on purpose, and a rasterized SVG would want `resvg` in the binary.
 //!
-//! This crate names each icon, points at the drawing it comes from, fixes
-//! the codepoint the UI asks for, and carries [`FONT`] itself.
-//! `icon_font_builder` reads the same list to produce that font, so the two
+//! This crate is the manifest and nothing else - it names each icon, points
+//! at the drawing it comes from, and fixes the codepoint the UI asks for.
+//! `icon_font_builder` reads the same list to produce the font, so the two
 //! cannot disagree about what is in it. Adding an icon is one row in
 //! [`ICONS`] plus one file in `assets/icons/`, then `cargo build_fonts`.
+//!
+//! The font itself is embedded by `jumppad`, not here. The builder depends
+//! on this crate, so a font baked in here would have to exist before the
+//! tool that writes it could compile.
 
 /// One icon in the font: what the product calls it, what it is drawn from,
 /// and how the UI asks for it.
@@ -55,22 +59,3 @@ pub const ICONS: &[Icon] = &[
 /// The family the font records, and so the name UI code passes to
 /// `iced::Font::with_name` to select it.
 pub const FAMILY_NAME: &str = "JumpPad Icons";
-
-/// The font `cargo build_fonts` produced, ready to hand to a toolkit that
-/// loads faces from bytes.
-pub const FONT: &[u8] =
-    include_bytes!("../../../assets/fonts/jumppad-icons.ttf");
-
-// The font is kept in Git LFS, and a clone made without it leaves a short
-// text pointer at that path instead of the file. Nothing downstream would
-// complain: a toolkit handed a pointer declines the face, `.notdef` is
-// empty on purpose, and every icon draws as nothing at all. So the sfnt
-// version tag is checked here, while the failure can still say what it is.
-const _: () = assert!(
-    FONT.len() > 4
-        && FONT[0] == 0x00
-        && FONT[1] == 0x01
-        && FONT[2] == 0x00
-        && FONT[3] == 0x00,
-    "assets/fonts/jumppad-icons.ttf is a Git LFS pointer rather than a font - run `git lfs pull`"
-);
