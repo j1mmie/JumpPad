@@ -1222,17 +1222,19 @@ where
     /// Asks for another frame whenever it moved the view, since the rows a
     /// scroll crosses are estimated and one frame's can land short of the row
     /// it was aimed at - and a pointer sitting still sends nothing of its own
-    /// to finish on.
+    /// to finish on. `now` is the frame's own instant, which is what keeps a
+    /// frame that re-runs in it from asking for a second scroll.
     fn advance_scrollbar_drag(
         &self,
         state: &mut State<Highlighter>,
         scrollbar: Option<scrollbar::Layout>,
+        now: Instant,
         renderer: &Renderer,
         shell: &mut Shell<'_, Message>,
     ) {
-        let Some(pixels) = scrollbar
-            .and_then(|scrollbar| state.scrollbar.scroll_to_pointer(scrollbar))
-        else {
+        let Some(pixels) = scrollbar.and_then(|scrollbar| {
+            state.scrollbar.scroll_to_pointer(scrollbar, now)
+        }) else {
             return;
         };
 
@@ -1405,10 +1407,15 @@ where
         };
 
         let state = tree.state.downcast_mut::<State<Highlighter>>();
-        let is_redraw = matches!(
-            event,
-            Event::Window(window::Event::RedrawRequested(_now)),
-        );
+        // The frame's own instant, not a fresh reading of the clock: iced
+        // re-runs this event at the same instant after a widget publishes
+        // anything, and that is how the work below tells a second pass over a
+        // frame from the frame after it.
+        let redrawing_at = match event {
+            Event::Window(window::Event::RedrawRequested(now)) => Some(*now),
+            _ => None,
+        };
+        let is_redraw = redrawing_at.is_some();
 
         match event {
             Event::Window(window::Event::Unfocused) => {
@@ -1463,7 +1470,7 @@ where
         let width = state.scrollbar.width(now);
         let scrollbar = self.scrollbar(&state.scrollbar, layout, width);
 
-        if is_redraw {
+        if let Some(redrawing_at) = redrawing_at {
             if let Some(scrollbar) = scrollbar {
                 // Catches the wheel and cursor-driven auto-scroll alike -
                 // the latter happens inside cosmic-text and is invisible
@@ -1474,7 +1481,13 @@ where
                 shell.request_redraw_at(at);
             }
 
-            self.advance_scrollbar_drag(state, scrollbar, renderer, shell);
+            self.advance_scrollbar_drag(
+                state,
+                scrollbar,
+                redrawing_at,
+                renderer,
+                shell,
+            );
         }
 
         match event {
@@ -3446,6 +3459,10 @@ mod tests {
     /// Any width: the geometry a thumb drag turns on is vertical.
     const THUMB_WIDTH: f32 = 12.0;
 
+    /// Long enough to be a frame of its own rather than a second pass over
+    /// the one before it, which is a distinction a thumb drag draws.
+    const FRAME: Duration = Duration::from_millis(16);
+
     /// The scrollbar as the widget builds it, over a text area the size of the
     /// view the buffer was shaped into.
     fn scrollbar_of(
@@ -3471,7 +3488,7 @@ mod tests {
         bounds: Size,
         y: f32,
     ) -> usize {
-        let now = Instant::now();
+        let mut now = Instant::now();
         let mut state = scrollbar::State::default();
         let scrollbar = scrollbar_of(&state, editor, bounds);
         let thumb = scrollbar
@@ -3483,10 +3500,11 @@ mod tests {
 
         let mut frames = 0;
         while let Some(pixels) =
-            state.scroll_to_pointer(scrollbar_of(&state, editor, bounds))
+            state.scroll_to_pointer(scrollbar_of(&state, editor, bounds), now)
         {
             editor.scroll_by(pixels);
             shape_wrapped(editor, bounds);
+            now += FRAME;
 
             frames += 1;
             assert!(frames < 100, "the drag never arrived");
@@ -3695,7 +3713,7 @@ mod tests {
         // it from the lines on screen swung it between tall and short every
         // time the drag crossed from short lines into a paragraph.
         let (mut editor, bounds) = mixed_document();
-        let now = Instant::now();
+        let mut now = Instant::now();
         let mut state = scrollbar::State::default();
 
         let scrollbar = scrollbar_of(&state, &editor, bounds);
@@ -3710,11 +3728,12 @@ mod tests {
             );
 
             let mut frames = 0;
-            while let Some(pixels) =
-                state.scroll_to_pointer(scrollbar_of(&state, &editor, bounds))
+            while let Some(pixels) = state
+                .scroll_to_pointer(scrollbar_of(&state, &editor, bounds), now)
             {
                 editor.scroll_by(pixels);
                 shape_wrapped(&mut editor, bounds);
+                now += FRAME;
 
                 frames += 1;
                 assert!(frames < 100, "the drag never arrived");

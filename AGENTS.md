@@ -289,6 +289,15 @@ closes the difference - and it has to be once a frame because several
 scrolls has reached the document, so answering each would stack the same
 correction into an overshoot.
 
+**"Once a frame" means the redraw event's own instant, not a fresh clock
+reading.** iced re-runs that event at the same instant after a widget
+publishes anything, laying the whole window out again each time, so a drag
+that answered every pass bought a fraction of a row's accuracy with two extra
+layouts - and left iced logging `More than 3 consecutive RedrawRequested
+events produced layout invalidation` on most frames of a drag. `Drag`'s
+`scrolled_at` is what draws that line; `drag_scroll`'s `Step::Waiting` is the
+same guard, arrived at from the same warning.
+
 Two rules keep that loop honest at the ends of the document, where an estimate
 that is a row out is the difference between arriving and not:
 

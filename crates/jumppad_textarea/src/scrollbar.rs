@@ -178,6 +178,13 @@ struct Drag {
     /// there again means the ask went nowhere - the document is against one of
     /// its ends - and there is no point asking again until the pointer moves.
     scrolled_from: Option<f32>,
+    /// The frame this drag last asked in. iced re-runs the redraw event at the
+    /// same instant after a widget publishes anything - laying the whole
+    /// window out again each time - so a drag that answered every pass would
+    /// buy a fraction of a row's accuracy with two extra layouts, and keep
+    /// iced re-running the frame until it gave up and warned. Whatever the
+    /// scroll leaves over is the next frame's, sixteen milliseconds away.
+    scrolled_at: Option<Instant>,
 }
 
 impl State {
@@ -337,6 +344,7 @@ impl State {
             grab_offset: position.y - thumb.y,
             pointer: position,
             scrolled_from: None,
+            scrolled_at: None,
         });
         self.sync_width(now);
         true
@@ -377,18 +385,24 @@ impl State {
     /// closes what is left. The row it is aiming *for* does not move while it
     /// does that, which is what lets the two meet.
     ///
-    /// Answered once a frame rather than once per pointer move, since several
-    /// `CursorMoved` events can land in the same input batch, all of them
-    /// before any of their scrolls has reached the document. Answering each of
-    /// them would have every call in the batch correct the same stale position
-    /// and stack them into an overshoot - visible as the thumb briefly jumping
-    /// backwards once a later frame corrects it.
-    pub fn scroll_to_pointer(&mut self, layout: Layout) -> Option<f32> {
+    /// Answered once for the frame at `now` and no more, however many times it
+    /// is asked - see `Drag::scrolled_at`. That also settles what to do about
+    /// the several `CursorMoved` events that can land in one input batch, all
+    /// of them before any of their scrolls has reached the document: a
+    /// correction made against a view that has not moved yet is the last one
+    /// over again, and answering each would stack them into an overshoot.
+    pub fn scroll_to_pointer(
+        &mut self,
+        layout: Layout,
+        now: Instant,
+    ) -> Option<f32> {
         let thumb = layout.thumb?;
         let metrics = layout.metrics;
         let drag = self.drag.as_mut()?;
 
-        if drag.scrolled_from == Some(metrics.position) {
+        if drag.scrolled_at == Some(now)
+            || drag.scrolled_from == Some(metrics.position)
+        {
             return None;
         }
 
@@ -424,6 +438,7 @@ impl State {
         }
 
         drag.scrolled_from = Some(metrics.position);
+        drag.scrolled_at = Some(now);
         Some(pixels)
     }
 }
@@ -685,6 +700,10 @@ mod tests {
     /// An arbitrary fixed width for tests that don't care about the width
     /// ramp - geometry assertions below hold for any width value.
     const TEST_WIDTH: f32 = 8.0;
+
+    /// Long enough to be a frame of its own rather than a second pass over
+    /// the one before it, which is a distinction a drag draws.
+    const FRAME: Duration = Duration::from_millis(16);
 
     fn scrollable() -> Layout {
         Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH)
@@ -981,14 +1000,14 @@ mod tests {
         assert!(state.press(grab, layout, now));
         // A press alone asks for nothing: the thumb is already under the
         // pointer, which is the whole point of the grab offset.
-        assert_eq!(state.scroll_to_pointer(layout), None);
+        assert_eq!(state.scroll_to_pointer(layout, now), None);
 
         state.drag_to(Point::new(grab.x, grab.y + 20.0), now);
-        assert!(state.scroll_to_pointer(layout).unwrap() > 0.0);
+        assert!(state.scroll_to_pointer(layout, now).unwrap() > 0.0);
 
         state.release(now);
         assert!(!state.is_dragging());
-        assert_eq!(state.scroll_to_pointer(layout), None);
+        assert_eq!(state.scroll_to_pointer(layout, now + FRAME), None);
     }
 
     #[test]
@@ -1004,7 +1023,7 @@ mod tests {
         // A thumb against the end of its track asks for the end of the
         // document, which is past the last row the estimate knows about.
         assert_eq!(
-            state.scroll_to_pointer(layout),
+            state.scroll_to_pointer(layout, now),
             Some(
                 (layout.metrics.max_position() + layout.metrics.viewport)
                     * layout.pixels_per_row
@@ -1025,14 +1044,40 @@ mod tests {
 
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
         state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
-        assert!(state.scroll_to_pointer(layout).is_some());
+        assert!(state.scroll_to_pointer(layout, now).is_some());
 
-        // The same view back again: the scroll moved nothing.
-        assert_eq!(state.scroll_to_pointer(layout), None);
+        // The frame after, with the same view back again: the scroll moved
+        // nothing.
+        assert_eq!(state.scroll_to_pointer(layout, now + FRAME), None);
 
         // A pointer that moves is a fresh question.
         state.drag_to(Point::new(thumb.center_x(), 9_000.0), now);
-        assert!(state.scroll_to_pointer(layout).is_some());
+        assert!(state.scroll_to_pointer(layout, now + FRAME).is_some());
+    }
+
+    #[test]
+    fn a_second_ask_in_the_same_frame_waits_for_the_next_one() {
+        // iced re-runs the redraw event at the same instant after a widget
+        // publishes anything, laying the whole window out again each time, so
+        // a drag is asked two or three times a frame. Answering every ask
+        // bought a fraction of a row for two extra layouts, and kept iced
+        // re-running the frame until it gave up and filled the log with
+        // "More than 3 consecutive RedrawRequested events".
+        let now = Instant::now();
+        let layout = scrollable();
+        let thumb = layout.thumb.unwrap();
+        let mut state = State::default();
+
+        state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
+        state.drag_to(Point::new(thumb.center_x(), thumb.y + 40.0), now);
+
+        let pixels = state.scroll_to_pointer(layout, now).unwrap();
+        assert_eq!(state.scroll_to_pointer(layout, now), None);
+
+        // The frame after picks up whatever the scroll left over - here a
+        // view that only moved half as far as it was asked to.
+        let moved = scrolled_by(layout, pixels / 2.0);
+        assert!(state.scroll_to_pointer(moved, now + FRAME).is_some());
     }
 
     #[test]
@@ -1057,9 +1102,11 @@ mod tests {
         );
         let target = layout.metrics.max_position() / 2.0;
 
+        let mut now = now;
         let mut frames = 0;
-        while let Some(pixels) = state.scroll_to_pointer(layout) {
+        while let Some(pixels) = state.scroll_to_pointer(layout, now) {
             layout = scrolled_by(layout, pixels / 3.0);
+            now += FRAME;
             frames += 1;
 
             assert!(layout.metrics.position <= target, "{:?}", layout.metrics);
@@ -1090,7 +1137,7 @@ mod tests {
         state.press(grab, layout, now);
 
         state.drag_to(Point::new(grab.x, grab.y + 0.4), now);
-        let first = state.scroll_to_pointer(layout).unwrap();
+        let first = state.scroll_to_pointer(layout, now).unwrap();
         assert!(first > 0.0 && first < layout.pixels_per_row, "{first}");
 
         layout = scrolled_by(layout, first);
@@ -1099,11 +1146,13 @@ mod tests {
 
         // And the fractions add up rather than being dropped, so a run of
         // them leaves the view further down than the first one did.
+        let mut now = now;
         for step in 2..=10u8 {
             let to = Point::new(grab.x, grab.y + 0.4 * f32::from(step));
+            now += FRAME;
             state.drag_to(to, now);
 
-            if let Some(pixels) = state.scroll_to_pointer(layout) {
+            if let Some(pixels) = state.scroll_to_pointer(layout, now) {
                 layout = scrolled_by(layout, pixels);
             }
         }
