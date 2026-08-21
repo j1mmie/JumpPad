@@ -201,6 +201,16 @@ impl ModeConfig {
             Detection::Auto => os.unwrap_or(Appearance::Light),
         }
     }
+
+    /// The slot this config holds the app to whatever the OS says, or `None`
+    /// while it is following the OS.
+    pub fn pinned(&self) -> Option<Appearance> {
+        match self.detection {
+            Detection::Light => Some(Appearance::Light),
+            Detection::Dark => Some(Appearance::Dark),
+            Detection::Auto => None,
+        }
+    }
 }
 
 /// Where the choice between the light and dark themes comes from.
@@ -1617,6 +1627,34 @@ mod tests {
             "../../../config/keybinds.sample.toml"
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn a_mode_pins_a_slot_only_when_it_names_one() {
+        let pinning = |detection| ModeConfig {
+            detection,
+            ..ModeConfig::default()
+        };
+
+        assert_eq!(pinning(Detection::Auto).pinned(), None);
+        assert_eq!(pinning(Detection::Light).pinned(), Some(Appearance::Light));
+        assert_eq!(pinning(Detection::Dark).pinned(), Some(Appearance::Dark));
+    }
+
+    /// A pinned mode shows what it pins, whatever the OS says - so the two
+    /// answers agree wherever both are asked.
+    #[test]
+    fn a_pinned_mode_shows_what_it_pins() {
+        for detection in [Detection::Light, Detection::Dark] {
+            let mode = ModeConfig {
+                detection,
+                ..ModeConfig::default()
+            };
+
+            for os in [None, Some(Appearance::Light), Some(Appearance::Dark)] {
+                assert_eq!(Some(mode.showing(os)), mode.pinned());
+            }
+        }
     }
 
     #[test]
