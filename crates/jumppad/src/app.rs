@@ -39,7 +39,7 @@ const ICON_FONT: Font = Font::with_name(jumppad_icons::FAMILY_NAME);
 /// a matched size the icon still reads as the smaller of the two; this lifts
 /// it back to about the height of a capital. Only the size scales - the line
 /// height stays the text's, so the tab strip keeps its whole-pixel height.
-const ICON_SCALE: f32 = 1.25;
+const ICON_SCALE: f32 = 1.0;
 
 const VISOR_ANIM_TICK: Duration = Duration::from_millis(16);
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(5);
