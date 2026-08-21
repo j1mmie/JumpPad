@@ -251,11 +251,48 @@ scroll. Geometry and fade math are pure functions in `scrollbar.rs`, taking
 
 **Position is measured in logical lines, not wrapped visual rows.** That is
 deliberate, and the obvious "fix" is a regression: counting rows means
-summing `BufferLine::layout_opt()` over the document every frame, and
+summing `BufferLine::layout_opt()` over the *document* every frame, and
 cosmic-text shapes lazily, so an off-screen line that wraps to three rows
 reports one until it scrolls into view. The total - and the thumb's height
 with it - would twitch as you scroll. Logical lines cost O(1), are exact for
 anything that doesn't wrap, and are stable everywhere.
+
+**A line that wraps is still one line, and all three of `Metrics` say so.**
+`position` counts a line's rows as fractions of it, and `viewport` is how
+much document is on screen in the same unit - the rows on screen, each worth
+its share of the line it wraps from. That is a *viewport's* worth of
+`layout_opt()` per frame, over lines cosmic-text has already shaped, not the
+document scan above. Mixing the two units is what the bug behind all this
+was: `viewport` counted rows while `content` counted lines, so
+`max_position` stopped a screenful short of the end of a wrapped document
+and the thumb ran out of track with lines still below it. In this unit
+`position + viewport == content` exactly when the last row is on screen, so
+the thumb reaches the end of its track precisely when the document does.
+
+**A thumb drag is a correction per frame, not a delta per pointer move.**
+`State::drag_to` only records where the pointer has the thumb;
+`scroll_to_pointer`, asked once per frame from the redraw event, answers the
+pixels between where the view *is* and where the pointer wants it. Two
+reasons it has to work that way:
+
+- A scroll counts in pixels (rows) and the thumb counts in lines. The lines
+  a drag is about to cross are not laid out and cannot be measured, so
+  `Layout::pixels_per_line` prices them at what the lines on screen cost -
+  right where the wrapping is even, near enough elsewhere, and either way
+  the next frame measures the gap again from wherever the view actually
+  landed. Feeding a running total of what was *asked for* instead is the
+  other half of the same bug: the total drifts from the document on every
+  wrapped line and never comes back, so the thumb lags the pointer and stops
+  short of both ends.
+- Several `CursorMoved` events land in one input batch, all of them before
+  any of their scrolls has reached the document. Answering each would have
+  every call in the batch correct the same stale position and stack them
+  into an overshoot.
+
+`advance_scrollbar_drag` asks for another frame whenever it moved the view,
+so a correction that landed short still finishes with the pointer sitting
+still; a gap under half a pixel ends it, and the ends of the document end it
+too, because cosmic-text clamps there and the gap goes to zero.
 
 **Gotcha - `State::touch` reads the current opacity, so it has to run before
 whatever flag is changing.** `hovered` and a live `drag` both freeze the

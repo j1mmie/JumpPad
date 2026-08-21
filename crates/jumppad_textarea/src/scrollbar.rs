@@ -5,6 +5,7 @@
 //! Everything here is pure - geometry in, geometry out, with `now` passed in
 //! rather than read from the clock - so it can be tested without a window.
 
+use iced::advanced::graphics::text::cosmic_text::Buffer;
 use iced_core::time::{Duration, Instant};
 use iced_core::{Point, Rectangle, Size};
 
@@ -27,27 +28,38 @@ const MIN_THUMB_HEIGHT: f32 = 28.0;
 /// Keeps a barely-scrollable document from showing a thumb that fills the
 /// track and reads as a solid bar rather than a position indicator.
 const MAX_THUMB_FRACTION: f32 = 0.6;
+/// A drag correction smaller than this is not worth a scroll: half a pixel
+/// moves nothing on screen, and the next frame measures the gap again from
+/// wherever the view actually is, so dropping it neither drifts nor compounds.
+/// It is also how close to the ends of the document a drag comes to rest.
+pub const SMALLEST_DRAG_SCROLL: f32 = 0.5;
 
 const FADE_IN: Duration = Duration::from_millis(90);
 /// How long the thumb stays at full opacity after the last hover or scroll.
 const HOLD: Duration = Duration::from_millis(900);
 const FADE_OUT: Duration = Duration::from_millis(300);
 
-/// Where the document is scrolled to, in whole lines.
+/// Where the document is scrolled to, in lines.
 ///
-/// The unit is *logical* lines rather than wrapped visual rows. Counting rows
-/// would mean summing `BufferLine::layout_opt()` across the document on every
-/// frame, and cosmic-text shapes lazily - an off-screen line that wraps to
-/// three rows reports one until it scrolls into view, so the total (and the
-/// thumb's height with it) would twitch as you scroll. Logical lines are exact
-/// for anything that doesn't wrap, and stable everywhere.
+/// The unit is *logical* lines rather than wrapped visual rows, and a line
+/// that wraps is one line however many rows it takes: its rows share it
+/// between them, so scrolling past one row of a line that wraps into three
+/// moves `position` by a third. All three measures below are in that same
+/// unit, which is what lets the thumb sit flush against the bottom of its
+/// track exactly when the document's last row is on screen.
+///
+/// Counting rows instead would mean summing `BufferLine::layout_opt()` across
+/// the document on every frame, and cosmic-text shapes lazily - an off-screen
+/// line that wraps to three rows reports one until it scrolls into view, so
+/// the total (and the thumb's height with it) would twitch as you scroll.
+/// Lines are exact everywhere and cost nothing to count.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
     /// Lines from the top of the document to the top of the viewport.
     pub position: f32,
     /// Lines in the document.
     pub content: f32,
-    /// Lines that fit in the viewport.
+    /// Lines of the document the viewport shows.
     pub viewport: f32,
 }
 
@@ -107,17 +119,10 @@ struct Drag {
     /// Where in the thumb it was grabbed, so it doesn't jump to centre itself
     /// under the pointer on the first press.
     grab_offset: f32,
-    /// The scroll position (in lines, full precision) this drag has already
-    /// asked the document to be at. The baseline for the next delta, rather
-    /// than the document's actual live position - several `CursorMoved`
-    /// events can land in the same input batch and each call `drag_to`
-    /// before the previous call's `Action::Scroll` has actually reached the
-    /// document, so reading the document's position fresh each time would
-    /// have every call in the batch compute a full correction against the
-    /// same stale value and stack them into an overshoot (visible as the
-    /// thumb briefly jumping backwards once a later event corrects it).
-    /// Tracking our own running total keeps repeated calls idempotent.
-    requested: f32,
+    /// Where the pointer has the thumb now. The view is walked toward it one
+    /// frame at a time rather than on the pointer's own events - see
+    /// [`State::scroll_to_pointer`].
+    pointer: Point,
 }
 
 impl State {
@@ -275,7 +280,7 @@ impl State {
         self.touch(now);
         self.drag = Some(Drag {
             grab_offset: position.y - thumb.y,
-            requested: layout.metrics.position,
+            pointer: position,
         });
         self.sync_width(now);
         true
@@ -289,38 +294,53 @@ impl State {
         }
     }
 
-    /// Turns a drag to `position` into lines to scroll by - fractional, so
-    /// the thumb tracks the pointer pixel for pixel instead of stepping a
-    /// line at a time. `None` when nothing is being dragged, or when the
-    /// pointer hasn't moved since the last call.
-    ///
-    /// Idempotent against repeated calls for the same `position` - calling
-    /// this again before the document has caught up to a previous call must
-    /// not ask for more (see `Drag::requested`).
-    pub fn drag_to(
-        &mut self,
-        position: Point,
-        layout: Layout,
-        now: Instant,
-    ) -> Option<f32> {
+    /// Points a drag in progress at `position`, for the next frame to close
+    /// the distance to. Does nothing when nothing is being dragged.
+    pub fn drag_to(&mut self, position: Point, now: Instant) {
         // Only the hold clock: the ramp is already running from the press.
         self.active_at = Some(now);
-        let drag = self.drag.as_mut()?;
+        if let Some(drag) = self.drag.as_mut() {
+            drag.pointer = position;
+        }
+    }
+
+    /// The pixels that would put the view where the pointer is holding the
+    /// thumb - the gap between the two, priced at `Layout::pixels_per_line`.
+    /// `None` when nothing is being dragged, or when the view is already close
+    /// enough that scrolling would not move it visibly.
+    ///
+    /// Fractional, so the thumb tracks the pointer pixel for pixel instead of
+    /// stepping a line at a time, and measured against where the view actually
+    /// is rather than where the last answer asked it to go: a scroll counts in
+    /// pixels and the thumb counts in lines, so in a document that wraps a
+    /// scroll lands short of the lines it was asked for, and the frame after
+    /// closes what is left. Landing long is the same correction the other way
+    /// around.
+    ///
+    /// Answered once a frame rather than once per pointer move, since several
+    /// `CursorMoved` events can land in the same input batch, all of them
+    /// before any of their scrolls has reached the document. Answering each of
+    /// them would have every call in the batch correct the same stale position
+    /// and stack them into an overshoot - visible as the thumb briefly jumping
+    /// backwards once a later frame corrects it.
+    pub fn scroll_to_pointer(&self, layout: Layout) -> Option<f32> {
+        let drag = self.drag?;
         let thumb = layout.thumb?;
 
         // The thumb's travel is shorter than the track by its own height.
         let travel = layout.track.height - thumb.height;
-        let target = if travel > 0.0 {
-            ((position.y - drag.grab_offset - layout.track.y) / travel)
+        let progress = if travel > 0.0 {
+            ((drag.pointer.y - drag.grab_offset - layout.track.y) / travel)
                 .clamp(0.0, 1.0)
         } else {
             0.0
         };
 
-        let wanted = target * layout.metrics.max_position() - drag.requested;
-        drag.requested += wanted;
+        let lines =
+            progress * layout.metrics.max_position() - layout.metrics.position;
+        let pixels = lines * layout.pixels_per_line;
 
-        (wanted != 0.0).then_some(wanted)
+        (pixels.abs() >= SMALLEST_DRAG_SCROLL).then_some(pixels)
     }
 }
 
@@ -331,6 +351,17 @@ pub struct Layout {
     /// `None` when the document fits on screen and there's nothing to show.
     pub thumb: Option<Rectangle>,
     metrics: Metrics,
+    /// How far the view moves, in pixels, for one line of `Metrics::position`:
+    /// a whole line's worth of rows wherever the lines on screen wrap.
+    ///
+    /// The lines a drag has yet to cross are not laid out and so cannot be
+    /// measured; the ones on screen stand in for them, and a drag that lands
+    /// short or long of what they suggested is corrected on the next frame.
+    ///
+    /// A viewport showing less than a whole line counts as one, since a line
+    /// taller than the whole view would otherwise price every line of a drag
+    /// at a screenful and send it clear across the document.
+    pixels_per_line: f32,
 }
 
 impl Layout {
@@ -363,6 +394,7 @@ impl Layout {
             track,
             thumb,
             metrics,
+            pixels_per_line: bounds.height / metrics.viewport.max(1.0),
         }
     }
 
@@ -393,23 +425,60 @@ impl Layout {
 
 /// Reads the scroll position out of the editor's cosmic-text buffer, which is
 /// the only place it exists - see this crate's `text_editor` module header.
-pub fn metrics(
-    buffer: &iced::advanced::graphics::text::cosmic_text::Buffer,
-    bounds: Size,
-) -> Option<Metrics> {
+/// `None` before the buffer has been laid out, when there is nothing to
+/// measure and no scrollbar to draw.
+pub fn metrics(buffer: &Buffer, bounds: Size) -> Option<Metrics> {
     let line_height = buffer.metrics().line_height;
     if line_height <= 0.0 {
         return None;
     }
+    let viewport = visible_lines(buffer, bounds.height);
+    if viewport <= 0.0 {
+        return None;
+    }
+
     let scroll = buffer.scroll();
     Some(Metrics {
-        // `scroll.vertical` is a pixel offset into the wrapped rows of the line
-        // at `scroll.line`, so dividing gives the fraction of a line scrolled
-        // past the top.
-        position: scroll.line as f32 + scroll.vertical / line_height,
+        // `scroll.vertical` is a pixel offset into the rows of the line at
+        // `scroll.line`, so dividing by that line's own height gives how much
+        // of it has gone past the top edge.
+        position: scroll.line as f32
+            + scroll.vertical
+                / (rows_in_line(buffer, scroll.line) * line_height),
         content: buffer.lines.len() as f32,
-        viewport: bounds.height / line_height,
+        viewport,
     })
+}
+
+/// How many rows a line wraps into, counting a line cosmic-text has not shaped
+/// as one - which is every line off screen, and exact for one that never wraps.
+fn rows_in_line(buffer: &Buffer, line: usize) -> f32 {
+    buffer
+        .lines
+        .get(line)
+        .and_then(|line| line.layout_opt())
+        .map_or(1, Vec::len)
+        .max(1) as f32
+}
+
+/// How much of the document the viewport shows, in lines: every row on screen
+/// is worth its share of the line it wraps from, and a row the top or bottom
+/// edge cuts through counts only for the part of it that shows.
+///
+/// Only the rows on screen are measured, so this costs a viewport rather than
+/// a document, and every line it touches is one cosmic-text has already
+/// shaped.
+fn visible_lines(buffer: &Buffer, height: f32) -> f32 {
+    buffer
+        .layout_runs()
+        .map(|row| {
+            let shown = (row.line_top + row.line_height).min(height)
+                - row.line_top.max(0.0);
+
+            (shown / row.line_height).clamp(0.0, 1.0)
+                / rows_in_line(buffer, row.line_i)
+        })
+        .sum()
 }
 
 fn ratio(elapsed: Duration, total: Duration) -> f32 {
@@ -449,6 +518,21 @@ mod tests {
 
     fn scrollable() -> Layout {
         Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH)
+    }
+
+    /// The same view once it has moved by `pixels`, the way a document that
+    /// doesn't wrap moves: there a line really is worth what the layout
+    /// priced it at, so the scroll lands exactly where it was aimed.
+    fn scrolled_by(layout: Layout, pixels: f32) -> Layout {
+        let position = (layout.metrics.position
+            + pixels / layout.pixels_per_line)
+            .clamp(0.0, layout.metrics.max_position());
+
+        Layout::new(
+            BOUNDS,
+            metrics(position, layout.metrics.content, layout.metrics.viewport),
+            TEST_WIDTH,
+        )
     }
 
     #[test]
@@ -725,18 +809,16 @@ mod tests {
 
         let grab = Point::new(thumb.center_x(), thumb.y + 4.0);
         assert!(state.press(grab, layout, now));
+        // A press alone asks for nothing: the thumb is already under the
+        // pointer, which is the whole point of the grab offset.
+        assert_eq!(state.scroll_to_pointer(layout), None);
 
-        let lines = state
-            .drag_to(Point::new(grab.x, grab.y + 20.0), layout, now)
-            .unwrap();
-        assert!(lines > 0.0);
+        state.drag_to(Point::new(grab.x, grab.y + 20.0), now);
+        assert!(state.scroll_to_pointer(layout).unwrap() > 0.0);
 
         state.release(now);
         assert!(!state.is_dragging());
-        assert_eq!(
-            state.drag_to(Point::new(grab.x, grab.y + 40.0), layout, now),
-            None
-        );
+        assert_eq!(state.scroll_to_pointer(layout), None);
     }
 
     #[test]
@@ -747,24 +829,38 @@ mod tests {
         let mut state = State::default();
 
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
-        let lines = state
-            .drag_to(Point::new(thumb.center_x(), 10_000.0), layout, now)
-            .unwrap();
-        assert_eq!(lines, layout.metrics.max_position());
+        state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
+
+        assert_eq!(
+            state.scroll_to_pointer(layout),
+            Some(layout.metrics.max_position() * layout.pixels_per_line)
+        );
     }
 
     #[test]
-    fn drag_to_is_idempotent_when_called_again_before_the_document_catches_up()
-    {
-        // Several `CursorMoved` events can land in the same input batch and
-        // each call `drag_to` before the first one's `Action::Scroll` has
-        // actually reached the document - so `layout` (built from the
-        // document's live position) is identical across both calls here,
-        // simulating the document not having caught up yet. A second call
-        // for the same pointer position must report nothing new, or the
-        // repeated correction stacks into an overshoot that the following
-        // frame then has to visibly correct back (the thumb briefly jumping
-        // backwards mid-drag).
+    fn a_view_that_wraps_prices_a_line_at_the_rows_it_takes() {
+        // The same view over the same document, once holding twenty lines and
+        // once holding a third of that because the lines on screen wrap into
+        // three rows each. Scrolling past one of those lines is three rows of
+        // travel, and a drag that priced it at one would land a third of the
+        // way - which is a thumb that stops short of the end of the document.
+        let flat = scrollable();
+        let wrapped =
+            Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0 / 3.0), TEST_WIDTH);
+
+        assert_eq!(flat.pixels_per_line, BOUNDS.height / 20.0);
+        assert_eq!(wrapped.pixels_per_line, flat.pixels_per_line * 3.0);
+    }
+
+    #[test]
+    fn a_correction_is_measured_against_the_view_not_added_to_the_last_one() {
+        // Several `CursorMoved` events can land in the same input batch, all
+        // of them before any of their scrolls has reached the document - so
+        // the same question gets asked twice of a view that hasn't moved yet
+        // (`layout` is identical across both calls here). The answer has to be
+        // the same correction rather than a second one on top of the first,
+        // which would overshoot and leave the following frame to visibly
+        // correct it back (the thumb briefly jumping backwards mid-drag).
         let now = Instant::now();
         let layout = scrollable();
         let thumb = layout.thumb.unwrap();
@@ -772,13 +868,43 @@ mod tests {
 
         let grab = Point::new(thumb.center_x(), thumb.y);
         state.press(grab, layout, now);
+        state.drag_to(Point::new(grab.x, grab.y + 40.0), now);
 
-        let to = Point::new(grab.x, grab.y + 40.0);
-        let first = state.drag_to(to, layout, now);
-        assert!(first.is_some_and(|lines| lines > 0.0));
+        let pixels = state.scroll_to_pointer(layout).unwrap();
+        assert!(pixels > 0.0);
+        assert_eq!(state.scroll_to_pointer(layout), Some(pixels));
 
-        let second = state.drag_to(to, layout, now);
-        assert_eq!(second, None);
+        // And once the view has caught up, there is nothing left to ask for.
+        assert_eq!(state.scroll_to_pointer(scrolled_by(layout, pixels)), None);
+    }
+
+    #[test]
+    fn a_scroll_that_lands_short_is_finished_off_by_the_frames_after_it() {
+        // The lines the drag is about to cross wrap three times harder than
+        // the ones it can see, so its scroll covers a third of the lines it
+        // asked for. What is left over is the next frame's correction, and
+        // the drag arrives rather than stopping short - which is what left a
+        // thumb dragged to the end of a wrapped document short of it.
+        let now = Instant::now();
+        let mut layout = scrollable();
+        let thumb = layout.thumb.unwrap();
+        let mut state = State::default();
+        let end = layout.metrics.max_position();
+
+        state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
+        state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
+
+        let mut frames = 0;
+        while let Some(pixels) = state.scroll_to_pointer(layout) {
+            layout = scrolled_by(layout, pixels / 3.0);
+            frames += 1;
+
+            assert!(layout.metrics.position <= end, "{:?}", layout.metrics);
+            assert!(frames < 100, "the drag never arrived");
+        }
+
+        assert!(frames > 1, "one frame is all a flat document would need");
+        assert!(end - layout.metrics.position < 0.1, "{:?}", layout.metrics);
     }
 
     #[test]
@@ -788,26 +914,38 @@ mod tests {
         // travel, so every nudge below is a fraction of one. These used to be
         // banked until they added up to a whole line, which is what made a
         // slow drag step instead of track the pointer.
-        let layout = Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0), TEST_WIDTH);
+        let mut layout =
+            Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0), TEST_WIDTH);
         let thumb = layout.thumb.unwrap();
         let mut state = State::default();
 
         let grab = Point::new(thumb.center_x(), thumb.y);
         state.press(grab, layout, now);
 
-        let first = state
-            .drag_to(Point::new(grab.x, grab.y + 0.4), layout, now)
-            .unwrap();
-        assert!(first > 0.0 && first < 1.0, "{first}");
+        state.drag_to(Point::new(grab.x, grab.y + 0.4), now);
+        let first = state.scroll_to_pointer(layout).unwrap();
+        assert!(first > 0.0 && first < layout.pixels_per_line, "{first}");
 
-        // And they still accumulate against `requested`, so the run below
-        // reports its own movement rather than re-reporting from the grab.
-        let mut moved = first;
+        layout = scrolled_by(layout, first);
+        let after_one = layout.metrics.position;
+        assert!(after_one > 0.0 && after_one < 1.0, "{after_one}");
+
+        // And the fractions add up rather than being dropped, so a run of
+        // them leaves the view further down than the first one did.
         for step in 2..=10u8 {
             let to = Point::new(grab.x, grab.y + 0.4 * f32::from(step));
-            moved += state.drag_to(to, layout, now).unwrap_or(0.0);
+            state.drag_to(to, now);
+
+            if let Some(pixels) = state.scroll_to_pointer(layout) {
+                layout = scrolled_by(layout, pixels);
+            }
         }
-        assert!(moved > first, "{moved} should have grown past {first}");
+
+        let moved = layout.metrics.position;
+        assert!(
+            moved > after_one,
+            "{moved} should have grown past {after_one}"
+        );
     }
 
     #[test]
@@ -826,11 +964,7 @@ mod tests {
 
         for _ in 0..20 {
             now += Duration::from_millis(8);
-            state.drag_to(
-                Point::new(thumb.center_x(), thumb.y + 1.0),
-                layout,
-                now,
-            );
+            state.drag_to(Point::new(thumb.center_x(), thumb.y + 1.0), now);
             assert_eq!(state.opacity(now), 1.0);
         }
 

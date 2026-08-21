@@ -33,7 +33,3 @@ Cursor should reset blink whenever window gains focus. Whenever the window gains
 --
 
 Need support for custom word separator charactors. Similar to VSCode's `editor.wordSeparators`
-
---
-
-Sometimes, when dragging the scrollbar thumb, it doesn't quite go to the limit that it should. It sort of stops before it should, and stops revealing all the lines in the file. For example, this file. If you scroll to the bottom of the file, then drag the thumb up, the thumb stops somewhere before the very top. It shows a line almost near the top of the file, but you can actually scroll up a bit further (using mousewheel, up arrows, etc). Same thing when scrolling down. I think what's happening is the line count is being miscalculated. It's not taking into account the fact that long lines wrap and actually occupy multiple lines.
