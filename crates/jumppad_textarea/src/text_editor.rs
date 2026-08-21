@@ -44,13 +44,16 @@ pub use text::editor::{
 };
 
 /// The scrollbar's geometry for wherever the document currently sits, or
-/// `None` if it has no line height to measure against yet.
+/// `None` if it has no line height to measure against yet. Read through the
+/// scrollbar's own state, which is where the document's height is kept between
+/// events.
 fn scrollbar_layout(
+    state: &scrollbar::State,
     editor: &graphics::text::Editor,
     text_bounds: Rectangle,
     width: f32,
 ) -> Option<scrollbar::Layout> {
-    let metrics = scrollbar::metrics(editor.buffer(), text_bounds.size())?;
+    let metrics = state.metrics(editor.buffer(), text_bounds.size())?;
     Some(scrollbar::Layout::new(text_bounds, metrics, width))
 }
 
@@ -1142,15 +1145,22 @@ where
     /// The scrollbar's geometry against the widget's laid-out bounds.
     fn scrollbar(
         &self,
+        state: &scrollbar::State,
         layout: Layout<'_>,
         width: f32,
     ) -> Option<scrollbar::Layout> {
         let text_bounds = layout.bounds().shrink(self.padding);
-        scrollbar_layout(&self.content.0.borrow().editor, text_bounds, width)
+        scrollbar_layout(
+            state,
+            &self.content.0.borrow().editor,
+            text_bounds,
+            width,
+        )
     }
 
     fn is_over_thumb(
         &self,
+        state: &scrollbar::State,
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         width: f32,
@@ -1158,7 +1168,7 @@ where
         let Some(position) = cursor.position() else {
             return false;
         };
-        self.scrollbar(layout, width)
+        self.scrollbar(state, layout, width)
             .and_then(|scrollbar| scrollbar.thumb)
             .is_some_and(|thumb| thumb.contains(position))
     }
@@ -1209,10 +1219,10 @@ where
     /// where the view actually ended up rather than where the frame before
     /// asked it to go.
     ///
-    /// Asks for another frame whenever it moved the view, since a scroll
-    /// counts in pixels and the thumb counts in lines - in a document that
-    /// wraps, one frame's scroll lands short of the lines it was asked for,
-    /// and a pointer sitting still sends nothing of its own to finish on.
+    /// Asks for another frame whenever it moved the view, since the rows a
+    /// scroll crosses are estimated and one frame's can land short of the row
+    /// it was aimed at - and a pointer sitting still sends nothing of its own
+    /// to finish on.
     fn advance_scrollbar_drag(
         &self,
         state: &mut State<Highlighter>,
@@ -1451,7 +1461,7 @@ where
         let now = Instant::now();
         let text_bounds = layout.bounds().shrink(self.padding);
         let width = state.scrollbar.width(now);
-        let scrollbar = self.scrollbar(layout, width);
+        let scrollbar = self.scrollbar(&state.scrollbar, layout, width);
 
         if is_redraw {
             if let Some(scrollbar) = scrollbar {
@@ -1871,11 +1881,15 @@ where
         let opacity = state.scrollbar.opacity(now);
         if opacity > 0.0 {
             let width = state.scrollbar.width(now);
-            if let Some(thumb) =
-                scrollbar_layout(&internal.editor, text_bounds, width).and_then(
-                    |layout| layout.thumb.map(|thumb| (thumb, layout.radius())),
-                )
-            {
+            if let Some(thumb) = scrollbar_layout(
+                &state.scrollbar,
+                &internal.editor,
+                text_bounds,
+                width,
+            )
+            .and_then(|layout| {
+                layout.thumb.map(|thumb| (thumb, layout.radius()))
+            }) {
                 let (bounds, radius) = thumb;
                 renderer.fill_quad(
                     renderer::Quad {
@@ -1909,7 +1923,7 @@ where
         // An I-beam over the thumb would suggest the text underneath is what
         // the click lands on, and it isn't.
         if state.scrollbar.is_dragging()
-            || self.is_over_thumb(layout, cursor, width)
+            || self.is_over_thumb(&state.scrollbar, layout, cursor, width)
         {
             return mouse::Interaction::Idle;
         }
@@ -3435,10 +3449,12 @@ mod tests {
     /// The scrollbar as the widget builds it, over a text area the size of the
     /// view the buffer was shaped into.
     fn scrollbar_of(
+        state: &scrollbar::State,
         editor: &graphics::text::Editor,
         bounds: Size,
     ) -> scrollbar::Layout {
         scrollbar_layout(
+            state,
             editor,
             Rectangle::new(Point::ORIGIN, bounds),
             THUMB_WIDTH,
@@ -3457,7 +3473,7 @@ mod tests {
     ) -> usize {
         let now = Instant::now();
         let mut state = scrollbar::State::default();
-        let scrollbar = scrollbar_of(editor, bounds);
+        let scrollbar = scrollbar_of(&state, editor, bounds);
         let thumb = scrollbar
             .thumb
             .expect("a document taller than its view has a thumb");
@@ -3467,7 +3483,7 @@ mod tests {
 
         let mut frames = 0;
         while let Some(pixels) =
-            state.scroll_to_pointer(scrollbar_of(editor, bounds))
+            state.scroll_to_pointer(scrollbar_of(&state, editor, bounds))
         {
             editor.scroll_by(pixels);
             shape_wrapped(editor, bounds);
@@ -3488,23 +3504,62 @@ mod tests {
         (editor, bounds)
     }
 
+    /// Short enough that the thumb's length is clear of `MIN_THUMB_HEIGHT`,
+    /// where a change in it would be clamped away rather than shown.
+    const SHORT_DOCUMENT_LINES: usize = 60;
+
+    /// A document that wraps in blocks - a screenful of short lines, then a
+    /// screenful of long ones - so the rows a screen holds per line change as
+    /// the view moves down it.
+    fn mixed_document() -> (graphics::text::Editor, Size) {
+        short_document(|line| {
+            if (line / VIEW_ROWS).is_multiple_of(2) {
+                format!("line {line}")
+            } else {
+                format!("line {line} {}", "word ".repeat(20))
+            }
+        })
+    }
+
+    fn short_document(
+        line: impl Fn(usize) -> String,
+    ) -> (graphics::text::Editor, Size) {
+        let text = (0..SHORT_DOCUMENT_LINES)
+            .map(line)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+        let mut editor = graphics::text::Editor::with_text(&text);
+        shape_wrapped(&mut editor, bounds);
+
+        (editor, bounds)
+    }
+
     #[test]
-    fn the_scrollbar_measures_a_wrapped_view_in_lines_rather_than_rows() {
-        // The thumb counts in lines and the view fills with rows, so a view
-        // full of lines that wrap holds fewer lines than it has rows. Counting
-        // its rows as lines is what had the thumb believe the document ended a
-        // screenful above where it does.
+    fn the_scrollbar_measures_the_document_in_rows_rather_than_lines() {
+        // A document of lines that wrap into three rows each is three times
+        // as tall as its line count says, and both the thumb's length and how
+        // far a drag can carry it are drawn from that height. Counting lines
+        // had the thumb believe the document ended a screenful above where it
+        // does.
         let (flat, bounds) = document();
-        let flat = scrollbar::metrics(flat.buffer(), bounds).unwrap();
+        let flat = scrollbar::State::default()
+            .metrics(flat.buffer(), bounds)
+            .unwrap();
         assert_eq!(flat.viewport, VIEW_ROWS as f32);
+        assert_eq!(flat.content, DOCUMENT_LINES as f32, "no line wraps here");
 
         let (wrapped, bounds) = wrapped_document();
-        let wrapped = scrollbar::metrics(wrapped.buffer(), bounds).unwrap();
+        let wrapped = scrollbar::State::default()
+            .metrics(wrapped.buffer(), bounds)
+            .unwrap();
+        assert_eq!(wrapped.viewport, VIEW_ROWS as f32);
         assert!(
-            wrapped.viewport < flat.viewport / 2.0,
-            "lines wrapping into three rows should hold a third of them, \
-             not {}",
-            wrapped.viewport
+            wrapped.content > flat.content * 2.0,
+            "lines wrapping into three rows should count for about three \
+             times the document, not {}",
+            wrapped.content
         );
     }
 
@@ -3523,7 +3578,8 @@ mod tests {
             "the drag should arrive in a frame or two, not {frames}"
         );
 
-        let scrollbar = scrollbar_of(&editor, bounds);
+        let scrollbar =
+            scrollbar_of(&scrollbar::State::default(), &editor, bounds);
         let thumb = scrollbar.thumb.expect("still scrollable at the end");
         assert!(
             (thumb.y + thumb.height
@@ -3570,6 +3626,116 @@ mod tests {
         assert!(
             top.vertical < scrollbar::SMALLEST_DRAG_SCROLL,
             "the thumb came to rest short of the top: {top:?}"
+        );
+    }
+
+    #[test]
+    fn a_wrapped_document_gets_a_shorter_thumb_than_a_flat_one() {
+        // The same number of lines, but a third of them three rows tall, is a
+        // taller document - and shows less of itself at once, which is what
+        // the thumb's length is for.
+        let state = scrollbar::State::default();
+
+        let (flat, bounds) = short_document(|line| format!("line {line}"));
+        let flat = scrollbar_of(&state, &flat, bounds)
+            .thumb
+            .expect("taller than its view");
+
+        let (mixed, bounds) = mixed_document();
+        let mixed = scrollbar_of(&scrollbar::State::default(), &mixed, bounds)
+            .thumb
+            .expect("taller than its view");
+
+        assert!(
+            mixed.height < flat.height,
+            "wrapped lines should count for the rows they take: \
+             {} against {}",
+            mixed.height,
+            flat.height
+        );
+    }
+
+    #[test]
+    fn dragging_to_the_bottom_of_a_mixed_document_lands_on_the_end() {
+        // Blocks of wrapped and unwrapped lines are the hard case for a
+        // measure of the document's height, and the case a measure taken from
+        // the view could never settle in at all: the rows a screen holds
+        // change as the drag crosses a block, so the row it was aiming for
+        // moved out from under it and the drag chased it up and down the
+        // document instead of arriving.
+        let (mut editor, bounds) = mixed_document();
+
+        drag_thumb_to(&mut editor, bounds, 10_000.0);
+
+        let scrollbar =
+            scrollbar_of(&scrollbar::State::default(), &editor, bounds);
+        let thumb = scrollbar.thumb.expect("taller than its view");
+        assert!(
+            (thumb.y + thumb.height
+                - (scrollbar.track.y + scrollbar.track.height))
+                .abs()
+                < 1.0,
+            "the thumb should come to rest against the end of its track"
+        );
+
+        let dragged_to = editor.buffer().scroll();
+        editor.scroll_by(LINE_HEIGHT * 10.0);
+        shape_wrapped(&mut editor, bounds);
+        assert_eq!(
+            editor.buffer().scroll().line,
+            dragged_to.line,
+            "the wheel could still reach document the thumb had run out of"
+        );
+    }
+
+    #[test]
+    fn the_thumbs_length_holds_still_while_it_is_dragged() {
+        // What the thumb's length shows is how tall the document is, which
+        // does not change as you drag - so neither can the length. Measuring
+        // it from the lines on screen swung it between tall and short every
+        // time the drag crossed from short lines into a paragraph.
+        let (mut editor, bounds) = mixed_document();
+        let now = Instant::now();
+        let mut state = scrollbar::State::default();
+
+        let scrollbar = scrollbar_of(&state, &editor, bounds);
+        let thumb = scrollbar.thumb.expect("taller than its view");
+        assert!(state.press(thumb.center(), scrollbar, now));
+
+        for step in 1..=20u8 {
+            let down = scrollbar.track.height * f32::from(step) / 20.0;
+            state.drag_to(
+                Point::new(thumb.center_x(), scrollbar.track.y + down),
+                now,
+            );
+
+            let mut frames = 0;
+            while let Some(pixels) =
+                state.scroll_to_pointer(scrollbar_of(&state, &editor, bounds))
+            {
+                editor.scroll_by(pixels);
+                shape_wrapped(&mut editor, bounds);
+
+                frames += 1;
+                assert!(frames < 100, "the drag never arrived");
+            }
+
+            let dragged = scrollbar_of(&state, &editor, bounds)
+                .thumb
+                .expect("taller than its view");
+            assert!(
+                (dragged.height - thumb.height).abs() < 0.5,
+                "the thumb's length moved from {} to {} at step {step}",
+                thumb.height,
+                dragged.height
+            );
+        }
+
+        // And the drag really did cross the document, rather than sitting
+        // where the wrapping never changed under it.
+        assert!(
+            editor.buffer().scroll().line > SHORT_DOCUMENT_LINES / 2,
+            "the drag should have reached the far end of the document"
         );
     }
 }

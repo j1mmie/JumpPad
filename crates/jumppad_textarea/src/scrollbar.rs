@@ -4,8 +4,12 @@
 //!
 //! Everything here is pure - geometry in, geometry out, with `now` passed in
 //! rather than read from the clock - so it can be tested without a window.
+//! The one exception is [`State::metrics`], which remembers how tall the
+//! document is rather than measuring it again on every event.
 
-use iced::advanced::graphics::text::cosmic_text::Buffer;
+use std::cell::Cell;
+
+use iced::advanced::graphics::text::cosmic_text::{self, Buffer};
 use iced_core::time::{Duration, Instant};
 use iced_core::{Point, Rectangle, Size};
 
@@ -31,40 +35,49 @@ const MAX_THUMB_FRACTION: f32 = 0.6;
 /// A drag correction smaller than this is not worth a scroll: half a pixel
 /// moves nothing on screen, and the next frame measures the gap again from
 /// wherever the view actually is, so dropping it neither drifts nor compounds.
-/// It is also how close to the ends of the document a drag comes to rest.
 pub const SMALLEST_DRAG_SCROLL: f32 = 0.5;
+/// How far the characters that fit on a row have to move before the document
+/// is counted again. Wide enough that the mean character width over a screen
+/// of a proportional face - which wanders with the text under it - doesn't
+/// call for a fresh count every frame, and narrow enough that a change of
+/// typeface or window width does. Five percent is a twentieth of a row on a
+/// line that wraps once: less than the thumb's length can show.
+const ROW_CAPACITY_TOLERANCE: f32 = 0.05;
 
 const FADE_IN: Duration = Duration::from_millis(90);
 /// How long the thumb stays at full opacity after the last hover or scroll.
 const HOLD: Duration = Duration::from_millis(900);
 const FADE_OUT: Duration = Duration::from_millis(300);
 
-/// Where the document is scrolled to, in lines.
+/// Where the document is scrolled to, in rows - the wrapped lines it draws
+/// as, three of them for a line that wraps into three.
 ///
-/// The unit is *logical* lines rather than wrapped visual rows, and a line
-/// that wraps is one line however many rows it takes: its rows share it
-/// between them, so scrolling past one row of a line that wraps into three
-/// moves `position` by a third. All three measures below are in that same
-/// unit, which is what lets the thumb sit flush against the bottom of its
-/// track exactly when the document's last row is on screen.
+/// Rows rather than logical lines because rows are what the eye compares: a
+/// screen of paragraphs shows less document than a screen of short lines, and
+/// a thumb measured in logical lines cannot say so. All three below are in the
+/// same unit, so the thumb's length is `viewport / content` and its travel
+/// runs from nothing to `max_position`.
 ///
-/// Counting rows instead would mean summing `BufferLine::layout_opt()` across
-/// the document on every frame, and cosmic-text shapes lazily - an off-screen
-/// line that wraps to three rows reports one until it scrolls into view, so
-/// the total (and the thumb's height with it) would twitch as you scroll.
-/// Lines are exact everywhere and cost nothing to count.
+/// Only the rows on screen are laid out (cosmic-text shapes lazily, and
+/// shaping the whole document costs the memory this editor exists not to
+/// spend), so the rest are estimated rather than counted: see
+/// [`State::metrics`]. The estimate being a row or two out matters far less
+/// than it being the same answer wherever the document is scrolled to. A
+/// measure taken from the lines on screen is exact and useless: it changes as
+/// the view crosses a paragraph, which grew and shrank the thumb as it was
+/// dragged, and moved the row a drag was aiming for out from under it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Metrics {
-    /// Lines from the top of the document to the top of the viewport.
+    /// Rows from the top of the document to the top of the viewport.
     pub position: f32,
-    /// Lines in the document.
+    /// Rows in the document.
     pub content: f32,
-    /// Lines of the document the viewport shows.
+    /// Rows the viewport shows.
     pub viewport: f32,
 }
 
 impl Metrics {
-    /// How far the document can scroll, in lines. Zero when it all fits.
+    /// How far the document can scroll, in rows. Zero when it all fits.
     pub fn max_position(&self) -> f32 {
         (self.content - self.viewport).max(0.0)
     }
@@ -103,6 +116,44 @@ pub struct State {
     /// `None` means settled at `THUMB_WIDTH_IDLE` - no timer needed until
     /// something happens, same spirit as the fields above.
     width_ramp: Option<WidthRamp>,
+    /// How tall the document is, kept rather than counted again on every
+    /// event - see `State::metrics`.
+    counted: Cell<Option<Counted>>,
+}
+
+/// What has been counted about the document, and what it was counted against.
+///
+/// Counting walks lines, so the answer is kept until what it depends on moves:
+/// the number of lines, or how many characters fit on a row - which carries
+/// both the width the text wraps at and the face it is drawn in. An edit that
+/// leaves the line count alone lands a row or two out of true, which is not
+/// worth walking a document for.
+#[derive(Debug, Clone, Copy)]
+struct Counted {
+    lines: usize,
+    row_capacity: f32,
+    /// Rows in the whole document.
+    rows: f32,
+    /// Rows above `above`, and the line they were counted up to. The next walk
+    /// starts from here rather than from the top of the document, so following
+    /// a view down one costs the lines it passes rather than the lines behind
+    /// it.
+    rows_above: f32,
+    above: usize,
+}
+
+impl Counted {
+    fn still_stands_for(
+        &self,
+        lines: usize,
+        row_capacity: Option<f32>,
+    ) -> bool {
+        self.lines == lines
+            && row_capacity.is_none_or(|capacity| {
+                (self.row_capacity - capacity).abs()
+                    <= capacity * ROW_CAPACITY_TOLERANCE
+            })
+    }
 }
 
 /// A width transition in progress: interpolates linearly from `from` to `to`
@@ -123,6 +174,10 @@ struct Drag {
     /// frame at a time rather than on the pointer's own events - see
     /// [`State::scroll_to_pointer`].
     pointer: Point,
+    /// Where the view was when this drag last asked it to move. Finding it
+    /// there again means the ask went nowhere - the document is against one of
+    /// its ends - and there is no point asking again until the pointer moves.
+    scrolled_from: Option<f32>,
 }
 
 impl State {
@@ -281,6 +336,7 @@ impl State {
         self.drag = Some(Drag {
             grab_offset: position.y - thumb.y,
             pointer: position,
+            scrolled_from: None,
         });
         self.sync_width(now);
         true
@@ -299,23 +355,27 @@ impl State {
     pub fn drag_to(&mut self, position: Point, now: Instant) {
         // Only the hold clock: the ramp is already running from the press.
         self.active_at = Some(now);
-        if let Some(drag) = self.drag.as_mut() {
+        if let Some(drag) =
+            self.drag.as_mut().filter(|drag| drag.pointer != position)
+        {
             drag.pointer = position;
+            drag.scrolled_from = None;
         }
     }
 
     /// The pixels that would put the view where the pointer is holding the
-    /// thumb - the gap between the two, priced at `Layout::pixels_per_line`.
-    /// `None` when nothing is being dragged, or when the view is already close
-    /// enough that scrolling would not move it visibly.
+    /// thumb - the rows between the two, at a row's own height. `None` when
+    /// nothing is being dragged, when the view is already close enough that
+    /// scrolling would not move it visibly, or when the document has nothing
+    /// further to give in that direction.
     ///
     /// Fractional, so the thumb tracks the pointer pixel for pixel instead of
-    /// stepping a line at a time, and measured against where the view actually
-    /// is rather than where the last answer asked it to go: a scroll counts in
-    /// pixels and the thumb counts in lines, so in a document that wraps a
-    /// scroll lands short of the lines it was asked for, and the frame after
-    /// closes what is left. Landing long is the same correction the other way
-    /// around.
+    /// stepping a row at a time, and measured against where the view actually
+    /// is rather than where the last answer asked it to go: the rows the view
+    /// crosses are estimated (see [`Self::metrics`]), so a scroll can land a
+    /// little short of, or past, the row it was aimed at, and the frame after
+    /// closes what is left. The row it is aiming *for* does not move while it
+    /// does that, which is what lets the two meet.
     ///
     /// Answered once a frame rather than once per pointer move, since several
     /// `CursorMoved` events can land in the same input batch, all of them
@@ -323,9 +383,14 @@ impl State {
     /// them would have every call in the batch correct the same stale position
     /// and stack them into an overshoot - visible as the thumb briefly jumping
     /// backwards once a later frame corrects it.
-    pub fn scroll_to_pointer(&self, layout: Layout) -> Option<f32> {
-        let drag = self.drag?;
+    pub fn scroll_to_pointer(&mut self, layout: Layout) -> Option<f32> {
         let thumb = layout.thumb?;
+        let metrics = layout.metrics;
+        let drag = self.drag.as_mut()?;
+
+        if drag.scrolled_from == Some(metrics.position) {
+            return None;
+        }
 
         // The thumb's travel is shorter than the track by its own height.
         let travel = layout.track.height - thumb.height;
@@ -336,11 +401,30 @@ impl State {
             0.0
         };
 
-        let lines =
-            progress * layout.metrics.max_position() - layout.metrics.position;
-        let pixels = lines * layout.pixels_per_line;
+        // A thumb held against the end of its track is asking for the end of
+        // the document rather than for a row in it, so it aims past the last
+        // row the estimate knows about and lets the document stop it where it
+        // really ends - an estimate a row or two short would otherwise leave
+        // the last of the document out of a drag's reach. Never backwards,
+        // though: an estimate a row or two long would pull the view back up
+        // off the end it had just reached. The top needs none of this, being
+        // the one row that is known exactly.
+        let end = metrics.max_position();
+        let target = if progress >= 1.0 {
+            (end + metrics.viewport).max(metrics.position)
+        } else if progress <= 0.0 {
+            0.0
+        } else {
+            progress * end
+        };
 
-        (pixels.abs() >= SMALLEST_DRAG_SCROLL).then_some(pixels)
+        let pixels = (target - metrics.position) * layout.pixels_per_row;
+        if pixels.abs() < SMALLEST_DRAG_SCROLL {
+            return None;
+        }
+
+        drag.scrolled_from = Some(metrics.position);
+        Some(pixels)
     }
 }
 
@@ -351,17 +435,9 @@ pub struct Layout {
     /// `None` when the document fits on screen and there's nothing to show.
     pub thumb: Option<Rectangle>,
     metrics: Metrics,
-    /// How far the view moves, in pixels, for one line of `Metrics::position`:
-    /// a whole line's worth of rows wherever the lines on screen wrap.
-    ///
-    /// The lines a drag has yet to cross are not laid out and so cannot be
-    /// measured; the ones on screen stand in for them, and a drag that lands
-    /// short or long of what they suggested is corrected on the next frame.
-    ///
-    /// A viewport showing less than a whole line counts as one, since a line
-    /// taller than the whole view would otherwise price every line of a drag
-    /// at a screenful and send it clear across the document.
-    pixels_per_line: f32,
+    /// A row's own height, which is what one row of `Metrics::position` costs
+    /// the view in pixels - the unit a scroll actually moves in.
+    pixels_per_row: f32,
 }
 
 impl Layout {
@@ -394,7 +470,7 @@ impl Layout {
             track,
             thumb,
             metrics,
-            pixels_per_line: bounds.height / metrics.viewport.max(1.0),
+            pixels_per_row: bounds.height / metrics.viewport,
         }
     }
 
@@ -417,68 +493,162 @@ impl Layout {
         self.track.width / 2.0
     }
 
-    /// How far down the document the viewport starts, in lines.
+    /// How far down the document the viewport starts, in rows.
     pub fn position(&self) -> f32 {
         self.metrics.position
     }
 }
 
-/// Reads the scroll position out of the editor's cosmic-text buffer, which is
-/// the only place it exists - see this crate's `text_editor` module header.
-/// `None` before the buffer has been laid out, when there is nothing to
-/// measure and no scrollbar to draw.
-pub fn metrics(buffer: &Buffer, bounds: Size) -> Option<Metrics> {
-    let line_height = buffer.metrics().line_height;
-    if line_height <= 0.0 {
-        return None;
-    }
-    let viewport = visible_lines(buffer, bounds.height);
-    if viewport <= 0.0 {
-        return None;
-    }
+impl State {
+    /// Reads the scroll position out of the editor's cosmic-text buffer, which
+    /// is the only place it exists - see this crate's `text_editor` module
+    /// header - and measures the document around it. `None` before the buffer
+    /// has been laid out, when there is nothing to measure and no scrollbar to
+    /// draw.
+    ///
+    /// The document's rows are estimated rather than counted: how wide each
+    /// line would draw, against the width the text wraps at. Only the lines on
+    /// screen are laid out, so those are the only ones that *could* be
+    /// counted, and an answer that leaned on them would change every time the
+    /// wrapping under the view did. The estimate is exact for every line that
+    /// fits, which is all of most documents, and close for the ones that
+    /// wrap - and, more to the point, it is the same answer wherever the
+    /// document is scrolled to. Byte length stands in for character count: the
+    /// same number for anything ASCII, an over-count for scripts that don't
+    /// fit in one byte.
+    pub fn metrics(&self, buffer: &Buffer, bounds: Size) -> Option<Metrics> {
+        let line_height = buffer.metrics().line_height;
+        if line_height <= 0.0 || bounds.height <= 0.0 {
+            return None;
+        }
+        // Nothing laid out yet, so nothing to measure against.
+        buffer.layout_runs().next()?;
 
-    let scroll = buffer.scroll();
-    Some(Metrics {
-        // `scroll.vertical` is a pixel offset into the rows of the line at
-        // `scroll.line`, so dividing by that line's own height gives how much
-        // of it has gone past the top edge.
-        position: scroll.line as f32
-            + scroll.vertical
-                / (rows_in_line(buffer, scroll.line) * line_height),
-        content: buffer.lines.len() as f32,
-        viewport,
-    })
-}
+        let counted = self.counted(buffer, bounds.width);
+        let scroll = buffer.scroll();
 
-/// How many rows a line wraps into, counting a line cosmic-text has not shaped
-/// as one - which is every line off screen, and exact for one that never wraps.
-fn rows_in_line(buffer: &Buffer, line: usize) -> f32 {
-    buffer
-        .lines
-        .get(line)
-        .and_then(|line| line.layout_opt())
-        .map_or(1, Vec::len)
-        .max(1) as f32
-}
-
-/// How much of the document the viewport shows, in lines: every row on screen
-/// is worth its share of the line it wraps from, and a row the top or bottom
-/// edge cuts through counts only for the part of it that shows.
-///
-/// Only the rows on screen are measured, so this costs a viewport rather than
-/// a document, and every line it touches is one cosmic-text has already
-/// shaped.
-fn visible_lines(buffer: &Buffer, height: f32) -> f32 {
-    buffer
-        .layout_runs()
-        .map(|row| {
-            let shown = (row.line_top + row.line_height).min(height)
-                - row.line_top.max(0.0);
-
-            (shown / row.line_height).clamp(0.0, 1.0)
-                / rows_in_line(buffer, row.line_i)
+        Some(Metrics {
+            position: self.rows_above(buffer, counted, scroll.line)
+                + rows_into_line(buffer, scroll, line_height, counted),
+            content: counted.rows,
+            viewport: bounds.height / line_height,
         })
-        .sum()
+    }
+
+    /// The document's rows, counted again only when the document or the
+    /// characters that fit on a row have moved.
+    fn counted(&self, buffer: &Buffer, wrap_width: f32) -> Counted {
+        let lines = buffer.lines.len();
+        let capacity = row_capacity(buffer, wrap_width);
+
+        if let Some(kept) = self
+            .counted
+            .get()
+            .filter(|kept| kept.still_stands_for(lines, capacity))
+        {
+            return kept;
+        }
+
+        // Nothing on screen has a width to measure against - a document of
+        // blank lines, where every line is one row whatever the capacity is.
+        let row_capacity = capacity.unwrap_or(f32::MAX);
+        let counted = Counted {
+            lines,
+            row_capacity,
+            rows: buffer
+                .lines
+                .iter()
+                .map(|line| rows_in(line.text(), row_capacity))
+                .sum::<f32>()
+                .max(1.0),
+            rows_above: 0.0,
+            above: 0,
+        };
+
+        self.counted.set(Some(counted));
+        counted
+    }
+
+    /// The rows above `line`, walked from wherever the last walk ended rather
+    /// than from the top of the document: a view follows the lines it passes,
+    /// so the anchor is nearly always the line next to the one being asked
+    /// for.
+    fn rows_above(
+        &self,
+        buffer: &Buffer,
+        counted: Counted,
+        line: usize,
+    ) -> f32 {
+        let mut counted = counted;
+        let rows = |line: usize| {
+            buffer
+                .lines
+                .get(line)
+                .map_or(1.0, |line| rows_in(line.text(), counted.row_capacity))
+        };
+
+        while counted.above < line {
+            counted.rows_above += rows(counted.above);
+            counted.above += 1;
+        }
+        while counted.above > line {
+            counted.above -= 1;
+            counted.rows_above -= rows(counted.above);
+        }
+        counted.rows_above = counted.rows_above.max(0.0);
+
+        self.counted.set(Some(counted));
+        counted.rows_above
+    }
+}
+
+/// How far into the line at the top of the view the view starts, in rows.
+///
+/// `scroll.vertical` is a pixel offset into that line's *laid out* rows, which
+/// are the real ones; scaling it by the line's estimated rows keeps the answer
+/// in the same rows everything else here counts in. Straight rows would step
+/// past what the line above the next one contributed, and the thumb would
+/// twitch backwards as the view crossed a line the estimate had wrong.
+fn rows_into_line(
+    buffer: &Buffer,
+    scroll: cosmic_text::Scroll,
+    line_height: f32,
+    counted: Counted,
+) -> f32 {
+    let Some(line) = buffer.lines.get(scroll.line) else {
+        return 0.0;
+    };
+    let laid_out = line.layout_opt().map_or(1, Vec::len).max(1) as f32;
+
+    rows_in(line.text(), counted.row_capacity) * scroll.vertical
+        / (laid_out * line_height)
+}
+
+/// How many rows a line of this text takes at `row_capacity` characters to a
+/// row. Never less than one: an empty line is still a row.
+fn rows_in(text: &str, row_capacity: f32) -> f32 {
+    (text.len() as f32 / row_capacity).ceil().max(1.0)
+}
+
+/// How many characters fit on a row: the width the text wraps at, over how
+/// wide a character is - averaged over the glyphs on screen, which is exact
+/// for a monospace face, where every glyph is the same width, and a fair
+/// average for a proportional one. `None` when there is nothing on screen to
+/// measure.
+fn row_capacity(buffer: &Buffer, wrap_width: f32) -> Option<f32> {
+    if buffer.wrap() == cosmic_text::Wrap::None {
+        // Nothing wraps, so a line is a row however long it is.
+        return Some(f32::MAX);
+    }
+
+    let (width, glyphs) = buffer
+        .layout_runs()
+        .flat_map(|row| row.glyphs)
+        .fold((0.0, 0usize), |(width, glyphs), glyph| {
+            (width + glyph.w, glyphs + 1)
+        });
+
+    (width > 0.0).then(|| (wrap_width * glyphs as f32 / width).max(1.0))
 }
 
 fn ratio(elapsed: Duration, total: Duration) -> f32 {
@@ -520,12 +690,12 @@ mod tests {
         Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH)
     }
 
-    /// The same view once it has moved by `pixels`, the way a document that
-    /// doesn't wrap moves: there a line really is worth what the layout
-    /// priced it at, so the scroll lands exactly where it was aimed.
+    /// The same view once it has moved by `pixels`, the way a document whose
+    /// rows were estimated exactly moves: every pixel lands on the row it was
+    /// aimed at.
     fn scrolled_by(layout: Layout, pixels: f32) -> Layout {
         let position = (layout.metrics.position
-            + pixels / layout.pixels_per_line)
+            + pixels / layout.pixels_per_row)
             .clamp(0.0, layout.metrics.max_position());
 
         Layout::new(
@@ -831,88 +1001,85 @@ mod tests {
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
         state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
 
+        // A thumb against the end of its track asks for the end of the
+        // document, which is past the last row the estimate knows about.
         assert_eq!(
             state.scroll_to_pointer(layout),
-            Some(layout.metrics.max_position() * layout.pixels_per_line)
+            Some(
+                (layout.metrics.max_position() + layout.metrics.viewport)
+                    * layout.pixels_per_row
+            )
         );
     }
 
     #[test]
-    fn a_view_that_wraps_prices_a_line_at_the_rows_it_takes() {
-        // The same view over the same document, once holding twenty lines and
-        // once holding a third of that because the lines on screen wrap into
-        // three rows each. Scrolling past one of those lines is three rows of
-        // travel, and a drag that priced it at one would land a third of the
-        // way - which is a thumb that stops short of the end of the document.
-        let flat = scrollable();
-        let wrapped =
-            Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0 / 3.0), TEST_WIDTH);
-
-        assert_eq!(flat.pixels_per_line, BOUNDS.height / 20.0);
-        assert_eq!(wrapped.pixels_per_line, flat.pixels_per_line * 3.0);
-    }
-
-    #[test]
-    fn a_correction_is_measured_against_the_view_not_added_to_the_last_one() {
-        // Several `CursorMoved` events can land in the same input batch, all
-        // of them before any of their scrolls has reached the document - so
-        // the same question gets asked twice of a view that hasn't moved yet
-        // (`layout` is identical across both calls here). The answer has to be
-        // the same correction rather than a second one on top of the first,
-        // which would overshoot and leave the following frame to visibly
-        // correct it back (the thumb briefly jumping backwards mid-drag).
+    fn a_drag_stops_asking_once_the_document_will_not_move() {
+        // The rows past the view are estimated, so a drag can be asking for a
+        // row the document doesn't have. A scroll that moved nothing says so,
+        // and the drag waits for the pointer rather than asking again on every
+        // frame for as long as the button is held.
         let now = Instant::now();
         let layout = scrollable();
         let thumb = layout.thumb.unwrap();
         let mut state = State::default();
 
-        let grab = Point::new(thumb.center_x(), thumb.y);
-        state.press(grab, layout, now);
-        state.drag_to(Point::new(grab.x, grab.y + 40.0), now);
+        state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
+        state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
+        assert!(state.scroll_to_pointer(layout).is_some());
 
-        let pixels = state.scroll_to_pointer(layout).unwrap();
-        assert!(pixels > 0.0);
-        assert_eq!(state.scroll_to_pointer(layout), Some(pixels));
+        // The same view back again: the scroll moved nothing.
+        assert_eq!(state.scroll_to_pointer(layout), None);
 
-        // And once the view has caught up, there is nothing left to ask for.
-        assert_eq!(state.scroll_to_pointer(scrolled_by(layout, pixels)), None);
+        // A pointer that moves is a fresh question.
+        state.drag_to(Point::new(thumb.center_x(), 9_000.0), now);
+        assert!(state.scroll_to_pointer(layout).is_some());
     }
 
     #[test]
     fn a_scroll_that_lands_short_is_finished_off_by_the_frames_after_it() {
-        // The lines the drag is about to cross wrap three times harder than
-        // the ones it can see, so its scroll covers a third of the lines it
-        // asked for. What is left over is the next frame's correction, and
-        // the drag arrives rather than stopping short - which is what left a
-        // thumb dragged to the end of a wrapped document short of it.
+        // The rows the drag is about to cross were estimated at a third of
+        // what they turn out to be, so its scroll covers a third of the
+        // distance it asked for. What is left over is the next frame's
+        // correction, and the drag arrives rather than stopping short.
         let now = Instant::now();
-        let mut layout = scrollable();
+        let mut layout =
+            Layout::new(BOUNDS, metrics(0.0, 1000.0, 20.0), TEST_WIDTH);
         let thumb = layout.thumb.unwrap();
         let mut state = State::default();
-        let end = layout.metrics.max_position();
 
+        // Half way down the track, so the drag has somewhere to arrive at
+        // rather than running into the end of the document.
+        let travel = layout.track.height - thumb.height;
         state.press(Point::new(thumb.center_x(), thumb.y), layout, now);
-        state.drag_to(Point::new(thumb.center_x(), 10_000.0), now);
+        state.drag_to(
+            Point::new(thumb.center_x(), layout.track.y + travel / 2.0),
+            now,
+        );
+        let target = layout.metrics.max_position() / 2.0;
 
         let mut frames = 0;
         while let Some(pixels) = state.scroll_to_pointer(layout) {
             layout = scrolled_by(layout, pixels / 3.0);
             frames += 1;
 
-            assert!(layout.metrics.position <= end, "{:?}", layout.metrics);
+            assert!(layout.metrics.position <= target, "{:?}", layout.metrics);
             assert!(frames < 100, "the drag never arrived");
         }
 
-        assert!(frames > 1, "one frame is all a flat document would need");
-        assert!(end - layout.metrics.position < 0.1, "{:?}", layout.metrics);
+        assert!(frames > 1, "one frame is all an exact estimate would need");
+        assert!(
+            target - layout.metrics.position < 0.1,
+            "{:?} short of {target}",
+            layout.metrics
+        );
     }
 
     #[test]
-    fn a_sub_line_drag_moves_the_view_rather_than_waiting_for_a_whole_line() {
+    fn a_sub_row_drag_moves_the_view_rather_than_waiting_for_a_whole_row() {
         let now = Instant::now();
-        // 100 lines over a ~192px track: each line is well under a pixel of
+        // 100 rows over a ~192px track: each row is well under a pixel of
         // travel, so every nudge below is a fraction of one. These used to be
-        // banked until they added up to a whole line, which is what made a
+        // banked until they added up to a whole row, which is what made a
         // slow drag step instead of track the pointer.
         let mut layout =
             Layout::new(BOUNDS, metrics(0.0, 100.0, 20.0), TEST_WIDTH);
@@ -924,7 +1091,7 @@ mod tests {
 
         state.drag_to(Point::new(grab.x, grab.y + 0.4), now);
         let first = state.scroll_to_pointer(layout).unwrap();
-        assert!(first > 0.0 && first < layout.pixels_per_line, "{first}");
+        assert!(first > 0.0 && first < layout.pixels_per_row, "{first}");
 
         layout = scrolled_by(layout, first);
         let after_one = layout.metrics.position;

@@ -249,50 +249,60 @@ scroll. Geometry and fade math are pure functions in `scrollbar.rs`, taking
 `now: Instant` so they test without a window (same convention as
 `history.rs`).
 
-**Position is measured in logical lines, not wrapped visual rows.** That is
-deliberate, and the obvious "fix" is a regression: counting rows means
-summing `BufferLine::layout_opt()` over the *document* every frame, and
-cosmic-text shapes lazily, so an off-screen line that wraps to three rows
-reports one until it scrolls into view. The total - and the thumb's height
-with it - would twitch as you scroll. Logical lines cost O(1), are exact for
-anything that doesn't wrap, and are stable everywhere.
+**Everything is measured in wrapped rows, and the document's are estimated.**
+All three of `Metrics` count rows, so the thumb's length is
+`viewport / content` and its travel is `max_position`. Rows are what the eye
+compares - a screen of paragraphs shows less document than a screen of short
+lines - and a scroll moves in them, so a drag needs no unit conversion at all.
 
-**A line that wraps is still one line, and all three of `Metrics` say so.**
-`position` counts a line's rows as fractions of it, and `viewport` is how
-much document is on screen in the same unit - the rows on screen, each worth
-its share of the line it wraps from. That is a *viewport's* worth of
-`layout_opt()` per frame, over lines cosmic-text has already shaped, not the
-document scan above. Mixing the two units is what the bug behind all this
-was: `viewport` counted rows while `content` counted lines, so
-`max_position` stopped a screenful short of the end of a wrapped document
-and the thumb ran out of track with lines still below it. In this unit
-`position + viewport == content` exactly when the last row is on screen, so
-the thumb reaches the end of its track precisely when the document does.
+Counting them is the problem. cosmic-text lays out only what is on screen, so
+summing `BufferLine::layout_opt()` over the document reports one row for every
+off-screen line that wraps to three, and the total grows as you scroll into
+them; laying the rest out costs the memory this editor exists not to spend. So
+`State::metrics` estimates instead: how wide each line would draw (its byte
+length against the characters that fit on a row, measured from the glyphs on
+screen), which is *exact* for every line that fits - all of most documents -
+and close for the ones that wrap.
+
+**Being the same answer everywhere matters more than being exact.** Two bugs
+came out of measuring the document from the lines on screen instead:
+
+- the thumb grew and shrank as a drag crossed a paragraph, because the rows a
+  screen holds per line changed under it;
+- worse, a drag in a document with blocks of wrapped and unwrapped lines never
+  arrived. The row it was aiming for is a fraction of `max_position`, and
+  `max_position` moved every time the view did, so past a certain pointer
+  position there is no row that answers to it: the view lands in a paragraph,
+  which moves the target back out of it, forever.
+
+An estimate a row or two out costs a thumb a pixel of length. A measure that
+moves with the view costs the drag its fixed point.
 
 **A thumb drag is a correction per frame, not a delta per pointer move.**
 `State::drag_to` only records where the pointer has the thumb;
 `scroll_to_pointer`, asked once per frame from the redraw event, answers the
-pixels between where the view *is* and where the pointer wants it. Two
-reasons it has to work that way:
+pixels between where the view *is* and the row the pointer is asking for. It
+has to be a correction rather than a delta because the rows it crosses were
+estimated - a scroll can land a little short or long, and the frame after
+closes the difference - and it has to be once a frame because several
+`CursorMoved` events land in one input batch, all of them before any of their
+scrolls has reached the document, so answering each would stack the same
+correction into an overshoot.
 
-- A scroll counts in pixels (rows) and the thumb counts in lines. The lines
-  a drag is about to cross are not laid out and cannot be measured, so
-  `Layout::pixels_per_line` prices them at what the lines on screen cost -
-  right where the wrapping is even, near enough elsewhere, and either way
-  the next frame measures the gap again from wherever the view actually
-  landed. Feeding a running total of what was *asked for* instead is the
-  other half of the same bug: the total drifts from the document on every
-  wrapped line and never comes back, so the thumb lags the pointer and stops
-  short of both ends.
-- Several `CursorMoved` events land in one input batch, all of them before
-  any of their scrolls has reached the document. Answering each would have
-  every call in the batch correct the same stale position and stack them
-  into an overshoot.
+Two rules keep that loop honest at the ends of the document, where an estimate
+that is a row out is the difference between arriving and not:
 
-`advance_scrollbar_drag` asks for another frame whenever it moved the view,
-so a correction that landed short still finishes with the pointer sitting
-still; a gap under half a pixel ends it, and the ends of the document end it
-too, because cosmic-text clamps there and the gap goes to zero.
+- A thumb against the end of its track asks for the end of the *document*,
+  aiming a screenful past the last row the estimate knows about and letting
+  cosmic-text clamp it where the document really ends - but never backwards,
+  or an estimate that ran long would pull the view back off the end it had
+  just reached. The top is exempt: row zero is known exactly.
+- A scroll that moved nothing means the document is against an end, and the
+  drag stops asking until the pointer moves again. Without it the over-aim
+  above would re-publish on every frame for as long as the button was held.
+
+`advance_scrollbar_drag` asks for another frame whenever it moved the view, so
+a correction that landed short still finishes with the pointer sitting still.
 
 **Gotcha - `State::touch` reads the current opacity, so it has to run before
 whatever flag is changing.** `hovered` and a live `drag` both freeze the
