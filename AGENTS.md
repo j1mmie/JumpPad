@@ -1999,6 +1999,68 @@ unhighlighted, consistent with "highlighters are optional" in
 `README.md`. Don't mistake that startup diagnostic for a real error;
 only chase it if highlighting is actually expected to be working.
 
+## The icon font (`jumppad_icons`, `icon_font_builder`)
+
+Icons are glyphs in a font JumpPad builds itself, drawn as text like any
+other label. That is the cheap way to do it here: iced already rasterizes
+and caches a glyph for every label on screen, so an icon costs one more
+entry in a cache the app pays for anyway. The alternatives both cost
+something the app has deliberately given up - drawing the shapes as geometry
+wants the multisampling `run` turns off, and rasterizing SVG at runtime
+wants `resvg` in the binary.
+
+`assets/icons/*.svg` are [Lucide] drawings, vendored as they ship.
+`jumppad_icons` says which of them are in the font and what codepoint each
+one answers to. `cargo build_fonts` runs `icon_font_builder` over that list
+and writes `assets/fonts/jumppad-icons.ttf`, which is committed: the build
+is deterministic, so rebuilding without changing an icon leaves the tree
+clean, and nobody needs the tool to compile the app.
+
+Adding an icon is a file in `assets/icons/`, a row in `jumppad_icons::ICONS`
+with the next free codepoint, and `cargo build_fonts`.
+
+### The stroke width is baked in, and has to be
+
+Lucide draws with strokes. OpenType has no stroke - a glyph is filled
+contours and nothing else - so `icon_font_builder` expands each centreline
+into the outline a round 3-unit pen would leave, and that weight is fixed
+from then on. No draw call can vary it. Wanting a second weight means a
+second glyph, not an argument.
+
+What does scale is the size: the weight is a proportion of the icon like
+everything else in it, so a 3-unit stroke on Lucide's 24-unit grid draws 2px
+at `size(16)`.
+
+The other thing the builder settles is where an icon sits beside text. The
+24-unit box maps onto a whole em, so `size(16)` draws what a browser would
+draw at `width="16"`, and the box straddles the middle of a capital letter
+rather than resting on the baseline.
+
+### Codepoints are ours
+
+They start at U+E000 in the Private Use Area and are assigned in
+`jumppad_icons`, not copied from Lucide's own font. Lucide reassigns those
+between releases; these never move, so re-vendoring a drawing cannot quietly
+change what the UI draws.
+
+### Drawing one
+
+Register the font once at startup and select it by family:
+
+```rust
+iced::application(..)
+    .font(include_bytes!("../../../assets/fonts/jumppad-icons.ttf").as_slice())
+```
+
+```rust
+text(jumppad_icons::CLOSE).font(Font::with_name(jumppad_icons::FAMILY_NAME))
+```
+
+The app does not register it yet - the pipeline landed before any UI used
+it, so that call is still to be added.
+
+[Lucide]: https://lucide.dev
+
 ## Miscellaneous things worth knowing before you "fix" them
 
 - `lib.rs` has `windows_subsystem = "windows"` (which hides the console
