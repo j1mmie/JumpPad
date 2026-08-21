@@ -1,0 +1,16 @@
+[package]
+name = "icon_font_builder"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# These three are the build tool's alone, and are kept out of
+# `[workspace.dependencies]` to say so: nothing that ships in a JumpPad
+# binary parses SVG, expands strokes or writes font tables, and listing them
+# beside `iced` and `serde` would suggest they are shared. `default-members`
+# in the workspace root keeps a plain `cargo build` from compiling them.
+[dependencies]
+jumppad_icons.workspace = true
+kurbo = "0.13"
+roxmltree = "0.20"
+write-fonts = "0.52"

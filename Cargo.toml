@@ -8,6 +8,25 @@ members = [
     "crates/jumppad_config",
     "crates/jumppad_actions",
     "crates/jumppad_keybinds",
+    "crates/jumppad_icons",
+    "crates/icon_font_builder",
+]
+
+# `icon_font_builder` is left out so a plain `cargo build`, `cargo test` or
+# `cargo clippy` never compiles it. It is a build tool run by hand through
+# `cargo build_fonts`, its output is committed, and its dependencies -
+# an SVG parser, a curve library, a font writer - have no business being
+# built as part of the app. `cargo build -p icon_font_builder` still works
+# when someone wants exactly that.
+default-members = [
+    "crates/editor_core",
+    "crates/jumppad_textarea",
+    "crates/syntax_registry",
+    "crates/jumppad",
+    "crates/jumppad_config",
+    "crates/jumppad_actions",
+    "crates/jumppad_keybinds",
+    "crates/jumppad_icons",
 ]
 
 [workspace.package]
@@ -53,6 +72,7 @@ syntax_registry = { path = "crates/syntax_registry" }
 jumppad_config = { path = "crates/jumppad_config" }
 jumppad_actions = { path = "crates/jumppad_actions" }
 jumppad_keybinds = { path = "crates/jumppad_keybinds" }
+jumppad_icons = { path = "crates/jumppad_icons" }
 
 # `iced_graphics` 0.14.0 plus two additive methods on the concrete
 # `graphics::text::Editor`: `scroll_by(pixels)`, which makes scrolling

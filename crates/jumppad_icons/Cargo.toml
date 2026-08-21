@@ -1,0 +1,11 @@
+[package]
+name = "jumppad_icons"
+version.workspace = true
+edition.workspace = true
+
+# Deliberately empty, for the same reason `jumppad_actions` keeps its list
+# empty: this crate is a manifest the UI reads at a glance, and `icon_font_builder`
+# reads to know what to draw. Everything that knows *how* an icon is drawn -
+# SVG parsing, stroking, font writing - lives in the builder, which never
+# ships in a JumpPad binary.
+[dependencies]

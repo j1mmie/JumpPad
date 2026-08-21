@@ -1999,6 +1999,91 @@ unhighlighted, consistent with "highlighters are optional" in
 `README.md`. Don't mistake that startup diagnostic for a real error;
 only chase it if highlighting is actually expected to be working.
 
+## The icon font (`jumppad_icons`, `icon_font_builder`)
+
+Icons are glyphs in a font JumpPad builds itself, drawn as text like any
+other label. That is the cheap way to do it here: iced already rasterizes
+and caches a glyph for every label on screen, so an icon costs one more
+entry in a cache the app pays for anyway. The alternatives both cost
+something the app has deliberately given up - drawing the shapes as geometry
+wants the multisampling `run` turns off, and rasterizing SVG at runtime
+wants `resvg` in the binary.
+
+`assets/icons/*.svg` are [Lucide] drawings, vendored as they ship.
+`jumppad_icons` says which of them are in the font and what codepoint each
+one answers to. `cargo build_fonts` runs `icon_font_builder` over that list
+and writes `assets/fonts/jumppad-icons.ttf`, which is committed: the build
+is deterministic, so rebuilding without changing an icon leaves the tree
+clean, and nobody needs the tool to compile the app.
+
+Adding an icon is a file in `assets/icons/`, a row in `jumppad_icons::ICONS`
+with the next free codepoint, and `cargo build_fonts`.
+
+### The stroke width is baked in, and has to be
+
+Lucide draws with strokes. OpenType has no stroke - a glyph is filled
+contours and nothing else - so `icon_font_builder` expands each centreline
+into the outline a round 3-unit pen would leave, and that weight is fixed
+from then on. No draw call can vary it. Wanting a second weight means a
+second glyph, not an argument.
+
+What does scale is the size: the weight is a proportion of the icon like
+everything else in it, so a 3-unit stroke on Lucide's 24-unit grid draws 2px
+at `size(16)`.
+
+The other thing the builder settles is where an icon sits beside text. The
+24-unit box maps onto a whole em, so `size(16)` draws what a browser would
+draw at `width="16"`, and the box straddles the middle of a capital letter
+rather than resting on the baseline.
+
+### Codepoints are ours
+
+They start at U+E000 in the Private Use Area and are assigned in
+`jumppad_icons`, not copied from Lucide's own font. Lucide reassigns those
+between releases; these never move, so re-vendoring a drawing cannot quietly
+change what the UI draws.
+
+The font is stored in Git LFS. A clone made without it leaves a text
+pointer where the font should be, and nothing downstream would say so - a
+face that fails to parse is declined, `.notdef` is empty on purpose, and
+every icon draws as nothing at all. `jumppad`'s `ICON_FONT_BYTES` checks the
+sfnt tag at compile time so that clone fails with a sentence instead. The
+check lives with the app rather than with `jumppad_icons` on purpose:
+`build_fonts` reads that manifest to write the font, so a check there would
+stop the tool that fixes the problem from compiling.
+
+### Drawing one
+
+`run` hands the bytes to iced at startup; `app.rs` selects the face by the
+family name the font records, and `UiText::tab_icon`/`control_icon` draw a
+glyph at the size of the text it sits among:
+
+```rust
+button(ui.control_icon(jumppad_icons::CLOSE))
+```
+
+`ICON_SCALE` sets how large an icon draws relative to that text. Only the
+size scales: the line height stays the text's, so the tab strip keeps the
+whole-pixel height the transparent-window seams depend on.
+
+### The round buttons
+
+A tab's close button and the new-tab button are circles, sized rather than
+padded - padding around a glyph whose box is taller than it is wide gives an
+oval. `UiText` fixes both diameters from the icon size, so they track the
+configured UI size, and the hover highlight is the circle: each style
+rounds its border to half the diameter it was handed.
+
+The new-tab button sits in a container painted with `tab_bar_style`. It
+paints no surface of its own, and without that container what showed through
+was the window background - which is exactly the active tab's colour, so the
+button read as a tab. Its height is `UiText::strip_height` rather than
+`Fill`: it lives inside the horizontal `scrollable`, where `Fill` resolves
+against the window rather than the row and stretches the strip down the
+whole window.
+
+[Lucide]: https://lucide.dev
+
 ## Miscellaneous things worth knowing before you "fix" them
 
 - `lib.rs` has `windows_subsystem = "windows"` (which hides the console
