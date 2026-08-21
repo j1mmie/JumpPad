@@ -2331,9 +2331,12 @@ impl JumpPadApp {
             .width(Fill)
             .style(tab_bar_style);
 
+        // The scrollbar is hidden rather than absent: the row still scrolls
+        // by wheel or trackpad, but a floating bar over a strip this short
+        // sits across the tab titles and makes them unreadable.
         let tab_bar: Element<'_, Message> = row![
             scrollable(tabs_row).direction(scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new(),
+                scrollable::Scrollbar::hidden(),
             )),
             filler,
         ]
