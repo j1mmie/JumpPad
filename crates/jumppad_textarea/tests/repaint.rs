@@ -329,16 +329,13 @@ fn the_editor_still_paints_its_text() {
     );
 }
 
-/// The failure the redraw nudge in `app.rs` exists for: switching tabs puts a
-/// different document under the same widget, with the same font, bounds and
-/// metrics - and those three are all iced's editor comparison looks at, so it
-/// can conclude nothing changed and repaint nothing.
+/// The failure the redraw nudge in `app.rs` used to exist for: a different
+/// document under the same widget has the same font, bounds and metrics, and
+/// those three are all `Internal` compares - so iced's editor comparison could
+/// conclude nothing changed and repaint nothing.
 ///
-/// It does repaint today, but by accident rather than by that comparison:
-/// `Editor::update` mints a fresh `Arc` on every layout, which leaves the
-/// previous frame's weak reference dangling and makes the comparison fail
-/// before it can compare anything. This is the tripwire for that accident
-/// going away.
+/// The fork answers it on which editor the reference points at now
+/// (`PartialEq for Weak`). This is the tripwire for that going away.
 #[test]
 fn a_different_document_under_the_same_widget_repaints() {
     assert_repaints_a_document_swap(Window::new());
@@ -346,8 +343,8 @@ fn a_different_document_under_the_same_widget_repaints() {
 
 /// The same, on a platform that presents through several buffers: the one a
 /// frame lands in was last painted three frames ago, so that is what its
-/// damage is measured against. The nudge in `app.rs` scales itself by a frame
-/// counter for exactly this reason.
+/// damage is measured against. The nudge scaled itself by a frame counter for
+/// exactly this reason.
 #[test]
 fn a_document_swap_repaints_through_a_rotating_swapchain() {
     let mut window = Window::with_buffers(3);
@@ -358,8 +355,8 @@ fn a_document_swap_repaints_through_a_rotating_swapchain() {
     assert_repaints_a_document_swap(window);
 }
 
-/// A palette swap moves no widget, which is the other thing the nudge in
-/// `app.rs` exists for: the colors have to be enough on their own.
+/// A palette swap moves no widget, which is the other thing the nudge covered:
+/// the colors have to be enough on their own.
 #[test]
 fn a_theme_change_repaints_the_editor() {
     let mut window = Window::new();
@@ -376,6 +373,39 @@ fn a_theme_change_repaints_the_editor() {
     assert!(
         changed_pixels(&before, &window.pixels) > 1_000,
         "the new palette should be on screen"
+    );
+}
+
+/// A tab switch, which is not the swap above however much it looks like one -
+/// and the case that got past it. The tab being left keeps its `Content`, so
+/// the weak reference last frame's primitive holds still upgrades, and the
+/// comparison the swap above never reaches runs after all. Two documents in
+/// the same widget answer font, bounds and metrics identically, so the editor
+/// asked for no damage whatsoever: the old text stayed on screen until the
+/// next event laid the widget out again, which made switching tabs look like
+/// a delay rather than a wrong picture.
+#[test]
+fn a_switch_between_two_live_documents_repaints() {
+    let mut window = Window::new();
+    let _ = window.present();
+    let before = window.pixels.clone();
+
+    // The tab being switched away from, still open behind the new one.
+    let _switched_away = std::mem::replace(
+        &mut window.content,
+        Content::with_text(&other_document()),
+    );
+    let damage = window.present();
+
+    assert!(
+        damage.iter().any(|region| region.width > SIZE.width / 2.0),
+        "the editor should be asking for a repaint: {damage:?}"
+    );
+    let repainted = changed_pixels(&before, &window.pixels);
+    assert!(
+        repainted > 1_000,
+        "the new document should be on screen, not the old one: \
+         {repainted} pixels changed"
     );
 }
 

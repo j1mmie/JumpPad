@@ -369,6 +369,11 @@ tab stops sat at cosmic-text's default of eight for the life of the program.
 The branch name has outlived its subject; it stays put because renaming it
 would break every checkout's `Cargo.lock`.
 
+It also carries one fix rather than an addition: `PartialEq for Weak`
+compares which editor the reference points at (`Arc::ptr_eq`) before asking
+`Internal` how it is laid out. See "The repaint nudge, and why it is gone"
+for what that one is holding up.
+
 Three things about that patch are load-bearing:
 
 - **Branched from the tag, not `master`.** Master is `0.15.0-dev`, and a
@@ -1389,21 +1394,35 @@ differs from the last one's, so that bought a full repaint - working around
 bounds and line metrics and never the text, and so could call a switched tab
 unchanged.
 
-**That comparison never runs.** `Editor::update` mints a fresh
-`Arc<Internal>` on every layout, so the previous frame's weak reference
-dangles and `Weak::eq` fails before reaching it - the editor damages its own
-bounds every frame, whatever changed. `tests/repaint.rs` in `jumppad_textarea`
-pins the three things the nudge was covering, on the real damage-tracking
-path: a document swap repaints, a document swap repaints through a rotating
-swapchain, and a palette change repaints. So the counter, its message, its
-`window::frames()` subscription and `nudge_background` are all gone.
+**That comparison is answered in the fork now, rather than dodged from
+outside.** `PartialEq for Weak` compares which editor the reference points at
+before comparing how it is laid out, so a different document is never
+"unchanged" however identical its font, bounds and metrics are. The counter,
+its message, its `window::frames()` subscription and `nudge_background` are
+gone with it, and `tests/repaint.rs` in `jumppad_textarea` pins what they were
+covering on the real damage-tracking path: a document swap repaints, a
+document swap repaints through a rotating swapchain, a switch between two
+*live* documents repaints, and a palette change repaints.
+
+**The one that got away, and why the fourth of those tests exists.** Deleting
+the nudge rested on the previous frame's weak reference always dangling -
+`Editor::update` mints a fresh `Arc<Internal>` on every layout, so `Weak::eq`
+gives up before comparing anything. True while the same document is being
+redrawn. Not true of a tab switch: the previous frame's reference points at
+the tab being *left*, which is no longer laid out and whose `Content` still
+holds it, so both sides upgraded, the comparison ran, and two documents in the
+same widget answered it identically. The editor asked for no damage at all,
+the old text stayed on screen, and the first event after the switch - a
+pointer move, a modifier coming up - laid the widget out again and repainted
+it. Switching tabs looked like a delay rather than a wrong picture, which is
+what took so long to place.
 
 **If ghosting ever comes back, it is one of two things, and they are worth
 telling apart before reaching for a nudge again.** Content that is stale
-*inside* the editor means that comparison started mattering again - fix it in
-the `iced_graphics` fork by comparing the buffer's scroll and the document's
-version, rather than by defeating the check from outside. Old text *outside*
-the editor is the overhang instead (see "Clipping the text"), and no amount of
+*inside* the editor means something the comparison still cannot see has
+changed - fix it in the `iced_graphics` fork, next to the identity check,
+rather than by defeating the check from outside. Old text *outside* the
+editor is the overhang instead (see "Clipping the text"), and no amount of
 repainting fixes it - the paint is going where nothing repaints on purpose.
 
 **Also in `switch_active`, for an unrelated reason:** it saves the
