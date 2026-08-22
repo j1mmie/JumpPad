@@ -1713,12 +1713,11 @@ That is in git history if the private symbols ever go, but it can only ever
 be on/off - and it was the more invasive of the two, since it had to put the
 first responder and the autoresizing mask back by hand.
 
-**Unlike the alpha beside it, this is a live setting.** A window's
+**Unlike the alpha beside it, this needs no new window.** A window's
 transparency is fixed when it is created, which is why `wants_transparency`
-asks every theme in the file and why a reload that introduces translucency to
-an opaque session says "restart required". A blur is asked for *after* the
-window exists, so `apply_theme` just applies it - `background.blur` never
-calls for a new window, and it is deliberately not part of
+asks every theme in the file and why a reload that changes the answer gets a
+replacement window. A blur is asked for *after* the window exists, so
+`apply_theme` just applies it - `background.blur` is deliberately not part of
 `window::settings`. It also does not make a window transparent: a radius with
 `alpha = 1.0` gets a solid window and no frost, which is the honest answer
 rather than a translucency the file never asked for.
@@ -2055,6 +2054,26 @@ drift. One `[[languages]]` edit can feed two consumers, so `apply_config`
 diffs its *derived views*: the comment-style map applies live, the
 extension-to-grammar map is baked into the registry at startup and logs
 restart-required - the one setting still waiting on a restart.
+
+**`[alpha] background` used to print a restart line, and that was a bug -
+don't put it back.** `apply_theme` held a `window_transparent` flag,
+snapshotted from `wants_transparency()` at startup, and refused an alpha
+below 1.0 whenever the window had been born opaque. Two things were wrong
+with it. The flag was never refreshed, not even at `WindowReady`, so a
+reload that *did* replace the window left the app convinced it was still
+opaque - the new window really was transparent and got painted fully solid
+anyway, for the rest of the session. And the refusal could not be right in
+the first place: an alpha below 1.0 in the showing theme means some theme in
+the file named one, which is the very question `wants_transparency` asks, so
+a window built to that config is transparent and `needs_replacing` has
+already scheduled one. The flag duplicated `self.config.wants_transparency()`
+at every moment it was read. It is gone, and the alpha simply applies.
+
+The general shape is worth keeping in mind before adding another such guard:
+**a setting that `window::settings` carries needs no restart warning, because
+changing it already puts a new window on screen.** A `restart_required` line
+is for settings that can do neither - today that is only the
+extension-to-grammar mapping.
 
 A window is handed its transparency, its decorations and its level when
 it is created and has no setter for any of them after, so those don't get

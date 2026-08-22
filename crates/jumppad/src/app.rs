@@ -174,9 +174,6 @@ pub struct JumpPadApp {
     /// Editor settings shared with every open tab's `TextArea` - the handle
     /// a config reload writes through.
     editor_config: Arc<jumppad_textarea::SharedEditorConfig>,
-    /// Whether the window was created transparent. Fixed at startup, so a
-    /// reloaded `alpha.background` can't cross it - see `apply_config`.
-    window_transparent: bool,
     config_watch: reload::ConfigWatch,
     document_watch: docwatch::DocumentWatch,
 }
@@ -523,11 +520,6 @@ impl JumpPadApp {
             files_hovered: false,
             find: HashMap::new(),
             modifiers: keyboard::Modifiers::default(),
-            // The same expression `run()` derives the window's transparent
-            // flag from - this field is what remembers the outcome.
-            // The same question `run()` asks to decide the window's
-            // transparent flag - this field is what remembers the outcome.
-            window_transparent: config.wants_transparency(),
             editor_config,
             config_watch: reload::ConfigWatch::new(),
             document_watch: docwatch::DocumentWatch::new(),
@@ -1281,10 +1273,11 @@ impl JumpPadApp {
 
     /// Applies a freshly reloaded `config.toml`, diffing against the one in
     /// effect. The single wiring point for live config: a new reloadable
-    /// setting gets its arm here, and a setting that can only apply at
-    /// startup gets a `restart_required` line instead. Anything a theme
-    /// carries belongs in `apply_theme` instead, which an OS light/dark
-    /// switch calls too.
+    /// setting gets its arm here, a creation-time one is named in
+    /// `window::settings` and gets a new window, and a setting that can do
+    /// neither gets a `restart_required` line. Anything a theme carries
+    /// belongs in `apply_theme` instead, which an OS light/dark switch
+    /// calls too.
     ///
     fn apply_config(&mut self, new: jumppad_config::Config) -> Task<Message> {
         let current = &self.config;
@@ -1357,8 +1350,9 @@ impl JumpPadApp {
         match self.window.filter(|_| replacement) {
             // Ends at `WindowReady`, the same arm the first window arrives
             // through, so a replacement is set up by the code that sets up
-            // every window - which makes whatever `apply_theme` asked for
-            // redundant, since the new window is told all of it on arrival.
+            // every window - which is why the platform work `apply_theme`
+            // just asked of the outgoing window costs nothing to repeat: the
+            // new one is told all of it on arrival.
             Some(previous) => {
                 window::replace(previous, window::settings(&self.config))
                     .map(|id| Message::WindowReady(Some(id)))
@@ -1379,22 +1373,17 @@ impl JumpPadApp {
             &theme.palette,
             resolve_palette(self.showing.default_palette(), Theme::Light),
         );
-        // A window is transparent or not from the moment it is created, and
-        // `run()` counted every theme in the file before creating this one.
-        // So this only bites when a reload introduces translucency to a
-        // session that started without any.
-        if theme.background_alpha < 1.0 && !self.window_transparent {
-            restart_required(
-                "[alpha] background below 1.0, in a session whose window started opaque",
-            );
-        } else {
-            self.background_alpha = theme.background_alpha.clamp(0.0, 1.0);
-            self.editor_config
-                .set_background_alpha(theme.background_alpha);
-        }
-        // Unconditional, unlike the alpha above: the window's transparency
-        // is what a session cannot change, and a blur is asked for after the
-        // fact - so this is a live setting whatever the window started as.
+        // No check that the window can actually be seen through, because
+        // there is no way for it not to be: an alpha below 1.0 here means
+        // some theme in the file named one, which is the very question
+        // `window::settings` asks to decide the window's transparency - and
+        // `window::needs_replacing` puts a new window on screen the moment
+        // the answer changes. See AGENTS.md.
+        self.background_alpha = theme.background_alpha.clamp(0.0, 1.0);
+        self.editor_config
+            .set_background_alpha(theme.background_alpha);
+        // Capped in `macos.rs`, the one platform with a ceiling, so what is
+        // stored here is what the file said.
         self.background_blur = theme.background_blur;
         self.editor_config
             .set_foreground_alpha(theme.foreground_alpha);
@@ -3720,7 +3709,6 @@ mod tests {
                 1.0,
                 Arc::new(|_: &jumppad_textarea::KeyPress| None),
             ),
-            window_transparent: false,
             config_watch: reload::ConfigWatch::new(),
             document_watch: docwatch::DocumentWatch::new(),
         }
@@ -4604,21 +4592,40 @@ mod tests {
     }
 
     #[test]
-    fn apply_config_background_alpha_needs_a_window_born_transparent() {
+    fn apply_config_background_alpha_reaches_the_window_and_the_editors() {
         let mut app = test_app(1);
-        let config = config_with_theme("background.alpha = 0.5");
 
-        // Booted opaque: the surface can't turn translucent, so nothing moves.
-        let _ = app.apply_config(config.clone());
-        assert_eq!(app.background_alpha, 1.0);
-        assert_eq!(app.editor_config.background_alpha(), 1.0);
-
-        // Booted transparent: the window style and the editors both follow.
-        app.window_transparent = true;
-        app.config = jumppad_config::Config::default();
-        let _ = app.apply_config(config);
+        let _ = app.apply_config(config_with_theme("background.alpha = 0.5"));
         assert_eq!(app.background_alpha, 0.5);
         assert_eq!(app.editor_config.background_alpha(), 0.5);
+    }
+
+    /// The case that used to print a restart line and then never recover:
+    /// a session booted opaque, reloaded to a translucent theme. The reload
+    /// calls for a new window - `wants_transparency` moved - and the alpha
+    /// belongs to the window that reload is putting on screen, so it
+    /// applies now rather than waiting for a restart that was the only
+    /// thing that ever fixed it.
+    #[test]
+    fn a_session_that_booted_opaque_still_honors_a_reloaded_alpha() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        let translucent = config_with_theme("background.alpha = 0.5");
+
+        assert!(
+            window::needs_replacing(&app.config, &translucent),
+            "the reload is what puts a transparent window on screen"
+        );
+
+        let _ = app.apply_config(translucent);
+        assert_eq!(app.background_alpha, 0.5);
+        assert_eq!(app.editor_config.background_alpha(), 0.5);
+
+        // And it stays applied once that window arrives, rather than being
+        // undone by the arm every window comes through.
+        let _ =
+            app.update(Message::WindowReady(Some(iced::window::Id::unique())));
+        assert_eq!(app.background_alpha, 0.5);
     }
 
     /// Unlike the alpha above, a blur needs no window born anything in
@@ -4627,7 +4634,6 @@ mod tests {
     #[test]
     fn apply_config_records_a_themes_blur_whatever_the_window_is() {
         let mut app = test_app(1);
-        assert!(!app.window_transparent);
 
         let _ = app.apply_config(config_with_theme("background.blur = 24"));
         assert_eq!(app.background_blur, 24);
@@ -4650,7 +4656,6 @@ mod tests {
     #[test]
     fn an_appearance_switch_carries_the_blur_with_it() {
         let mut app = test_app(1);
-        app.window_transparent = true;
 
         let _ = app.apply_config(
             toml::from_str(
@@ -4703,7 +4708,6 @@ mod tests {
     #[test]
     fn changing_only_the_radius_still_reaches_the_window() {
         let mut app = test_app(1);
-        app.window_transparent = true;
         app.window = Some(iced::window::Id::unique());
 
         let _ = app.apply_config(config_with_theme(
@@ -4871,7 +4875,6 @@ mod tests {
     #[test]
     fn a_config_with_no_mode_section_shows_the_themes_named_after_the_slots() {
         let mut app = test_app(1);
-        app.window_transparent = true;
         let config: jumppad_config::Config = toml::from_str(
             r#"
             [themes.base]
@@ -5007,32 +5010,45 @@ mod tests {
     /// be re-armed here or it never runs at all.
     #[test]
     fn a_window_that_only_becomes_translucent_later_is_still_set_up_for_it() {
+        fn showing(alpha: &str) -> jumppad_config::Config {
+            toml::from_str(&format!(
+                r#"
+                [mode]
+                detection = "light"
+                theme.light = "day"
+
+                [themes.day]
+                background.alpha = {alpha}
+
+                [themes.night]
+                background.alpha = 0.975
+                "#
+            ))
+            .unwrap()
+        }
+
         let mut app = test_app(1);
-        // Born transparent on account of a theme that isn't showing.
-        app.window_transparent = true;
         app.window = Some(iced::window::Id::unique());
-        app.surface_reset_frames = 0;
 
-        let solid_then_translucent: jumppad_config::Config = toml::from_str(
-            r#"
-            [mode]
-            detection = "light"
-            theme.light = "day"
-
-            [themes.day]
-            background.alpha = 0.5
-
-            [themes.night]
-            background.alpha = 0.975
-            "#,
-        )
-        .unwrap();
+        // Born transparent on account of the theme that isn't showing.
+        let solid = showing("1.0");
         assert!(
-            solid_then_translucent.wants_transparency(),
+            solid.wants_transparency(),
             "the unshown theme is what made the window transparent"
         );
+        let _ = app.apply_config(solid.clone());
+        assert_eq!(app.background_alpha, 1.0, "the showing theme is solid");
 
-        let _ = app.apply_config(solid_then_translucent);
+        app.surface_reset_frames = 0;
+        app.shadow_refresh_frames = 0;
+
+        let translucent = showing("0.5");
+        assert!(
+            !window::needs_replacing(&solid, &translucent),
+            "the window is already transparent, so no new one is called for"
+        );
+
+        let _ = app.apply_config(translucent);
         assert_eq!(app.background_alpha, 0.5, "the alpha applied");
         if cfg!(target_os = "windows") {
             assert_ne!(
@@ -5050,7 +5066,6 @@ mod tests {
     #[test]
     fn a_window_already_translucent_is_not_set_up_twice() {
         let mut app = test_app(1);
-        app.window_transparent = true;
         app.window = Some(iced::window::Id::unique());
 
         let _ = app.apply_config(config_with_theme("background.alpha = 0.5"));
