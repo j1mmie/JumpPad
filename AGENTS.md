@@ -1108,7 +1108,8 @@ behaviour there.
 That same attribute is now the whole of `background.blur` on Windows - the
 material DWM was drawing uninvited is the material a blur wants - so
 `set_system_backdrop` writes `DWMSBT_TRANSIENTWINDOW` (Acrylic) instead of
-`DWMSBT_NONE` when a theme asks. See the blur section below.
+`DWMSBT_NONE` for any positive radius. The radius itself has nowhere to go on
+Windows; see the blur section below for why, and for why not to go looking.
 
 `tiny-skia` never showed this: softbuffer presents through a GDI blit into
 the window's redirection bitmap rather than a flip-model swapchain
@@ -1653,45 +1654,88 @@ scrollbar) would go jagged to fix a seam the tab bar no longer has.
 ## Blurring what shows through (`background.blur`)
 
 `[themes] background.blur` frosts the desktop a translucent window shows,
-rather than leaving it sharp. Nothing in this process can reach the
-desktop's pixels, so both implementations are the same shape: ask the OS's
-compositor for a blurred backdrop and let the window's own alpha reveal it.
+rather than leaving it sharp. It is a **number**, not a flag: `0` is off, and
+above that it is a blur radius. Nothing in this process can reach the
+desktop's pixels, so both implementations ask the OS's compositor and let the
+window's own alpha reveal the result.
 
-- **Windows** (`windows::set_system_backdrop`): `DWMSBT_TRANSIENTWINDOW`
-  through `DWMWA_SYSTEMBACKDROP_TYPE` - the very attribute that had to be
-  forced to `DWMSBT_NONE` to stop DWM drawing a Mica backdrop nobody asked
-  for (see the rendering-backend section). One lever, two settings of it.
-- **macOS** (`macos::set_window_blur`): an `NSVisualEffectView` blending
-  `BehindWindow`, installed as the window's *content view* with the view
-  iced renders into re-parented underneath it.
+**Only macOS has anywhere to put the amount.** That asymmetry is the whole
+reason the setting is shaped the way it is, and it is worth knowing before
+anyone "fixes" one half to match the other:
 
-**Why the macOS one swaps the content view instead of adding a subview.**
-The view iced renders into owns its layer, and a layer's own content draws
-*beneath* its sublayers - so an effect view added under the renderer comes
-out on top of the text. The window's content view is the one place that is
-genuinely behind it. `-[NSWindow setContentView:]` fits the incoming view to
-the content area, which is the frame the outgoing one already had, so the
-re-parenting needs no geometry of its own beyond copying that frame down.
-Two things the swap has to put back by hand: the first responder (leaving
-the view hierarchy resigns it, and every keystroke arrives through that
-view), and the autoresizing mask.
+- **macOS** (`macos::set_window_blur`): `CGSSetWindowBackgroundBlurRadius`
+  takes an integer radius for one window and the window server blurs whatever
+  that window sits over. Capped at `MAX_BLUR_RADIUS` (64), which is where the
+  cost outruns any visible difference - the same ceiling kitty documents for
+  `background_blur`, the setting this one matches.
+- **Windows** (`windows::set_system_backdrop`): any positive radius means
+  `DWMSBT_TRANSIENTWINDOW` (Acrylic) through `DWMWA_SYSTEMBACKDROP_TYPE`; `0`
+  means `DWMSBT_NONE`. **The number itself goes nowhere, and there is no
+  version of this that takes one.** Acrylic's blur is DWM's, fixed by the
+  Fluent design it comes from. Nothing in `DWMWINDOWATTRIBUTE` carries a
+  radius (the list runs to `DWMWA_LAST = 39` with no such member), and the
+  undocumented `SetWindowCompositionAttribute`/`ACCENT_POLICY` route Windows
+  10 apps used has a tint color and no radius either - so going undocumented
+  there would buy nothing. Don't go looking again.
+
+`DWMWA_SYSTEMBACKDROP_TYPE` is the same attribute that had to be forced to
+`DWMSBT_NONE` to stop DWM drawing a Mica backdrop nobody asked for (see the
+rendering-backend section). One lever, two settings of it.
+
+**What varies the strength on both is `background.alpha`.** The theme's
+background color is painted *over* the frosted backdrop, so a lower alpha
+shows more of the frost. That is the continuous, cross-platform control; the
+radius is a macOS refinement on top of it.
+
+**macOS uses a private symbol, the only one in the codebase.** Two of them,
+really - `CGSDefaultConnectionForThread` and
+`CGSSetWindowBackgroundBlurRadius` - neither declared in a public header. The
+public route, an `NSVisualEffectView` behind the content, has no radius at
+all, so every app offering a blur *amount* on macOS uses these. Two rules
+follow, both already in the code:
+
+- **Looked up with `dlsym`, never linked.** A private symbol that disappears
+  must cost this feature, not the app's ability to launch. `window_server_blur`
+  resolves both once through `RTLD_DEFAULT` and hands back `None` if either
+  has gone; the caller logs and draws an unfrosted window.
+- **The window's background color stops being fully clear while blur is on.**
+  The window server does not blur behind a pixel whose alpha is zero, and a
+  decorated window's rounded corners are exactly that - so the corners keep
+  the sharp desktop while the rest frosts. A hair of black (`CORNER_INK`,
+  alpha 0.001) over winit's `clearColor` brings them in, and is invisible at
+  any alpha. Put back to clear when the blur goes off.
+
+An earlier revision of this feature used an `NSVisualEffectView` installed as
+the window's content view, with iced's render view re-parented underneath (a
+subview cannot work: the renderer owns its layer, and a layer's own content
+draws beneath its sublayers, so the effect view lands on top of the text).
+That is in git history if the private symbols ever go, but it can only ever
+be on/off - and it was the more invasive of the two, since it had to put the
+first responder and the autoresizing mask back by hand.
 
 **Unlike the alpha beside it, this is a live setting.** A window's
 transparency is fixed when it is created, which is why `wants_transparency`
-asks every theme in the file and why a reload that introduces translucency
-to an opaque session says "restart required". A blur is asked of the
-compositor *after* the window exists, so `apply_theme` just applies it -
-`background.blur` never calls for a new window, and it is deliberately not
-part of `window::settings`. It also does not make a window transparent:
-blur alone with `alpha = 1.0` gets a solid window and no frost, which is the
-honest answer rather than a translucency the file never asked for.
+asks every theme in the file and why a reload that introduces translucency to
+an opaque session says "restart required". A blur is asked for *after* the
+window exists, so `apply_theme` just applies it - `background.blur` never
+calls for a new window, and it is deliberately not part of
+`window::settings`. It also does not make a window transparent: a radius with
+`alpha = 1.0` gets a solid window and no frost, which is the honest answer
+rather than a translucency the file never asked for.
 
 Told to the window on `WindowReady` (so a replacement window is set up like
-the first one), on the alpha crossing into translucency
-(`turn_translucent`), and whenever a reload or an OS light/dark switch moves
-the theme's own answer. Never on a solid window: there is no desktop showing
-through to frost, and on Windows the off case would override DWM's own pick
-for a window nobody can see past the paint.
+the first one), on the alpha crossing into translucency (`turn_translucent`),
+and whenever a reload or an OS light/dark switch moves the theme's answer -
+including a change of radius alone, not just a crossing of zero. Never on a
+solid window: there is no desktop showing through to frost, and on Windows
+the `0` case would override DWM's own pick for a window nobody can see past
+the paint.
+
+The radius is carried whole through `jumppad_config` and `app.rs` and capped
+only in `macos.rs`, the one place that has a ceiling - the same division of
+labour as `clamp_scroll_multiplier` and `font::clamp_size`. A negative radius
+fails the file's parse rather than rounding to something nobody asked for,
+which is what `Option<u32>` buys.
 
 **Expect it on `jumppad-gpu` and not much on `jumppad`.** The two binaries
 reach the screen by different paths (again). On macOS the software binary
@@ -1704,17 +1748,16 @@ real machine yet; if a report comes in, establish which binary it came from
 first, the same as every other transparency report.
 
 **Linux is not wired up, and can't be from here.** Blur on Wayland and
-compositing X11 is the compositor's own window rule (KWin's blur effect,
-Hyprland's `blur` rules, picom), keyed off the window, not something an app
-can ask for through winit. `apply_window_blur` is a no-op function there.
+compositing X11 is the compositor's business - a window rule (KWin's blur
+effect, Hyprland, picom) or a protocol extension an app opts into - and
+neither is reachable through what iced exposes. `apply_window_blur` is a
+no-op function there.
 
 **The AppKit calls are hand-rolled `msg_send!`, and a debug build checks
 them.** `objc2` verifies every message send's argument and return encodings
 against the method's own when `debug_assertions` are on - so a selector
-returning `BOOL` declared as `()` panics rather than misbehaving quietly
-(`-[NSWindow makeFirstResponder:]` is one). The same check is why the
-hand-rolled `CGRect`/`CGPoint`/`CGSize` in `macos.rs` carry `Encoding`s with
-AppKit's own struct names: the names are compared, not just the layout.
+returning `BOOL` declared as `()` panics rather than misbehaving quietly.
+Worth knowing before adding a call here.
 
 ## Opening files
 
@@ -1940,7 +1983,8 @@ case-insensitively where they're applied (`resolve_palette` in
 `background.blur` sits in the same section as the alpha and inherits by the
 same per-leaf rule, but it is not the same kind of setting: the alpha is
 fixed against a window created once, the blur is asked of the compositor
-afterwards and applies live. See the blur section above.
+afterwards and applies live. It is also a number only one platform can read
+as one. See the blur section above.
 
 Two things that look like bugs and aren't. `wants_transparency` does not
 merge the base theme in first: base is itself a `[themes]` entry, so a

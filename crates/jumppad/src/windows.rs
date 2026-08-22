@@ -30,9 +30,17 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 
 /// Puts the Windows 11 system backdrop where `[themes] background.blur`
 /// asks: `DWMSBT_TRANSIENTWINDOW` (Acrylic - a live blur of whatever sits
-/// behind the window) when it is on, and `DWMSBT_NONE` when it is off, so a
-/// translucent window shows the *desktop* through it rather than a DWM-drawn
-/// material nobody asked for.
+/// behind the window) for any positive radius, and `DWMSBT_NONE` for `0`, so
+/// a translucent window shows the *desktop* through it rather than a
+/// DWM-drawn material nobody asked for.
+///
+/// **The radius itself goes nowhere, and there is no version of this that
+/// takes one.** Acrylic's blur is DWM's, fixed by the Fluent design it comes
+/// from. Nothing in `DWMWINDOWATTRIBUTE` carries a radius - the list runs to
+/// `DWMWA_LAST` with no such member - and the undocumented route Windows 10
+/// apps used, `SetWindowCompositionAttribute` with an `ACCENT_POLICY`, has a
+/// tint color and no radius either. What varies the strength here is the
+/// theme's own `background.alpha` painted over the material.
 ///
 /// **The off case is the bright-window-with-decorations fix.** winit
 /// unconditionally calls `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE,
@@ -63,12 +71,12 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 /// bitmap rather than a flip-model swapchain composited by DWM, and never
 /// showed the unwanted backdrop that `DWMSBT_NONE` exists to remove - so it
 /// most likely won't show a wanted one either.
-pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: bool) {
+pub fn set_system_backdrop(window: &dyn iced::window::Window, radius: u32) {
     let Some(hwnd) = hwnd_of(window, "the system backdrop") else {
         return;
     };
 
-    let backdrop: DWM_SYSTEMBACKDROP_TYPE = if blur {
+    let backdrop: DWM_SYSTEMBACKDROP_TYPE = if radius > 0 {
         DWMSBT_TRANSIENTWINDOW
     } else {
         DWMSBT_NONE
@@ -92,7 +100,7 @@ pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: bool) {
         log::debug!(
             "jumppad: no system-backdrop control on this Windows build (0x{result:X})"
         );
-    } else if blur {
+    } else if radius > 0 {
         log::debug!("jumppad: asked DWM to frost the window's backdrop");
     } else {
         log::debug!("jumppad: disabled the window's system backdrop");

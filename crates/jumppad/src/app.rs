@@ -128,7 +128,7 @@ pub struct JumpPadApp {
     theme: Theme,
     ui_text: UiText,
     background_alpha: f32,
-    background_blur: bool,
+    background_blur: u32,
     /// Frames left until the macOS window shadow is refreshed - see
     /// `SHADOW_REFRESH_FRAMES`.
     shadow_refresh_frames: u8,
@@ -504,7 +504,7 @@ impl JumpPadApp {
             theme: Theme::Light,
             ui_text: ui_text(&jumppad_config::ResolvedFont::default()),
             background_alpha: 1.0,
-            background_blur: false,
+            background_blur: 0,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir,
@@ -1087,22 +1087,24 @@ impl JumpPadApp {
         Task::none()
     }
 
-    /// Puts the desktop showing through the window where the theme's
-    /// `background.blur` asks - frosted, or sharp. Each platform has its own
-    /// way of being asked, so this is where they part company.
+    /// Frosts the desktop showing through the window by as much as the
+    /// theme's `background.blur` asks, or leaves it sharp at `0`. Each
+    /// platform is asked its own way, so this is where they part company -
+    /// and only macOS has anywhere to put the amount (see `macos.rs`;
+    /// Windows reads any positive radius as its one Acrylic material).
     ///
     /// Only a translucent window is told anything, on either. A solid one
-    /// has no desktop showing through to frost, and on Windows the off case
+    /// has no desktop showing through to frost, and on Windows the `0` case
     /// also overrides a backdrop winit already asked DWM for, which would be
     /// a gratuitous difference from every other app on a window nobody can
     /// see through (see `windows.rs`).
     #[cfg(target_os = "windows")]
     fn apply_window_blur(&self) -> Task<Message> {
-        let blur = self.background_blur;
+        let radius = self.background_blur;
         match self.window {
             Some(id) if self.background_alpha < 1.0 => {
                 iced::window::run(id, move |window| {
-                    crate::windows::set_system_backdrop(window, blur);
+                    crate::windows::set_system_backdrop(window, radius);
                 })
                 .discard()
             }
@@ -1110,15 +1112,14 @@ impl JumpPadApp {
         }
     }
 
-    /// Same gate as above, AppKit's own mechanism behind it - the effect
-    /// view in `macos.rs`.
+    /// Same gate as above, the window server's own blur behind it.
     #[cfg(target_os = "macos")]
     fn apply_window_blur(&self) -> Task<Message> {
-        let blur = self.background_blur;
+        let radius = self.background_blur;
         match self.window {
             Some(id) if self.background_alpha < 1.0 => {
                 iced::window::run(id, move |window| {
-                    crate::macos::set_window_blur(window, blur);
+                    crate::macos::set_window_blur(window, radius);
                 })
                 .discard()
             }
@@ -1127,7 +1128,8 @@ impl JumpPadApp {
     }
 
     /// No blur to ask for anywhere else: X11 and Wayland leave it to the
-    /// compositor's own window rules, which no app-side call can reach.
+    /// compositor, whether through its own window rules or a protocol
+    /// extension, and neither is reachable through what iced exposes.
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     fn apply_window_blur(&self) -> Task<Message> {
         Task::none()
@@ -3693,7 +3695,7 @@ mod tests {
                 jumppad_config::DEFAULT_FONT_SIZE,
             ),
             background_alpha: 1.0,
-            background_blur: false,
+            background_blur: 0,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir: PathBuf::from("/tmp"),
@@ -4627,11 +4629,20 @@ mod tests {
         let mut app = test_app(1);
         assert!(!app.window_transparent);
 
-        let _ = app.apply_config(config_with_theme("background.blur = true"));
-        assert!(app.background_blur);
+        let _ = app.apply_config(config_with_theme("background.blur = 24"));
+        assert_eq!(app.background_blur, 24);
 
-        let _ = app.apply_config(config_with_theme("background.blur = false"));
-        assert!(!app.background_blur);
+        let _ = app.apply_config(config_with_theme("background.blur = 0"));
+        assert_eq!(app.background_blur, 0);
+    }
+
+    /// A radius the platform will not honor whole is still recorded whole -
+    /// the capping belongs to the platform that has a ceiling, not here.
+    #[test]
+    fn an_unreasonable_radius_is_recorded_as_written() {
+        let mut app = test_app(1);
+        let _ = app.apply_config(config_with_theme("background.blur = 4000"));
+        assert_eq!(app.background_blur, 4000);
     }
 
     /// The blur rides with the theme, so an OS light/dark switch carries it
@@ -4648,17 +4659,17 @@ mod tests {
                 background.alpha = 0.8
 
                 [themes.dark]
-                background.blur = true
+                background.blur = 24
                 "#,
             )
             .unwrap(),
         );
 
         let _ = app.apply_os_appearance(Some(Appearance::Dark));
-        assert!(app.background_blur);
+        assert_eq!(app.background_blur, 24);
 
         let _ = app.apply_os_appearance(Some(Appearance::Light));
-        assert!(!app.background_blur);
+        assert_eq!(app.background_blur, 0);
     }
 
     /// A solid window has no desktop showing through to frost, and on
@@ -4668,7 +4679,7 @@ mod tests {
     fn a_solid_window_is_told_nothing_about_blur() {
         let mut app = test_app(1);
         app.window = Some(iced::window::Id::unique());
-        app.background_blur = true;
+        app.background_blur = 24;
 
         assert_eq!(app.background_alpha, 1.0);
         assert_eq!(app.apply_window_blur().units(), 0);
@@ -4682,8 +4693,30 @@ mod tests {
 
         if cfg!(any(target_os = "windows", target_os = "macos")) {
             assert_ne!(app.apply_window_blur().units(), 0);
-            app.background_blur = true;
+            app.background_blur = 24;
             assert_ne!(app.apply_window_blur().units(), 0);
+        }
+    }
+
+    /// A reload that only moves the radius still reaches the window - the
+    /// arm fires on any change, not just on crossing zero.
+    #[test]
+    fn changing_only_the_radius_still_reaches_the_window() {
+        let mut app = test_app(1);
+        app.window_transparent = true;
+        app.window = Some(iced::window::Id::unique());
+
+        let _ = app.apply_config(config_with_theme(
+            "background.alpha = 0.5\nbackground.blur = 12",
+        ));
+        assert_eq!(app.background_blur, 12);
+
+        let widened = app.apply_config(config_with_theme(
+            "background.alpha = 0.5\nbackground.blur = 40",
+        ));
+        assert_eq!(app.background_blur, 40);
+        if cfg!(target_os = "windows") {
+            assert_ne!(widened.units(), 0, "the window was never told");
         }
     }
 

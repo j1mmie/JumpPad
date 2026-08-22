@@ -66,6 +66,10 @@ log = "0.4"
 # via winit, so it costs nothing to build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# For `dlsym` alone - the blur radius in `macos.rs` is a private symbol, and
+# looking it up at runtime is what keeps a macOS that has dropped it from
+# stopping the app at launch. Already in the tree via winit.
+libc = "0.2"
 
 # Same deal on Windows, for the `DwmSetWindowAttribute` calls - see `windows.rs`.
 # winit already depends on this exact version with `Win32_Graphics_Dwm`

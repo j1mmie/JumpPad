@@ -310,7 +310,7 @@ impl ThemeConfig {
 pub struct ResolvedTheme {
     pub palette: String,
     pub background_alpha: f32,
-    pub background_blur: bool,
+    pub background_blur: u32,
     pub foreground_alpha: f32,
     pub editor_font: ResolvedFont,
     pub ui_font: ResolvedFont,
@@ -446,14 +446,21 @@ impl Default for WindowConfig {
 pub struct BackgroundConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
-    /// Whether the desktop showing through is frosted rather than sharp.
-    /// The OS's compositor does the blurring, not JumpPad, so this asks
-    /// rather than guarantees - see `windows.rs`/`macos.rs` for what each
-    /// platform can actually deliver. Nothing to see at `alpha = 1.0`,
-    /// where there is no desktop showing through to frost. Unnamed takes
-    /// the base theme's, and failing that [`DEFAULT_BLUR`].
+    /// How much the desktop showing through is frosted. `0` leaves it
+    /// sharp; anything above that asks for a blur.
+    ///
+    /// A number rather than a flag because macOS takes it as a radius. Only
+    /// one platform has that knob, though - Windows reads any positive
+    /// value as the one Acrylic material it offers - so the amount is a
+    /// request, the same as the blur itself is. The OS's compositor does
+    /// all of it; see `windows.rs`/`macos.rs` for what each can deliver.
+    ///
+    /// Nothing to see at `alpha = 1.0`, where there is no desktop showing
+    /// through to frost. Unnamed takes the base theme's, and failing that
+    /// [`DEFAULT_BLUR`]. Capped where applied, not here, so this crate
+    /// keeps holding no opinion the platform owns.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blur: Option<bool>,
+    pub blur: Option<u32>,
 }
 
 /// The same, for the text drawn on that surface. Independent of it, so a
@@ -628,12 +635,12 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 /// existed.
 pub const DEFAULT_ALPHA: f32 = 1.0;
 
-/// Whether the desktop behind a translucent window is frosted when neither
-/// the theme nor the base theme says: it isn't, which is what JumpPad showed
-/// before the setting existed. Off is also the cheaper window - a frosted
-/// backdrop is drawn by the compositor on every frame the desktop moves
-/// under it.
-pub const DEFAULT_BLUR: bool = false;
+/// How much the desktop behind a translucent window is frosted when neither
+/// the theme nor the base theme says: not at all, which is what JumpPad
+/// showed before the setting existed. Zero is also the cheaper window - a
+/// frosted backdrop is drawn by the compositor on every frame the desktop
+/// moves under it.
+pub const DEFAULT_BLUR: u32 = 0;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1296,7 +1303,7 @@ mod tests {
     fn a_theme_with_no_blur_named_leaves_the_desktop_sharp() {
         let theme = config("[themes.dark]\nbackground.alpha = 0.8")
             .theme_for(Appearance::Dark);
-        assert!(!theme.background_blur);
+        assert_eq!(theme.background_blur, 0);
         assert_eq!(theme.background_blur, DEFAULT_BLUR);
     }
 
@@ -1306,12 +1313,12 @@ mod tests {
             r#"
             [themes.dark]
             background.alpha = 0.8
-            background.blur = true
+            background.blur = 24
             "#,
         )
         .theme_for(Appearance::Dark);
 
-        assert!(theme.background_blur);
+        assert_eq!(theme.background_blur, 24);
         assert_eq!(theme.background_alpha, 0.8);
     }
 
@@ -1323,17 +1330,36 @@ mod tests {
             r#"
             [themes.base]
             background.alpha = 0.8
-            background.blur = true
+            background.blur = 24
 
             [themes.dark]
 
             [themes.light]
-            background.blur = false
+            background.blur = 0
             "#,
         );
 
-        assert!(config.theme_for(Appearance::Dark).background_blur);
-        assert!(!config.theme_for(Appearance::Light).background_blur);
+        assert_eq!(config.theme_for(Appearance::Dark).background_blur, 24);
+        assert_eq!(config.theme_for(Appearance::Light).background_blur, 0);
+    }
+
+    /// The amount is carried whole rather than flattened to on/off here -
+    /// only the platform knows whether it can do anything with it.
+    #[test]
+    fn an_unreasonable_blur_is_carried_as_written() {
+        let theme = config("[themes.dark]\nbackground.blur = 4000")
+            .theme_for(Appearance::Dark);
+        assert_eq!(theme.background_blur, 4000);
+    }
+
+    /// A negative radius is not a smaller one, and the file says so rather
+    /// than rounding it into a setting nobody asked for.
+    #[test]
+    fn a_negative_blur_fails_the_file() {
+        assert!(
+            toml::from_str::<Config>("[themes.dark]\nbackground.blur = -1")
+                .is_err()
+        );
     }
 
     /// Blur says nothing about how the window is created - the compositor
@@ -1344,8 +1370,7 @@ mod tests {
     #[test]
     fn blur_alone_does_not_ask_for_a_transparent_window() {
         assert!(
-            !config("[themes.dark]\nbackground.blur = true")
-                .wants_transparency()
+            !config("[themes.dark]\nbackground.blur = 24").wants_transparency()
         );
     }
 

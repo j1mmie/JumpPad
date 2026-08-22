@@ -2,12 +2,11 @@
 
 // `window_handle()` resolves through `iced::window::Window`'s own supertrait
 // bound, so `HasWindowHandle` doesn't need to be in scope here.
-use std::ffi::CStr;
+use std::ffi::{CStr, CString, c_void};
+use std::sync::OnceLock;
 
 use iced::window::raw_window_handle::RawWindowHandle;
 use jumppad_config::Appearance;
-use objc2::encode::{Encode, Encoding};
-use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 
@@ -43,92 +42,73 @@ pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
     log::debug!("jumppad: invalidated the window shadow");
 }
 
-/// Frosts what shows through a translucent window, or takes the frosting
-/// back off, per `[themes] background.blur`.
+/// Frosts what shows through a translucent window, to `radius`, or takes the
+/// frosting off at `0` - per `[themes] background.blur`.
 ///
-/// Nothing in this process can reach the desktop's pixels, so the blurring
-/// is AppKit's: an `NSVisualEffectView` blending `BehindWindow` asks the
-/// window server to blur whatever the window sits over and hand the result
-/// back as the view's own content. The window's alpha then reveals that
-/// instead of the raw desktop.
+/// Nothing in this process can reach the desktop's pixels, so the blurring is
+/// the window server's. `CGSSetWindowBackgroundBlurRadius` hands it a radius
+/// for one window and it blurs whatever that window sits over, wherever the
+/// window's own pixels are see-through.
 ///
-/// **It has to go *behind* what iced draws, and a subview cannot.** The view
-/// iced renders into owns its layer, and a layer's own content is drawn
-/// beneath its sublayers - so an effect view added underneath the renderer
-/// would come out on top of the text. The one place that is genuinely behind
-/// it is the window's content view, so the effect view takes that role and
-/// the renderer's view becomes its only child. AppKit sizes the effect view
-/// on the way in - `-[NSWindow setContentView:]` fits the incoming view to
-/// the content area - and the renderer's view is then given those same
-/// bounds, so the swap needs no geometry of its own.
+/// **It is a private symbol, and the only one JumpPad uses.** Apple has never
+/// declared it in a public header, and the public route - an
+/// `NSVisualEffectView` behind the content - is fixed at the system's own
+/// blur with no knob on it at all. So every app that offers a blur *amount*
+/// on macOS reaches for this one; kitty's `background_blur`, the setting this
+/// one matches, is the same call. Looked up at runtime rather than linked,
+/// because a private symbol that disappears should cost this feature and not
+/// the app's ability to start: a macOS without it says so once, and draws an
+/// unfrosted window.
 ///
-/// The renderer's view is put back on top when the frosting comes off, so
-/// the two directions leave the same hierarchy a session that never asked
-/// for blur has.
-///
-/// `NSVisualEffectMaterial` is deliberately the plainest one AppKit offers.
-/// The theme's own background color is already painted over this at
-/// `background.alpha`, so a material that brought a strong tint of its own
-/// would fight it; `FullScreenUI` brings the blur and little else.
-pub fn set_window_blur(window: &dyn iced::window::Window, blur: bool) {
+/// **The window's background color has to stop being fully clear.** The
+/// window server does not blur behind a pixel whose alpha is zero, and a
+/// decorated window's rounded corners are exactly that - so the corners keep
+/// the sharp desktop while the rest of the window frosts, and the shadow
+/// there reads as a hard edge. winit sets that color to `clearColor` for
+/// every transparent window; a hair of black over it is enough to bring the
+/// corners into the blur, and is invisible at any alpha. Put back when the
+/// blur goes off, so the window is left the way winit had it.
+pub fn set_window_blur(window: &dyn iced::window::Window, radius: u32) {
     let Some(ns_window) = ns_window_of(window, "the window blur") else {
         return;
     };
-    // SAFETY: `ns_window_of` returned a live `NSWindow`, every selector below
-    // is a plain AppKit one, and iced runs window actions on the main thread,
-    // which is where AppKit requires them. Each view this takes hold of is
-    // owned by a `Retained` for exactly as long as it is out of the view
-    // hierarchy - `setContentView:` is the moment the window lets go of the
-    // outgoing one.
-    unsafe {
-        let content: *mut AnyObject = msg_send![ns_window, contentView];
-        let Some(content) = Retained::retain(content) else {
-            log::warn!("jumppad: no content view; leaving the blur alone");
-            return;
+    let Some(blur) = window_server_blur() else {
+        log::warn!(
+            "jumppad: no CGSSetWindowBackgroundBlurRadius on this macOS; \
+             leaving [themes] background.blur unhonored"
+        );
+        return;
+    };
+    let radius = radius.min(MAX_BLUR_RADIUS);
+
+    // SAFETY: `ns_window_of` returned a live `NSWindow`, the selectors are
+    // plain AppKit ones, and iced runs window actions on the main thread,
+    // where AppKit and the window server's per-thread connection both want
+    // to be called. `-windowNumber` is what identifies this window to the
+    // window server, which is the id `blur.set_radius` is asking about.
+    let result = unsafe {
+        let color: *mut AnyObject = match radius {
+            0 => msg_send![class!(NSColor), clearColor],
+            _ => msg_send![
+                class!(NSColor),
+                colorWithWhite: 0.0f64,
+                alpha: CORNER_INK,
+            ],
         };
-        let frosted: bool =
-            msg_send![&*content, isKindOfClass: class!(NSVisualEffectView)];
+        let _: () = msg_send![ns_window, setBackgroundColor: color];
 
-        match (blur, frosted) {
-            (true, false) => {
-                let effect: Retained<AnyObject> =
-                    msg_send![class!(NSVisualEffectView), new];
-                let _: () =
-                    msg_send![&*effect, setBlendingMode: BLURS_WHAT_IS_BEHIND];
-                let _: () = msg_send![&*effect, setMaterial: PLAINEST_MATERIAL];
-                let _: () = msg_send![&*effect, setState: ALWAYS_BLURRING];
-                let _: () = msg_send![ns_window, setContentView: &*effect];
+        let number: isize = msg_send![ns_window, windowNumber];
 
-                let bounds: CGRect = msg_send![&*effect, bounds];
-                let _: () = msg_send![&*content, setFrame: bounds];
-                let _: () = msg_send![
-                    &*content,
-                    setAutoresizingMask: FILLS_ITS_PARENT
-                ];
-                let _: () = msg_send![&*effect, addSubview: &*content];
-                // Leaving the view hierarchy resigned it, and every keystroke
-                // the editor sees arrives through it.
-                let _: bool =
-                    msg_send![ns_window, makeFirstResponder: &*content];
-            }
-            (false, true) => {
-                let subviews: *mut AnyObject = msg_send![&*content, subviews];
-                let renderer: *mut AnyObject = msg_send![subviews, firstObject];
-                let Some(renderer) = Retained::retain(renderer) else {
-                    return;
-                };
-                let _: () = msg_send![ns_window, setContentView: &*renderer];
-                let _: bool =
-                    msg_send![ns_window, makeFirstResponder: &*renderer];
-            }
-            // Already where it should be.
-            _ => return,
-        }
+        (blur.set_radius)((blur.connection)(), number, radius as i32)
+    };
+
+    if result == 0 {
+        log::debug!("jumppad: window blur radius set to {radius}");
+    } else {
+        log::warn!(
+            "jumppad: the window server refused a blur radius of {radius} ({result})"
+        );
     }
-    log::debug!(
-        "jumppad: window blur turned {}",
-        if blur { "on" } else { "off" }
-    );
 }
 
 /// Pins the window's light/dark appearance to `pinned`, or leaves it to
@@ -257,65 +237,71 @@ unsafe fn ns_string(text: &CStr) -> *mut AnyObject {
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
 }
 
-/// `NSVisualEffectMaterialFullScreenUI` - see `set_window_blur` for why this
-/// one and not a tinted material.
-const PLAINEST_MATERIAL: isize = 15;
+/// The blur radius past which the window server is asked for nothing more.
+/// Not a hard limit of its own - it is where the cost starts outrunning any
+/// visible difference, which is the same ceiling kitty documents for the
+/// setting this one matches.
+const MAX_BLUR_RADIUS: u32 = 64;
 
-/// `NSVisualEffectBlendingModeBehindWindow`: blur the desktop the window sits
-/// over, rather than whatever this app drew under the view.
-const BLURS_WHAT_IS_BEHIND: isize = 0;
+/// The alpha of the black laid under a frosted window, to keep its corners
+/// from being pixels the window server skips - see `set_window_blur`. Small
+/// enough that it changes no color the app draws over it.
+const CORNER_INK: f64 = 0.001;
 
-/// `NSVisualEffectStateActive`, rather than the default that follows the
-/// window's active state - an unfocused window losing its frosting would read
-/// as the setting having turned itself off.
-const ALWAYS_BLURRING: isize = 1;
+/// `CGSDefaultConnectionForThread` - the calling thread's handle to the
+/// window server.
+type WindowServerConnection = unsafe extern "C" fn() -> *mut c_void;
 
-/// `NSViewWidthSizable | NSViewHeightSizable`, so the renderer's view keeps
-/// filling the effect view it now sits inside as the window is resized.
-const FILLS_ITS_PARENT: usize = 2 | 16;
+/// `CGSSetWindowBackgroundBlurRadius(connection, window_number, radius)`,
+/// returning a `CGError` that is zero on success.
+type SetBlurRadius = unsafe extern "C" fn(*mut c_void, isize, i32) -> i32;
 
-/// AppKit's geometry structs, hand-rolled rather than taken from
-/// `objc2-foundation`: `-[NSView setFrame:]` is the only place the app needs
-/// one, and this crate's whole Objective-C surface is a handful of selectors
-/// reached through `objc2` alone (see `Cargo.toml`).
-///
-/// The names in the `Encoding`s are load-bearing, not documentation: a debug
-/// build checks every message send's types against the method's own, and
-/// checks the struct names along with them.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGPoint {
-    x: f64,
-    y: f64,
+/// The two window-server entry points a blur radius needs, looked up once.
+struct WindowServerBlur {
+    /// Called per use rather than stored, since it answers per thread and
+    /// this crate should not be the one assuming which thread that is.
+    connection: WindowServerConnection,
+    set_radius: SetBlurRadius,
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGSize {
-    width: f64,
-    height: f64,
+/// Both symbols, or `None` if either has gone - they are only useful
+/// together, and looking them up costs a `dlsym` apiece the first time.
+fn window_server_blur() -> Option<&'static WindowServerBlur> {
+    static FOUND: OnceLock<Option<WindowServerBlur>> = OnceLock::new();
+
+    FOUND
+        .get_or_init(|| {
+            let connection = symbol("CGSDefaultConnectionForThread")?;
+            let set_radius = symbol("CGSSetWindowBackgroundBlurRadius")?;
+
+            // SAFETY: each pointer came back under the name of the function
+            // it is being read as, and each signature is the one Apple's own
+            // callers use. A name this process has no definition for came
+            // back `None` above rather than reaching here.
+            unsafe {
+                Some(WindowServerBlur {
+                    connection: std::mem::transmute::<
+                        *mut c_void,
+                        WindowServerConnection,
+                    >(connection),
+                    set_radius: std::mem::transmute::<
+                        *mut c_void,
+                        SetBlurRadius,
+                    >(set_radius),
+                })
+            }
+        })
+        .as_ref()
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct CGRect {
-    origin: CGPoint,
-    size: CGSize,
-}
+/// One symbol from whatever this process has already loaded, by name. A name
+/// nothing loaded defines is `None` - including one this app got wrong, since
+/// `dlsym` is not told what it is looking for beyond the string.
+fn symbol(name: &str) -> Option<*mut c_void> {
+    let name = CString::new(name).ok()?;
+    // SAFETY: `RTLD_DEFAULT` is dlsym's own "search the loaded images"
+    // handle, and `name` outlives the call.
+    let found = unsafe { libc::dlsym(libc::RTLD_DEFAULT, name.as_ptr()) };
 
-// SAFETY: each is `#[repr(C)]` over the same fields, in the same order, as
-// the AppKit struct it names.
-unsafe impl Encode for CGPoint {
-    const ENCODING: Encoding =
-        Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
-}
-
-unsafe impl Encode for CGSize {
-    const ENCODING: Encoding =
-        Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
-}
-
-unsafe impl Encode for CGRect {
-    const ENCODING: Encoding =
-        Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
+    (!found.is_null()).then_some(found)
 }

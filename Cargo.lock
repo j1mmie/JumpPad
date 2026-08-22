@@ -2148,6 +2148,7 @@ dependencies = [
  "jumppad_icons",
  "jumppad_keybinds",
  "jumppad_textarea",
+ "libc",
  "log",
  "notify",
  "objc2 0.6.4",
