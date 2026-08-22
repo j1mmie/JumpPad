@@ -47,12 +47,12 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 /// survives the window losing focus:
 ///
 /// - **`DWMSBT_TRANSIENTWINDOW`**, the documented Windows 11 system backdrop,
-///   which is what `"acrylic"` asks for. DWM draws it behind the client area
+///   which is what `"acrylic10` asks for. DWM draws it behind the client area
 ///   and stops drawing it while the window is not focused, which is DWM's own
 ///   policy for a *transient* material and has no override: the knob that
 ///   exists, `SystemBackdropConfiguration.IsInputActive`, belongs to the
 ///   Windows App SDK's backdrop controllers, not to this attribute.
-/// - **`ACCENT_ENABLE_ACRYLICBLURBEHIND`**, what `"acrylic_always"` asks for,
+/// - **`ACCENT_ENABLE_ACRYLICBLURBEHIND`**, what `"acrylic11"` asks for,
 ///   through the undocumented `SetWindowCompositionAttribute`. Its
 ///   `ACCENT_POLICY` has no notion of focus at all, so DWM applies it whether
 ///   or not the window is active - which is the whole reason the name exists.
@@ -67,7 +67,7 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 /// something else is doing the frosting.
 ///
 /// **The two do not stack, and clearing one clears the other.** A live
-/// reload from `"acrylic_always"` to `"acrylic"` came out looking like
+/// reload from `"acrylic11"` to `"acrylic10"` came out looking like
 /// `"none"`, while going by way of `"none"` in between worked - the
 /// `ACCENT_DISABLED` that ends the accent acrylic resets the window's
 /// composition and takes the `DWMSBT_TRANSIENTWINDOW` set moments before it
@@ -86,11 +86,11 @@ pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: Blur) {
     // Every arm is spelled out rather than falling through a `_`, so a new
     // `Blur` has to answer this question rather than inherit an answer.
     match blur {
-        Blur::AcrylicAlways => {
+        Blur::Acrylic11 => {
             set_backdrop_type(hwnd, DWMSBT_NONE);
             set_accent_acrylic(hwnd, true);
         }
-        Blur::Acrylic => {
+        Blur::Acrylic10 => {
             set_accent_acrylic(hwnd, false);
             set_backdrop_type(hwnd, DWMSBT_TRANSIENTWINDOW);
         }
@@ -132,7 +132,7 @@ fn set_backdrop_type(hwnd: HWND, backdrop: DWM_SYSTEMBACKDROP_TYPE) {
 /// Turns the accent-policy acrylic on or off, the undocumented half.
 ///
 /// Nothing is asked of `SetWindowCompositionAttribute` until a theme has
-/// actually asked for `"acrylic_always"`: a session that never names it
+/// actually asked for `"acrylic11"`: a session that never names it
 /// never reaches for the undocumented API at all, and only one that has
 /// needs the call that clears it again.
 fn set_accent_acrylic(hwnd: HWND, frosted: bool) {
@@ -145,7 +145,7 @@ fn set_accent_acrylic(hwnd: HWND, frosted: bool) {
         if frosted {
             log::warn!(
                 "jumppad: no SetWindowCompositionAttribute on this Windows; \
-                 leaving [themes] background.blur = \"acrylic_always\" unhonored"
+                 leaving [themes] background.blur = \"acrylic11\" unhonored"
             );
         }
         return;

@@ -4656,13 +4656,13 @@ mod tests {
         let mut app = test_app(1);
 
         let _ = app
-            .apply_config(config_with_theme(r#"background.blur = "acrylic""#));
-        assert_eq!(app.background_blur, Blur::Acrylic);
+            .apply_config(config_with_theme(r#"background.blur = "acrylic10""#));
+        assert_eq!(app.background_blur, Blur::Acrylic10);
 
         let _ = app.apply_config(config_with_theme(
-            r#"background.blur = "acrylic_always""#,
+            r#"background.blur = "acrylic11""#,
         ));
-        assert_eq!(app.background_blur, Blur::AcrylicAlways);
+        assert_eq!(app.background_blur, Blur::Acrylic11);
     }
 
     /// Same blur either side of it, so only the acrylic Windows is asked
@@ -4673,14 +4673,14 @@ mod tests {
         app.window = Some(iced::window::Id::unique());
 
         let _ = app.apply_config(config_with_theme(
-            "background.alpha = 0.5\nbackground.blur = \"acrylic\"",
+            "background.alpha = 0.5\nbackground.blur = \"acrylic10\"",
         ));
-        assert_eq!(app.background_blur, Blur::Acrylic);
+        assert_eq!(app.background_blur, Blur::Acrylic10);
 
         let swapped = app.apply_config(config_with_theme(
-            "background.alpha = 0.5\nbackground.blur = \"acrylic_always\"",
+            "background.alpha = 0.5\nbackground.blur = \"acrylic11\"",
         ));
-        assert_eq!(app.background_blur, Blur::AcrylicAlways);
+        assert_eq!(app.background_blur, Blur::Acrylic11);
         if cfg!(target_os = "windows") {
             assert_ne!(swapped.units(), 0, "the window was never told");
         }

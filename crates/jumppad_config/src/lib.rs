@@ -472,22 +472,22 @@ pub enum Blur {
     None,
     /// `background.blur = 24`, the blur radius. **macOS only.**
     Radius(u32),
-    /// `background.blur = "acrylic"`. **Windows only**, and its
+    /// `background.blur = "acrylic10"`. **Windows only**, and its
     /// `DWMSBT_TRANSIENTWINDOW` - which DWM stops drawing while the window
     /// is not focused.
-    Acrylic,
-    /// `background.blur = "acrylic_always"`. **Windows only**, and the
+    Acrylic10,
+    /// `background.blur = "acrylic11"`. **Windows only**, and the
     /// acrylic that keeps frosting an unfocused window - a different API
     /// with its own costs, see `windows.rs`.
-    AcrylicAlways,
+    Acrylic11,
 }
 
 /// How the named forms are spelled in the file. The one place those strings
 /// are written, so parsing and the error naming the alternatives cannot
 /// disagree.
 const NONE: &str = "none";
-const ACRYLIC: &str = "acrylic";
-const ACRYLIC_ALWAYS: &str = "acrylic_always";
+const ACRYLIC_10: &str = "acrylic10";
+const ACRYLIC_11: &str = "acrylic11";
 
 impl Blur {
     /// The radius to frost by, and `0` for everything that names no radius -
@@ -509,8 +509,8 @@ impl Serialize for Blur {
         match self {
             Blur::None => serializer.serialize_str(NONE),
             Blur::Radius(radius) => serializer.serialize_u32(*radius),
-            Blur::Acrylic => serializer.serialize_str(ACRYLIC),
-            Blur::AcrylicAlways => serializer.serialize_str(ACRYLIC_ALWAYS),
+            Blur::Acrylic10 => serializer.serialize_str(ACRYLIC_10),
+            Blur::Acrylic11 => serializer.serialize_str(ACRYLIC_11),
         }
     }
 }
@@ -534,8 +534,8 @@ impl<'de> Deserialize<'de> for Blur {
             ) -> std::fmt::Result {
                 write!(
                     formatter,
-                    "a blur radius, or {NONE:?}, {ACRYLIC:?} or \
-                     {ACRYLIC_ALWAYS:?}"
+                    "a blur radius, or {NONE:?}, {ACRYLIC_10:?} or \
+                     {ACRYLIC_11:?}"
                 )
             }
 
@@ -573,11 +573,11 @@ impl<'de> Deserialize<'de> for Blur {
             ) -> Result<Blur, E> {
                 match name {
                     NONE => Ok(Blur::None),
-                    ACRYLIC => Ok(Blur::Acrylic),
-                    ACRYLIC_ALWAYS => Ok(Blur::AcrylicAlways),
+                    ACRYLIC_10 => Ok(Blur::Acrylic10),
+                    ACRYLIC_11 => Ok(Blur::Acrylic11),
                     _ => Err(E::unknown_variant(
                         name,
-                        &[NONE, ACRYLIC, ACRYLIC_ALWAYS],
+                        &[NONE, ACRYLIC_10, ACRYLIC_11],
                     )),
                 }
             }
@@ -1459,10 +1459,10 @@ mod tests {
 
     #[test]
     fn each_acrylic_name_is_its_own_answer() {
-        assert_eq!(blur_of(r#"background.blur = "acrylic""#), Blur::Acrylic);
+        assert_eq!(blur_of(r#"background.blur = "acrylic10""#), Blur::Acrylic10);
         assert_eq!(
-            blur_of(r#"background.blur = "acrylic_always""#),
-            Blur::AcrylicAlways
+            blur_of(r#"background.blur = "acrylic11""#),
+            Blur::Acrylic11
         );
     }
 
@@ -1482,7 +1482,7 @@ mod tests {
             r#"
             [themes.base]
             background.alpha = 0.8
-            background.blur = "acrylic_always"
+            background.blur = "acrylic11"
 
             [themes.dark]
 
@@ -1493,7 +1493,7 @@ mod tests {
 
         assert_eq!(
             config.theme_for(Appearance::Dark).background_blur,
-            Blur::AcrylicAlways
+            Blur::Acrylic11
         );
         assert_eq!(
             config.theme_for(Appearance::Light).background_blur,
@@ -1518,13 +1518,13 @@ mod tests {
     fn an_unknown_blur_name_lists_the_ones_there_are() {
         let err = toml::from_str::<Config>(
             r#"[themes.dark]
-            background.blur = "arcylic""#,
+            background.blur = "arcylic10""#,
         )
         .unwrap_err()
         .to_string();
 
-        assert!(err.contains("arcylic"), "unhelpful error: {err}");
-        assert!(err.contains("acrylic_always"), "unhelpful error: {err}");
+        assert!(err.contains("arcylic10"), "unhelpful error: {err}");
+        assert!(err.contains("acrylic11"), "unhelpful error: {err}");
         assert!(err.contains("none"), "unhelpful error: {err}");
     }
 
@@ -1533,7 +1533,7 @@ mod tests {
     #[test]
     fn each_blur_form_round_trips() {
         for written in
-            ["24", r#""none""#, r#""acrylic""#, r#""acrylic_always""#]
+            ["24", r#""none""#, r#""acrylic10""#, r#""acrylic11""#]
         {
             let config =
                 config(&format!("[themes.dark]\nbackground.blur = {written}"));

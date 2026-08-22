@@ -25,10 +25,10 @@ foreground.alpha = 1.0
 #                      reasonable, higher ones get slow before they get any
 #                      blurrier. Windows has no radius, and reads a number
 #                      as "none".
-#   "acrylic"          Windows only: its standard acrylic. Windows stops
+#   "acrylic10"        Windows only: its standard acrylic. Windows stops
 #                      drawing it while the window is not focused - that is
 #                      the OS's own rule for this material, not a setting.
-#   "acrylic_always"   Windows only: the acrylic that keeps frosting an
+#   "acrylic11"        Windows only: the acrylic that keeps frosting an
 #                      unfocused window. Through an undocumented API, so
 #                      expect lag while dragging or resizing the window, and
 #                      the frost to drop out mid-maximize. Nothing reaches

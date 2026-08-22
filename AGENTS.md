@@ -1690,8 +1690,8 @@ before anyone "simplifies" it into one form:
 | --- | --- | --- |
 | `"none"`, or `0`, or absent | no blur | `DWMSBT_NONE` |
 | `24` | radius 24 | **no blur** |
-| `"acrylic"` | **no blur** | `DWMSBT_TRANSIENTWINDOW` |
-| `"acrylic_always"` | **no blur** | accent-policy acrylic |
+| `"acrylic10"` | **no blur** | `DWMSBT_TRANSIENTWINDOW` |
+| `"acrylic11"` | **no blur** | accent-policy acrylic |
 
 **Each platform reads only the forms it can act on, and everything else is
 `Blur::None`.** A radius on Windows is not rounded to "some acrylic", and an
@@ -1725,7 +1725,7 @@ backdrop controllers (`DesktopAcrylicController`), which would mean a
 WinAppSDK runtime dependency and a composition target fighting how iced
 presents.
 
-`"acrylic_always"` reaches for `ACCENT_ENABLE_ACRYLICBLURBEHIND` through the
+`"acrylic11"` reaches for `ACCENT_ENABLE_ACRYLICBLURBEHIND` through the
 undocumented `SetWindowCompositionAttribute` instead. Its `ACCENT_POLICY` has
 no notion of focus at all - four fields, none about activation - so DWM
 applies it whether or not the window is active. **That persistence is
@@ -1738,7 +1738,7 @@ Its costs are why it is opt-in rather than the default: the API is
 undocumented and could go, it is reported to lag while the window is dragged
 or resized, and the blur drops out mid-maximize until the window has finished
 maximizing. `set_accent_acrylic` never calls it at all until a theme has
-actually named `"acrylic_always"` - a session that doesn't want it never
+actually named `"acrylic11"` - a session that doesn't want it never
 touches the undocumented function, and only one that has ever applied it
 makes the call that clears it again (`EVER_APPLIED`).
 
@@ -1747,9 +1747,9 @@ it is what stops DWM drawing a Mica backdrop nobody asked for (below), and
 that has to hold whichever thing is doing the frosting.
 
 **Gotcha - the two do not stack, and clearing one clears the other.** A live
-reload from `"acrylic_always"` to `"acrylic"` came out looking like `"none"`,
-while `"acrylic_always"` → `"none"` → `"acrylic"` worked, and so did every
-transition *into* `"acrylic_always"`. That asymmetry is the diagnosis:
+reload from `"acrylic11"` to `"acrylic10"` came out looking like `"none"`,
+while `"acrylic11"` → `"none"` → `"acrylic10"` worked, and so did every
+transition *into* `"acrylic11"`. That asymmetry is the diagnosis:
 `ACCENT_DISABLED` resets the window's composition and takes a
 `DWMSBT_TRANSIENTWINDOW` set moments earlier along with it. Going by way of
 `"none"` worked only because `set_accent_acrylic` skips the call entirely
