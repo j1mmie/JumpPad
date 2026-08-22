@@ -1067,11 +1067,33 @@ as the going workaround (which is exactly why `decorations = false` appears
 to fix transparency here).
 
 **The fix** (`reset_redirection_surface` in `crates/jumppad/src/windows.rs`):
-fill the client area with the black brush that should have been the class
+fill the surface with the black brush that should have been the class
 background, then re-issue `DwmEnableBlurBehindWindow`. No size change, so no
-visible kick. Armed on `WindowReady` and fired `SURFACE_RESET_FRAMES`
-presented frames later, for the same reason the macOS shadow refresh waits -
-doing it before a real frame has presented is what fails today.
+visible kick. Armed on `WindowReady` **and on every resize**, and fired
+`SURFACE_RESET_FRAMES` presented frames later, for the same reason the macOS
+shadow refresh waits - doing it before a real frame has presented is what
+fails today.
+
+**Gotcha - it has to cover the frame, and it has to run again after a
+resize.** Both halves were wrong at first, and an acrylic window is what
+showed it: enlarging any edge left a lighter strip along that edge, persistent
+across moves and minimize, and cleared only by resizing past it and back.
+The strips measured exactly the caption height at the top and the resize
+border on the other three - which is the whole diagnosis. Those are the
+*non-client* regions, and a fill through `GetDC` plus `GetClientRect` covers
+the client area and stops, so the frame's share of the surface kept whatever
+the reallocation left in it. `GetWindowDC` plus `GetWindowRect` covers the
+frame as well; zeroing it is right rather than destructive, since transparent
+is what lets DWM's own frame show through and that is all that region should
+ever hold. A window DC's origin is the window's top-left, so the rect to fill
+is the window's *size* at the origin, not where `GetWindowRect` puts it on
+screen.
+
+The other half: a resize is what reallocates the surface, so the one-shot at
+`WindowReady` could never have covered it. `Message::WindowResized` arms it
+too now. The "resize past it and back clears it" report is the same evidence
+as the original bug - a reallocation the app didn't initialise - just at a
+different moment.
 
 `tiny-skia` never needed this: it presents by blitting through the
 redirection surface every frame, so it initialises it as a side effect of

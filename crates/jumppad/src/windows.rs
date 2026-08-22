@@ -15,13 +15,13 @@ use windows_sys::Win32::Graphics::Dwm::{
     DwmEnableBlurBehindWindow, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, CreateRectRgn, DeleteObject, FillRect, GetDC, GetStockObject,
-    ReleaseDC,
+    BLACK_BRUSH, CreateRectRgn, DeleteObject, FillRect, GetStockObject,
+    GetWindowDC, ReleaseDC,
 };
 use windows_sys::Win32::System::LibraryLoader::{
     GetModuleHandleA, GetProcAddress,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::GetClientRect;
+use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 
 /// Pulls the `HWND` out of an iced window, or `None` if this isn't a Win32
 /// window (or the handle has already gone away).
@@ -194,9 +194,22 @@ fn set_accent_acrylic(hwnd: HWND, frosted: bool) {
 /// opaque (typically white) window. Resizing reallocates it, which is why
 /// dragging the window bigger reveals correctly translucent bands exactly
 /// where the new area landed - and why the old "resize kick" hack worked.
-/// This does the same job without touching the window's size: fill the client
-/// area with the black brush that should have been the class background, then
-/// re-issue the blur-behind that marks the alpha as meaningful.
+/// This does the same job without touching the window's size: fill the
+/// surface with the black brush that should have been the class background,
+/// then re-issue the blur-behind that marks the alpha as meaningful.
+///
+/// **The whole window, not the client area - and after every resize, not just
+/// once.** Both of those were wrong at first, and an acrylic window showed it:
+/// enlarging any edge left a lighter strip along that edge, exactly as tall
+/// as the caption at the top and as wide as the resize border on the other
+/// three. Those are the non-client regions, which is the tell - a fill
+/// through `GetDC` and `GetClientRect` covers the client area and stops,
+/// leaving the frame's share of the surface holding whatever a reallocation
+/// left there. `GetWindowDC` and `GetWindowRect` cover the frame too, and
+/// zeroing it is right rather than destructive: transparent is what lets
+/// DWM's own frame show through, which is all that region should ever be.
+/// The reallocation is a resize, so `arm_surface_reset` fires on every one
+/// (see `app.rs`) rather than only at `WindowReady`.
 ///
 /// Only `jumppad-gpu` needs it. `tiny-skia` presents by blitting through this
 /// very surface every frame, so it initialises it as a side effect of drawing.
@@ -206,19 +219,30 @@ pub fn reset_redirection_surface(window: &dyn iced::window::Window) {
     };
 
     // SAFETY: the handle guarantees a live `HWND`. Each GDI object below is
-    // released on every path, and `GetClientRect` fully initialises `rect`
+    // released on every path, and `GetWindowRect` fully initialises `rect`
     // before it is read (checked via its `BOOL` return).
     unsafe {
         let mut rect: RECT = std::mem::zeroed();
-        if GetClientRect(hwnd, &mut rect) != 0 {
+        if GetWindowRect(hwnd, &mut rect) != 0 {
             // `HDC` is a bare handle in `windows-sys` 0.52, so a failed
-            // `GetDC` comes back as 0 rather than a null pointer.
-            let hdc = GetDC(hwnd);
+            // `GetWindowDC` comes back as 0 rather than a null pointer.
+            let hdc = GetWindowDC(hwnd);
             if hdc != 0 {
+                // A window DC's origin is the window's own top-left, not the
+                // screen's, so the rect it wants is the window's size at the
+                // origin rather than where `GetWindowRect` puts it.
+                let window = RECT {
+                    left: 0,
+                    top: 0,
+                    right: rect.right - rect.left,
+                    bottom: rect.bottom - rect.top,
+                };
                 // Black is what makes this work, not an arbitrary colour:
                 // GDI writes 0x00000000, so the surface's alpha lands at 0
-                // and the desktop shows through at full strength.
-                FillRect(hdc, &rect, GetStockObject(BLACK_BRUSH) as _);
+                // and what is behind shows through at full strength - the
+                // desktop over the client area, and DWM's own frame over
+                // the rest.
+                FillRect(hdc, &window, GetStockObject(BLACK_BRUSH) as _);
                 ReleaseDC(hwnd, hdc);
             }
         }

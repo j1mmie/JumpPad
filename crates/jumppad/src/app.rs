@@ -2080,6 +2080,9 @@ impl JumpPadApp {
             Message::AnimationTick => self.advance_animation(),
             Message::WindowResized => {
                 self.arm_shadow_refresh();
+                // A resize reallocates the redirection surface, and what
+                // lands in the new one is not zeroed - see `windows.rs`.
+                self.arm_surface_reset();
                 Task::none()
             }
             Message::ShadowRefreshFrame => {
@@ -5099,6 +5102,27 @@ mod tests {
         }
         if cfg!(target_os = "macos") {
             assert_ne!(app.shadow_refresh_frames, 0);
+        }
+    }
+
+    /// A resize reallocates the redirection surface, and the replacement is
+    /// not zeroed - so the reset that runs once at `WindowReady` has to run
+    /// again on every resize, or the newly revealed edges keep whatever was
+    /// in that memory (see `windows.rs`).
+    #[test]
+    fn a_resize_re_arms_the_redirection_surface_reset() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        let _ = app.apply_config(config_with_theme("background.alpha = 0.5"));
+        app.surface_reset_frames = 0;
+
+        let _ = app.update(Message::WindowResized);
+
+        if cfg!(target_os = "windows") {
+            assert_ne!(
+                app.surface_reset_frames, 0,
+                "the surface was left holding whatever the resize gave it"
+            );
         }
     }
 
