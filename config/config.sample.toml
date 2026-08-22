@@ -18,10 +18,25 @@ palette = "Ferra"
 background.alpha = 0.925
 foreground.alpha = 1.0
 # Frosts what shows through the window instead of leaving the desktop sharp.
-# `0` is off. On macOS the number is the blur radius - values up to 64 are
-# reasonable, higher ones get slow before they get any blurrier. Windows has
-# only the one Acrylic material and no radius at all, so it reads any positive
-# value the same way.
+# `0` is off. Written as a number or as one of two names, because the two
+# platforms offer different choices and neither offers the other's:
+#
+#   0                  no blur
+#   24                 macOS: the blur radius. Values up to 64 are
+#                      reasonable, higher ones get slow before they get any
+#                      blurrier. Windows has no radius, and reads any
+#                      positive number as "acrylic" below.
+#   "acrylic"          Windows' standard acrylic. Windows stops drawing it
+#                      while the window is not focused - that is the OS's
+#                      own rule for this material, not a setting.
+#   "acrylic_always"   The acrylic that keeps frosting an unfocused window.
+#                      Windows only, through an undocumented API: expect
+#                      lag while dragging or resizing the window, and the
+#                      frost to drop out mid-maximize. Nothing reaches for
+#                      that API unless a theme names this.
+#
+# Both names mean a plain blur elsewhere - macOS never drops one on focus
+# loss to begin with.
 #
 # There is nothing to see at `background.alpha = 1.0`, where no desktop shows
 # through to frost, and the alpha is what varies the strength on both: the

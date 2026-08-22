@@ -294,7 +294,10 @@ impl ThemeConfig {
                 .clone()
                 .unwrap_or_else(|| fallback_palette.to_string()),
             background_alpha: self.background.alpha.unwrap_or(DEFAULT_ALPHA),
-            background_blur: self.background.blur.unwrap_or(DEFAULT_BLUR),
+            background_blur: self
+                .background
+                .blur
+                .map_or(DEFAULT_BLUR, Blur::resolved),
             foreground_alpha: self.foreground.alpha.unwrap_or(DEFAULT_ALPHA),
             editor_font: self.editor.font.resolved(),
             ui_font: self.ui.font.resolved(),
@@ -310,7 +313,7 @@ impl ThemeConfig {
 pub struct ResolvedTheme {
     pub palette: String,
     pub background_alpha: f32,
-    pub background_blur: u32,
+    pub background_blur: ResolvedBlur,
     pub foreground_alpha: f32,
     pub editor_font: ResolvedFont,
     pub ui_font: ResolvedFont,
@@ -446,21 +449,165 @@ impl Default for WindowConfig {
 pub struct BackgroundConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
-    /// How much the desktop showing through is frosted. `0` leaves it
-    /// sharp; anything above that asks for a blur.
-    ///
-    /// A number rather than a flag because macOS takes it as a radius. Only
-    /// one platform has that knob, though - Windows reads any positive
-    /// value as the one Acrylic material it offers - so the amount is a
-    /// request, the same as the blur itself is. The OS's compositor does
-    /// all of it; see `windows.rs`/`macos.rs` for what each can deliver.
-    ///
-    /// Nothing to see at `alpha = 1.0`, where there is no desktop showing
-    /// through to frost. Unnamed takes the base theme's, and failing that
-    /// [`DEFAULT_BLUR`]. Capped where applied, not here, so this crate
-    /// keeps holding no opinion the platform owns.
+    /// How much the desktop showing through is frosted, or which of
+    /// Windows' acrylics does the frosting - see [`Blur`]. Nothing to see
+    /// at `alpha = 1.0`, where there is no desktop showing through at all.
+    /// Unnamed takes the base theme's, and failing that [`DEFAULT_BLUR`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub blur: Option<u32>,
+    pub blur: Option<Blur>,
+}
+
+/// What a theme asks the compositor to do with the desktop behind a
+/// translucent window: a number, or one of Windows' acrylics by name.
+///
+/// The two forms exist because the platforms offer different choices, and
+/// neither offers the other's. macOS takes a blur *radius* and has one
+/// blur; Windows has no radius at all but two acrylics that differ in
+/// whether the frost survives the window losing focus. So a number sets the
+/// amount and a name picks the material, and each platform reads whichever
+/// of those it can act on - see [`ResolvedBlur`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Blur {
+    /// `background.blur = 24`. The blur radius, where a radius is what the
+    /// platform takes; `0` is no blur at all. Windows has only its default
+    /// acrylic to offer, so it reads any positive radius as [`Blur::Acrylic`].
+    Radius(u32),
+    /// `background.blur = "acrylic"`. Windows' `DWMSBT_TRANSIENTWINDOW`,
+    /// which DWM stops drawing while the window is not focused. Elsewhere
+    /// it is a blur at [`ACRYLIC_RADIUS`].
+    Acrylic,
+    /// `background.blur = "acrylic_always"`. The acrylic that keeps
+    /// frosting an unfocused window, which on Windows is a different API
+    /// with its own costs - see `windows.rs`. Elsewhere it is
+    /// [`Blur::Acrylic`], since no other platform drops a blur on focus
+    /// loss to begin with.
+    AcrylicAlways,
+}
+
+/// What `"acrylic"` and `"acrylic_always"` are spelled as in the file. The
+/// one place those strings are written, so parsing and the error naming the
+/// alternatives cannot disagree.
+const ACRYLIC: &str = "acrylic";
+const ACRYLIC_ALWAYS: &str = "acrylic_always";
+
+impl Blur {
+    /// This blur with both questions answered, whichever form it was
+    /// written in.
+    fn resolved(self) -> ResolvedBlur {
+        match self {
+            Blur::Radius(radius) => ResolvedBlur {
+                radius,
+                holds_unfocused: false,
+            },
+            Blur::Acrylic => ResolvedBlur {
+                radius: ACRYLIC_RADIUS,
+                holds_unfocused: false,
+            },
+            Blur::AcrylicAlways => ResolvedBlur {
+                radius: ACRYLIC_RADIUS,
+                holds_unfocused: true,
+            },
+        }
+    }
+}
+
+/// A theme's blur, settled into the two things a platform can be told.
+/// Flat, and both fields always answered, for the same reason
+/// [`ResolvedTheme`] is: the shapes a value can be written in belong to the
+/// config file, not to the code reading it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ResolvedBlur {
+    /// How much to frost. `0` is not at all, which is the only part every
+    /// platform can read - only macOS can act on the amount.
+    pub radius: u32,
+    /// Whether the frost has to survive the window losing focus. Only
+    /// Windows has two answers to give; everywhere else its blur holds
+    /// regardless, so this is the request rather than the difference.
+    pub holds_unfocused: bool,
+}
+
+impl ResolvedBlur {
+    /// Whether there is any frosting to ask for.
+    pub fn is_on(&self) -> bool {
+        self.radius > 0
+    }
+}
+
+impl Serialize for Blur {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match self {
+            Blur::Radius(radius) => serializer.serialize_u32(*radius),
+            Blur::Acrylic => serializer.serialize_str(ACRYLIC),
+            Blur::AcrylicAlways => serializer.serialize_str(ACRYLIC_ALWAYS),
+        }
+    }
+}
+
+/// Hand-written rather than `#[serde(untagged)]`, which reports a value that
+/// is neither form as "data did not match any variant" and names nothing the
+/// reader could have written instead. This says which words there are, and
+/// says of a negative radius that it is negative.
+impl<'de> Deserialize<'de> for Blur {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Self, D::Error> {
+        struct BlurVisitor;
+
+        impl serde::de::Visitor<'_> for BlurVisitor {
+            type Value = Blur;
+
+            fn expecting(
+                &self,
+                formatter: &mut std::fmt::Formatter,
+            ) -> std::fmt::Result {
+                write!(
+                    formatter,
+                    "a blur radius, or {ACRYLIC:?} or {ACRYLIC_ALWAYS:?}"
+                )
+            }
+
+            fn visit_u64<E: serde::de::Error>(
+                self,
+                radius: u64,
+            ) -> Result<Blur, E> {
+                u32::try_from(radius).map(Blur::Radius).map_err(|_| {
+                    E::custom(format!("blur radius {radius} is far too large"))
+                })
+            }
+
+            fn visit_i64<E: serde::de::Error>(
+                self,
+                radius: i64,
+            ) -> Result<Blur, E> {
+                u64::try_from(radius)
+                    .map_err(|_| {
+                        E::custom(format!(
+                            "blur radius {radius} is negative; 0 is no blur"
+                        ))
+                    })
+                    .and_then(|radius| self.visit_u64(radius))
+            }
+
+            fn visit_str<E: serde::de::Error>(
+                self,
+                name: &str,
+            ) -> Result<Blur, E> {
+                match name {
+                    ACRYLIC => Ok(Blur::Acrylic),
+                    ACRYLIC_ALWAYS => Ok(Blur::AcrylicAlways),
+                    _ => Err(E::unknown_variant(
+                        name,
+                        &[ACRYLIC, ACRYLIC_ALWAYS],
+                    )),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(BlurVisitor)
+    }
 }
 
 /// The same, for the text drawn on that surface. Independent of it, so a
@@ -637,10 +784,19 @@ pub const DEFAULT_ALPHA: f32 = 1.0;
 
 /// How much the desktop behind a translucent window is frosted when neither
 /// the theme nor the base theme says: not at all, which is what JumpPad
-/// showed before the setting existed. Zero is also the cheaper window - a
+/// showed before the setting existed. No blur is also the cheaper window - a
 /// frosted backdrop is drawn by the compositor on every frame the desktop
 /// moves under it.
-pub const DEFAULT_BLUR: u32 = 0;
+pub const DEFAULT_BLUR: ResolvedBlur = ResolvedBlur {
+    radius: 0,
+    holds_unfocused: false,
+};
+
+/// The radius `"acrylic"` and `"acrylic_always"` come to where a radius is
+/// what gets asked for. The names say nothing about an amount, and the
+/// platform that reads them has no amount to give, so this is a middle of
+/// the useful range rather than anything either name implies.
+pub const ACRYLIC_RADIUS: u32 = 24;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1299,12 +1455,17 @@ mod tests {
         );
     }
 
+    fn blur_of(toml: &str) -> ResolvedBlur {
+        config(&format!("[themes.dark]\n{toml}"))
+            .theme_for(Appearance::Dark)
+            .background_blur
+    }
+
     #[test]
     fn a_theme_with_no_blur_named_leaves_the_desktop_sharp() {
-        let theme = config("[themes.dark]\nbackground.alpha = 0.8")
-            .theme_for(Appearance::Dark);
-        assert_eq!(theme.background_blur, 0);
-        assert_eq!(theme.background_blur, DEFAULT_BLUR);
+        let blur = blur_of("background.alpha = 0.8");
+        assert!(!blur.is_on());
+        assert_eq!(blur, DEFAULT_BLUR);
     }
 
     #[test]
@@ -1318,8 +1479,32 @@ mod tests {
         )
         .theme_for(Appearance::Dark);
 
-        assert_eq!(theme.background_blur, 24);
+        assert_eq!(theme.background_blur.radius, 24);
+        assert!(theme.background_blur.is_on());
         assert_eq!(theme.background_alpha, 0.8);
+    }
+
+    /// A radius says nothing about focus, so it takes the acrylic Windows
+    /// offers by default - the one that stops while the window is not
+    /// focused.
+    #[test]
+    fn a_radius_does_not_ask_for_a_blur_that_outlasts_focus() {
+        assert!(!blur_of("background.blur = 24").holds_unfocused);
+    }
+
+    /// Both names mean a blur everywhere; only one of them means the
+    /// *other* Windows acrylic.
+    #[test]
+    fn the_acrylic_names_differ_only_in_what_they_survive() {
+        let acrylic = blur_of(r#"background.blur = "acrylic""#);
+        let always = blur_of(r#"background.blur = "acrylic_always""#);
+
+        assert_eq!(acrylic.radius, ACRYLIC_RADIUS);
+        assert_eq!(always.radius, ACRYLIC_RADIUS);
+        assert!(acrylic.is_on() && always.is_on());
+
+        assert!(!acrylic.holds_unfocused);
+        assert!(always.holds_unfocused);
     }
 
     /// The same per-leaf inheritance the alpha beside it gets: a shared
@@ -1330,7 +1515,7 @@ mod tests {
             r#"
             [themes.base]
             background.alpha = 0.8
-            background.blur = 24
+            background.blur = "acrylic_always"
 
             [themes.dark]
 
@@ -1339,27 +1524,60 @@ mod tests {
             "#,
         );
 
-        assert_eq!(config.theme_for(Appearance::Dark).background_blur, 24);
-        assert_eq!(config.theme_for(Appearance::Light).background_blur, 0);
+        assert!(
+            config
+                .theme_for(Appearance::Dark)
+                .background_blur
+                .holds_unfocused
+        );
+        assert!(!config.theme_for(Appearance::Light).background_blur.is_on());
     }
 
     /// The amount is carried whole rather than flattened to on/off here -
     /// only the platform knows whether it can do anything with it.
     #[test]
     fn an_unreasonable_blur_is_carried_as_written() {
-        let theme = config("[themes.dark]\nbackground.blur = 4000")
-            .theme_for(Appearance::Dark);
-        assert_eq!(theme.background_blur, 4000);
+        assert_eq!(blur_of("background.blur = 4000").radius, 4000);
     }
 
     /// A negative radius is not a smaller one, and the file says so rather
     /// than rounding it into a setting nobody asked for.
     #[test]
-    fn a_negative_blur_fails_the_file() {
-        assert!(
+    fn a_negative_blur_fails_the_file_and_says_why() {
+        let err =
             toml::from_str::<Config>("[themes.dark]\nbackground.blur = -1")
-                .is_err()
-        );
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("negative"), "unhelpful error: {err}");
+    }
+
+    /// The reason the parse is hand-written: a misspelled name names the
+    /// ones that would have worked.
+    #[test]
+    fn an_unknown_blur_name_lists_the_ones_there_are() {
+        let err = toml::from_str::<Config>(
+            r#"[themes.dark]
+            background.blur = "arcylic""#,
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("arcylic"), "unhelpful error: {err}");
+        assert!(err.contains("acrylic_always"), "unhelpful error: {err}");
+    }
+
+    /// Written back out the way it was written in, so a config file this
+    /// crate rewrites doesn't turn a name into a number.
+    #[test]
+    fn each_blur_form_round_trips() {
+        for written in ["0", "24", r#""acrylic""#, r#""acrylic_always""#] {
+            let config =
+                config(&format!("[themes.dark]\nbackground.blur = {written}"));
+            let round_tripped: Config =
+                toml::from_str(&toml::to_string(&config).unwrap()).unwrap();
+
+            assert_eq!(round_tripped, config, "{written} did not survive");
+        }
     }
 
     /// Blur says nothing about how the window is created - the compositor

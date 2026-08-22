@@ -128,7 +128,7 @@ pub struct JumpPadApp {
     theme: Theme,
     ui_text: UiText,
     background_alpha: f32,
-    background_blur: u32,
+    background_blur: jumppad_config::ResolvedBlur,
     /// Frames left until the macOS window shadow is refreshed - see
     /// `SHADOW_REFRESH_FRAMES`.
     shadow_refresh_frames: u8,
@@ -501,7 +501,7 @@ impl JumpPadApp {
             theme: Theme::Light,
             ui_text: ui_text(&jumppad_config::ResolvedFont::default()),
             background_alpha: 1.0,
-            background_blur: 0,
+            background_blur: jumppad_config::DEFAULT_BLUR,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir,
@@ -1079,24 +1079,24 @@ impl JumpPadApp {
         Task::none()
     }
 
-    /// Frosts the desktop showing through the window by as much as the
-    /// theme's `background.blur` asks, or leaves it sharp at `0`. Each
-    /// platform is asked its own way, so this is where they part company -
-    /// and only macOS has anywhere to put the amount (see `macos.rs`;
-    /// Windows reads any positive radius as its one Acrylic material).
+    /// Frosts the desktop showing through the window the way the theme's
+    /// `background.blur` asks. Each platform is asked its own way, and each
+    /// reads the half of the answer it can act on - Windows picks between
+    /// its two acrylics by `holds_unfocused` and has no radius at all, macOS
+    /// takes the radius and holds through focus loss regardless.
     ///
     /// Only a translucent window is told anything, on either. A solid one
-    /// has no desktop showing through to frost, and on Windows the `0` case
+    /// has no desktop showing through to frost, and on Windows the off case
     /// also overrides a backdrop winit already asked DWM for, which would be
     /// a gratuitous difference from every other app on a window nobody can
     /// see through (see `windows.rs`).
     #[cfg(target_os = "windows")]
     fn apply_window_blur(&self) -> Task<Message> {
-        let radius = self.background_blur;
+        let blur = self.background_blur;
         match self.window {
             Some(id) if self.background_alpha < 1.0 => {
                 iced::window::run(id, move |window| {
-                    crate::windows::set_system_backdrop(window, radius);
+                    crate::windows::set_system_backdrop(window, blur);
                 })
                 .discard()
             }
@@ -1104,10 +1104,12 @@ impl JumpPadApp {
         }
     }
 
-    /// Same gate as above, the window server's own blur behind it.
+    /// Same gate as above, the window server's own blur behind it. Only the
+    /// radius travels: a window-server blur has no focus term to answer
+    /// `holds_unfocused` with, so it already does.
     #[cfg(target_os = "macos")]
     fn apply_window_blur(&self) -> Task<Message> {
-        let radius = self.background_blur;
+        let radius = self.background_blur.radius;
         match self.window {
             Some(id) if self.background_alpha < 1.0 => {
                 iced::window::run(id, move |window| {
@@ -1382,8 +1384,9 @@ impl JumpPadApp {
         self.background_alpha = theme.background_alpha.clamp(0.0, 1.0);
         self.editor_config
             .set_background_alpha(theme.background_alpha);
-        // Capped in `macos.rs`, the one platform with a ceiling, so what is
-        // stored here is what the file said.
+        // Both halves stored whole: the radius is capped in `macos.rs`, the
+        // one platform with a ceiling, and which acrylic to ask Windows for
+        // is `windows.rs`'s to read.
         self.background_blur = theme.background_blur;
         self.editor_config
             .set_foreground_alpha(theme.foreground_alpha);
@@ -3684,7 +3687,7 @@ mod tests {
                 jumppad_config::DEFAULT_FONT_SIZE,
             ),
             background_alpha: 1.0,
-            background_blur: 0,
+            background_blur: jumppad_config::DEFAULT_BLUR,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir: PathBuf::from("/tmp"),
@@ -4561,6 +4564,14 @@ mod tests {
 
     /// A config whose slots both name `theme`, so the same definition can be
     /// read into either one.
+    /// A plain radius blur, the shape most of these tests want.
+    fn blur(radius: u32) -> jumppad_config::ResolvedBlur {
+        jumppad_config::ResolvedBlur {
+            radius,
+            holds_unfocused: false,
+        }
+    }
+
     fn config_with_theme(theme: &str) -> jumppad_config::Config {
         toml::from_str(&format!(
             "[mode]\ntheme.light = \"mine\"\ntheme.dark = \"mine\"\n\n[themes.mine]\n{theme}"
@@ -4636,10 +4647,49 @@ mod tests {
         let mut app = test_app(1);
 
         let _ = app.apply_config(config_with_theme("background.blur = 24"));
-        assert_eq!(app.background_blur, 24);
+        assert_eq!(app.background_blur.radius, 24);
 
         let _ = app.apply_config(config_with_theme("background.blur = 0"));
-        assert_eq!(app.background_blur, 0);
+        assert!(!app.background_blur.is_on());
+    }
+
+    /// The named forms reach the app as the two things a platform can be
+    /// told, so nothing downstream has to know which spelling was used.
+    #[test]
+    fn the_acrylic_names_arrive_as_a_blur_the_platforms_can_read() {
+        let mut app = test_app(1);
+
+        let _ = app
+            .apply_config(config_with_theme(r#"background.blur = "acrylic""#));
+        assert!(app.background_blur.is_on());
+        assert!(!app.background_blur.holds_unfocused);
+
+        let _ = app.apply_config(config_with_theme(
+            r#"background.blur = "acrylic_always""#,
+        ));
+        assert!(app.background_blur.is_on());
+        assert!(app.background_blur.holds_unfocused);
+    }
+
+    /// Same blur either side of it, so only the acrylic Windows is asked
+    /// for moved - and that still has to reach the window.
+    #[test]
+    fn swapping_which_acrylic_still_reaches_the_window() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+
+        let _ = app.apply_config(config_with_theme(
+            "background.alpha = 0.5\nbackground.blur = \"acrylic\"",
+        ));
+        assert!(!app.background_blur.holds_unfocused);
+
+        let swapped = app.apply_config(config_with_theme(
+            "background.alpha = 0.5\nbackground.blur = \"acrylic_always\"",
+        ));
+        assert!(app.background_blur.holds_unfocused);
+        if cfg!(target_os = "windows") {
+            assert_ne!(swapped.units(), 0, "the window was never told");
+        }
     }
 
     /// A radius the platform will not honor whole is still recorded whole -
@@ -4648,7 +4698,7 @@ mod tests {
     fn an_unreasonable_radius_is_recorded_as_written() {
         let mut app = test_app(1);
         let _ = app.apply_config(config_with_theme("background.blur = 4000"));
-        assert_eq!(app.background_blur, 4000);
+        assert_eq!(app.background_blur.radius, 4000);
     }
 
     /// The blur rides with the theme, so an OS light/dark switch carries it
@@ -4671,10 +4721,10 @@ mod tests {
         );
 
         let _ = app.apply_os_appearance(Some(Appearance::Dark));
-        assert_eq!(app.background_blur, 24);
+        assert_eq!(app.background_blur.radius, 24);
 
         let _ = app.apply_os_appearance(Some(Appearance::Light));
-        assert_eq!(app.background_blur, 0);
+        assert!(!app.background_blur.is_on());
     }
 
     /// A solid window has no desktop showing through to frost, and on
@@ -4684,7 +4734,7 @@ mod tests {
     fn a_solid_window_is_told_nothing_about_blur() {
         let mut app = test_app(1);
         app.window = Some(iced::window::Id::unique());
-        app.background_blur = 24;
+        app.background_blur = blur(24);
 
         assert_eq!(app.background_alpha, 1.0);
         assert_eq!(app.apply_window_blur().units(), 0);
@@ -4698,7 +4748,7 @@ mod tests {
 
         if cfg!(any(target_os = "windows", target_os = "macos")) {
             assert_ne!(app.apply_window_blur().units(), 0);
-            app.background_blur = 24;
+            app.background_blur = blur(24);
             assert_ne!(app.apply_window_blur().units(), 0);
         }
     }
@@ -4713,12 +4763,12 @@ mod tests {
         let _ = app.apply_config(config_with_theme(
             "background.alpha = 0.5\nbackground.blur = 12",
         ));
-        assert_eq!(app.background_blur, 12);
+        assert_eq!(app.background_blur.radius, 12);
 
         let widened = app.apply_config(config_with_theme(
             "background.alpha = 0.5\nbackground.blur = 40",
         ));
-        assert_eq!(app.background_blur, 40);
+        assert_eq!(app.background_blur.radius, 40);
         if cfg!(target_os = "windows") {
             assert_ne!(widened.units(), 0, "the window was never told");
         }

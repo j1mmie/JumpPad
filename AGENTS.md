@@ -1105,11 +1105,12 @@ gratuitous difference from every other Windows app. Older Windows returns a
 failure `HRESULT` and changes nothing, which is already the desired
 behaviour there.
 
-That same attribute is now the whole of `background.blur` on Windows - the
+That same attribute now carries `background.blur` on Windows as well - the
 material DWM was drawing uninvited is the material a blur wants - so
 `set_system_backdrop` writes `DWMSBT_TRANSIENTWINDOW` (Acrylic) instead of
-`DWMSBT_NONE` for any positive radius. The radius itself has nowhere to go on
-Windows; see the blur section below for why, and for why not to go looking.
+`DWMSBT_NONE` when a theme asks for the acrylic DWM draws. It stays at
+`DWMSBT_NONE` for the *other* acrylic, which a different API draws; see the
+blur section below, along with why no amount can reach Windows at all.
 
 `tiny-skia` never showed this: softbuffer presents through a GDI blit into
 the window's redirection bitmap rather than a flip-model swapchain
@@ -1654,29 +1655,75 @@ scrollbar) would go jagged to fix a seam the tab bar no longer has.
 ## Blurring what shows through (`background.blur`)
 
 `[themes] background.blur` frosts the desktop a translucent window shows,
-rather than leaving it sharp. It is a **number**, not a flag: `0` is off, and
-above that it is a blur radius. Nothing in this process can reach the
-desktop's pixels, so both implementations ask the OS's compositor and let the
-window's own alpha reveal the result.
+rather than leaving it sharp. Nothing in this process can reach the desktop's
+pixels, so both implementations ask the OS's compositor and let the window's
+own alpha reveal the result.
 
-**Only macOS has anywhere to put the amount.** That asymmetry is the whole
-reason the setting is shaped the way it is, and it is worth knowing before
-anyone "fixes" one half to match the other:
+**It is written as a number or as one of two names, because the platforms
+offer different choices and neither offers the other's.** That asymmetry is
+the whole reason the setting is shaped the way it is, and it is worth knowing
+before anyone "simplifies" it into one form:
+
+| written | macOS | Windows |
+| --- | --- | --- |
+| `0` | no blur | `DWMSBT_NONE` |
+| `24` | radius 24 | as `"acrylic"` |
+| `"acrylic"` | radius `ACRYLIC_RADIUS` | `DWMSBT_TRANSIENTWINDOW` |
+| `"acrylic_always"` | radius `ACRYLIC_RADIUS` | accent-policy acrylic |
+
+`Blur` (the written form) resolves to `ResolvedBlur { radius,
+holds_unfocused }` - the two things a platform can be told - and each platform
+reads the half it can act on. Nothing downstream of `theme_for` knows which
+spelling was used.
 
 - **macOS** (`macos::set_window_blur`): `CGSSetWindowBackgroundBlurRadius`
   takes an integer radius for one window and the window server blurs whatever
   that window sits over. Capped at `MAX_BLUR_RADIUS` (64), which is where the
   cost outruns any visible difference - the same ceiling kitty documents for
-  `background_blur`, the setting this one matches.
-- **Windows** (`windows::set_system_backdrop`): any positive radius means
-  `DWMSBT_TRANSIENTWINDOW` (Acrylic) through `DWMWA_SYSTEMBACKDROP_TYPE`; `0`
-  means `DWMSBT_NONE`. **The number itself goes nowhere, and there is no
-  version of this that takes one.** Acrylic's blur is DWM's, fixed by the
-  Fluent design it comes from. Nothing in `DWMWINDOWATTRIBUTE` carries a
-  radius (the list runs to `DWMWA_LAST = 39` with no such member), and the
-  undocumented `SetWindowCompositionAttribute`/`ACCENT_POLICY` route Windows
-  10 apps used has a tint color and no radius either - so going undocumented
-  there would buy nothing. Don't go looking again.
+  `background_blur`, the setting this one matches. `holds_unfocused` is
+  ignored: a window-server blur has no focus term, so it already holds.
+- **Windows** (`windows::set_system_backdrop`): no radius, two acrylics, and
+  `holds_unfocused` is what picks between them. **There is no version of this
+  that takes an amount.** Acrylic's blur is DWM's, fixed by the Fluent design
+  it comes from; nothing in `DWMWINDOWATTRIBUTE` carries a radius (the list
+  runs to `DWMWA_LAST = 39` with no such member), and the `ACCENT_POLICY`
+  below has a tint color and no radius either. Don't go looking again.
+
+**The two Windows acrylics, and why there are two.** `DWMSBT_TRANSIENTWINDOW`
+is documented, cheap, and needs build 22523+ - but DWM stops drawing it while
+the window is not focused. That is DWM's own policy for a *transient*
+material and it has no override from here: the knob that exists,
+`SystemBackdropConfiguration.IsInputActive`, belongs to the Windows App SDK's
+backdrop controllers (`DesktopAcrylicController`), which would mean a
+WinAppSDK runtime dependency and a composition target fighting how iced
+presents.
+
+`"acrylic_always"` reaches for `ACCENT_ENABLE_ACRYLICBLURBEHIND` through the
+undocumented `SetWindowCompositionAttribute` instead. Its `ACCENT_POLICY` has
+no notion of focus at all - four fields, none about activation - so DWM
+applies it whether or not the window is active. **That persistence is
+reasoned from the API's shape and from where the complaints are (every
+"acrylic dies when inactive" report is UWP/XAML or a WinUI controller, never
+this), not from a hardware test.** If it turns out not to hold, the name is
+the thing that is wrong.
+
+Its costs are why it is opt-in rather than the default: the API is
+undocumented and could go, it is reported to lag while the window is dragged
+or resized, and the blur drops out mid-maximize until the window has finished
+maximizing. `set_accent_acrylic` never calls it at all until a theme has
+actually named `"acrylic_always"` - a session that doesn't want it never
+touches the undocumented function, and only one that has ever applied it
+makes the call that clears it again (`EVER_APPLIED`).
+
+`DWMSBT_NONE` is still set alongside the accent acrylic, not instead of it:
+it is what stops DWM drawing a Mica backdrop nobody asked for (below), and
+that has to hold whichever thing is doing the frosting.
+
+**Windows Terminal's fix for this does not transfer**, in case anyone finds
+that PR (microsoft/terminal#15923) and wonders. Terminal draws its own
+acrylic - a XAML `AcrylicBrush` in its own visual tree - so keeping it on
+when unfocused is just Terminal choosing not to swap the brush, which is what
+that PR adds a setting for. We do not draw ours; DWM does.
 
 `DWMWA_SYSTEMBACKDROP_TYPE` is the same attribute that had to be forced to
 `DWMSBT_NONE` to stop DWM drawing a Mica backdrop nobody asked for (see the
@@ -1757,6 +1804,13 @@ them.** `objc2` verifies every message send's argument and return encodings
 against the method's own when `debug_assertions` are on - so a selector
 returning `BOOL` declared as `()` panics rather than misbehaving quietly.
 Worth knowing before adding a call here.
+
+**Both platforms' undocumented entry points are looked up, never linked** -
+`dlsym` through `RTLD_DEFAULT` on macOS, `GetProcAddress` on a `user32`
+handle Windows already has loaded. Same reason on both: an undocumented
+export that disappears should cost the one theme setting that names it, not
+the app's ability to start. Each is cached in a `OnceLock` and each logs once
+when it cannot be found.
 
 ## Opening files
 
