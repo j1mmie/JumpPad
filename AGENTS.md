@@ -1746,6 +1746,21 @@ makes the call that clears it again (`EVER_APPLIED`).
 it is what stops DWM drawing a Mica backdrop nobody asked for (below), and
 that has to hold whichever thing is doing the frosting.
 
+**Gotcha - the two do not stack, and clearing one clears the other.** A live
+reload from `"acrylic_always"` to `"acrylic"` came out looking like `"none"`,
+while `"acrylic_always"` → `"none"` → `"acrylic"` worked, and so did every
+transition *into* `"acrylic_always"`. That asymmetry is the diagnosis:
+`ACCENT_DISABLED` resets the window's composition and takes a
+`DWMSBT_TRANSIENTWINDOW` set moments earlier along with it. Going by way of
+`"none"` worked only because `set_accent_acrylic` skips the call entirely
+once nothing has applied the policy (`EVER_APPLIED`), so by the second step
+there was no `ACCENT_DISABLED` left to fire.
+
+So **whichever mechanism is coming on is asked for last, and whichever is
+going off is cleared first** - which is what the match in
+`set_system_backdrop` spells out, one arm per `Blur` rather than a `_`, so a
+new variant has to answer the question rather than inherit an answer.
+
 **Windows Terminal's fix for this does not transfer**, in case anyone finds
 that PR (microsoft/terminal#15923) and wonders. Terminal draws its own
 acrylic - a XAML `AcrylicBrush` in its own visual tree - so keeping it on

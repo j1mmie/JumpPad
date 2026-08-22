@@ -65,19 +65,40 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 /// accent-policy acrylic - it is what stops DWM drawing a Mica backdrop
 /// nobody asked for (see AGENTS.md), and that has to hold whether or not
 /// something else is doing the frosting.
+///
+/// **The two do not stack, and clearing one clears the other.** A live
+/// reload from `"acrylic_always"` to `"acrylic"` came out looking like
+/// `"none"`, while going by way of `"none"` in between worked - the
+/// `ACCENT_DISABLED` that ends the accent acrylic resets the window's
+/// composition and takes the `DWMSBT_TRANSIENTWINDOW` set moments before it
+/// along too. Hence the ordering below.
 pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: Blur) {
     let Some(hwnd) = hwnd_of(window, "the system backdrop") else {
         return;
     };
 
-    set_backdrop_type(
-        hwnd,
-        match blur {
-            Blur::Acrylic => DWMSBT_TRANSIENTWINDOW,
-            _ => DWMSBT_NONE,
-        },
-    );
-    set_accent_acrylic(hwnd, blur == Blur::AcrylicAlways);
+    // **The order is load-bearing.** Turning one of the two off takes the
+    // other's material with it - `ACCENT_DISABLED` resets the window's
+    // composition, and a `DWMSBT_TRANSIENTWINDOW` set moments earlier goes
+    // with it. So whichever mechanism is coming *on* is always asked for
+    // last, and whichever is going off is cleared first.
+    //
+    // Every arm is spelled out rather than falling through a `_`, so a new
+    // `Blur` has to answer this question rather than inherit an answer.
+    match blur {
+        Blur::AcrylicAlways => {
+            set_backdrop_type(hwnd, DWMSBT_NONE);
+            set_accent_acrylic(hwnd, true);
+        }
+        Blur::Acrylic => {
+            set_accent_acrylic(hwnd, false);
+            set_backdrop_type(hwnd, DWMSBT_TRANSIENTWINDOW);
+        }
+        Blur::None | Blur::Radius(_) => {
+            set_accent_acrylic(hwnd, false);
+            set_backdrop_type(hwnd, DWMSBT_NONE);
+        }
+    }
 }
 
 /// Writes `DWMWA_SYSTEMBACKDROP_TYPE`, the documented half.
