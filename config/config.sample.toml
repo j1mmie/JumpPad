@@ -18,33 +18,29 @@ palette = "Ferra"
 background.alpha = 0.925
 foreground.alpha = 1.0
 # Frosts what shows through the window instead of leaving the desktop sharp.
-# `0` is off. Written as a number or as one of two names, because the two
-# platforms offer different choices and neither offers the other's:
+# Each platform reads only the forms it can act on; everything else is "none".
 #
-#   0                  no blur
-#   24                 macOS: the blur radius. Values up to 64 are
+#   "none"             no blur. The default, and what 0 also means.
+#   24                 macOS only: the blur radius. Values up to 64 are
 #                      reasonable, higher ones get slow before they get any
-#                      blurrier. Windows has no radius, and reads any
-#                      positive number as "acrylic" below.
-#   "acrylic"          Windows' standard acrylic. Windows stops drawing it
-#                      while the window is not focused - that is the OS's
-#                      own rule for this material, not a setting.
-#   "acrylic_always"   The acrylic that keeps frosting an unfocused window.
-#                      Windows only, through an undocumented API: expect
-#                      lag while dragging or resizing the window, and the
-#                      frost to drop out mid-maximize. Nothing reaches for
-#                      that API unless a theme names this.
-#
-# Both names mean a plain blur elsewhere - macOS never drops one on focus
-# loss to begin with.
+#                      blurrier. Windows has no radius, and reads a number
+#                      as "none".
+#   "acrylic"          Windows only: its standard acrylic. Windows stops
+#                      drawing it while the window is not focused - that is
+#                      the OS's own rule for this material, not a setting.
+#   "acrylic_always"   Windows only: the acrylic that keeps frosting an
+#                      unfocused window. Through an undocumented API, so
+#                      expect lag while dragging or resizing the window, and
+#                      the frost to drop out mid-maximize. Nothing reaches
+#                      for that API unless a theme names this.
 #
 # There is nothing to see at `background.alpha = 1.0`, where no desktop shows
-# through to frost, and the alpha is what varies the strength on both: the
-# theme's background color is painted over the frost, so a lower alpha shows
-# more of it. Expect the blur on `jumppad-gpu` - the software binary reaches
-# the screen by a different path on both platforms, and on macOS that path
-# cannot draw a see-through window in the first place.
-background.blur = 0
+# through to frost, and the alpha is what varies the strength: the theme's
+# background color is painted over the frost, so a lower alpha shows more of
+# it. Expect the blur on `jumppad-gpu` - the software binary reaches the
+# screen by a different path on both platforms, and on macOS that path cannot
+# draw a see-through window in the first place.
+background.blur = "none"
 editor.font.family = "Consolas"
 editor.font.size = 16.0
 ui.font.family = "Comic Sans MS"

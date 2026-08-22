@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use iced::window::raw_window_handle::RawWindowHandle;
-use jumppad_config::ResolvedBlur;
+use jumppad_config::Blur;
 use windows_sys::Win32::Foundation::{BOOL, HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
     DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWM_SYSTEMBACKDROP_TYPE,
@@ -36,51 +36,48 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
     }
 }
 
-/// Frosts the desktop behind a translucent window the way `[themes]
-/// background.blur` asks, by whichever of Windows' two acrylics that names.
+/// Frosts the desktop behind a translucent window with whichever of Windows'
+/// two acrylics `[themes] background.blur` names, or with neither.
 ///
-/// **Windows has no blur radius, so the amount is not what varies here** -
-/// see `ResolvedBlur`. What varies is which acrylic, and the one thing they
-/// disagree about is whether the frost survives the window losing focus.
+/// **Windows has no blur radius, so a radius is not a smaller version of
+/// this - it is nothing at all here.** `Blur::Radius` lands in the same place
+/// as `Blur::None`, because the only honest thing to do with an amount on a
+/// platform that has no amounts is to say so. What Windows does have is two
+/// acrylics, and the one thing they disagree about is whether the frost
+/// survives the window losing focus:
 ///
-/// - **`DWMSBT_TRANSIENTWINDOW`**, the documented Windows 11 system
-///   backdrop, which is what a radius or `"acrylic"` asks for. DWM draws it
-///   behind the client area and stops drawing it while the window is not
-///   focused, which is DWM's own policy for a *transient* material and has
-///   no override: the knob that exists, `SystemBackdropConfiguration.
-///   IsInputActive`, belongs to the Windows App SDK's backdrop controllers,
-///   not to this attribute.
-/// - **`ACCENT_ENABLE_ACRYLICBLURBEHIND`**, what `"acrylic_always"` asks
-///   for, through the undocumented `SetWindowCompositionAttribute`. Its
-///   `ACCENT_POLICY` has no notion of focus at all, so DWM applies it
-///   whether or not the window is active - which is the whole reason the
-///   name exists. Opt-in, and never touched otherwise, because it costs:
-///   the API is undocumented and could go; it is reported to lag while the
-///   window is dragged or resized; and the blur drops out mid-maximize
-///   until the window has finished maximizing.
+/// - **`DWMSBT_TRANSIENTWINDOW`**, the documented Windows 11 system backdrop,
+///   which is what `"acrylic"` asks for. DWM draws it behind the client area
+///   and stops drawing it while the window is not focused, which is DWM's own
+///   policy for a *transient* material and has no override: the knob that
+///   exists, `SystemBackdropConfiguration.IsInputActive`, belongs to the
+///   Windows App SDK's backdrop controllers, not to this attribute.
+/// - **`ACCENT_ENABLE_ACRYLICBLURBEHIND`**, what `"acrylic_always"` asks for,
+///   through the undocumented `SetWindowCompositionAttribute`. Its
+///   `ACCENT_POLICY` has no notion of focus at all, so DWM applies it whether
+///   or not the window is active - which is the whole reason the name exists.
+///   Opt-in, and never touched otherwise, because it costs: the API is
+///   undocumented and could go; it is reported to lag while the window is
+///   dragged or resized; and the blur drops out mid-maximize until the window
+///   has finished maximizing.
 ///
 /// `DWMSBT_NONE` is set for every other case, including alongside the
 /// accent-policy acrylic - it is what stops DWM drawing a Mica backdrop
 /// nobody asked for (see AGENTS.md), and that has to hold whether or not
 /// something else is doing the frosting.
-pub fn set_system_backdrop(
-    window: &dyn iced::window::Window,
-    blur: ResolvedBlur,
-) {
+pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: Blur) {
     let Some(hwnd) = hwnd_of(window, "the system backdrop") else {
         return;
     };
-    let dwm_draws_it = blur.is_on() && !blur.holds_unfocused;
 
     set_backdrop_type(
         hwnd,
-        if dwm_draws_it {
-            DWMSBT_TRANSIENTWINDOW
-        } else {
-            DWMSBT_NONE
+        match blur {
+            Blur::Acrylic => DWMSBT_TRANSIENTWINDOW,
+            _ => DWMSBT_NONE,
         },
     );
-    set_accent_acrylic(hwnd, blur.is_on() && blur.holds_unfocused);
+    set_accent_acrylic(hwnd, blur == Blur::AcrylicAlways);
 }
 
 /// Writes `DWMWA_SYSTEMBACKDROP_TYPE`, the documented half.

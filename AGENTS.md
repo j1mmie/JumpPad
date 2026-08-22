@@ -1659,35 +1659,40 @@ rather than leaving it sharp. Nothing in this process can reach the desktop's
 pixels, so both implementations ask the OS's compositor and let the window's
 own alpha reveal the result.
 
-**It is written as a number or as one of two names, because the platforms
+**It is written as a number or as one of three names, because the platforms
 offer different choices and neither offers the other's.** That asymmetry is
 the whole reason the setting is shaped the way it is, and it is worth knowing
 before anyone "simplifies" it into one form:
 
 | written | macOS | Windows |
 | --- | --- | --- |
-| `0` | no blur | `DWMSBT_NONE` |
-| `24` | radius 24 | as `"acrylic"` |
-| `"acrylic"` | radius `ACRYLIC_RADIUS` | `DWMSBT_TRANSIENTWINDOW` |
-| `"acrylic_always"` | radius `ACRYLIC_RADIUS` | accent-policy acrylic |
+| `"none"`, or `0`, or absent | no blur | `DWMSBT_NONE` |
+| `24` | radius 24 | **no blur** |
+| `"acrylic"` | **no blur** | `DWMSBT_TRANSIENTWINDOW` |
+| `"acrylic_always"` | **no blur** | accent-policy acrylic |
 
-`Blur` (the written form) resolves to `ResolvedBlur { radius,
-holds_unfocused }` - the two things a platform can be told - and each platform
-reads the half it can act on. Nothing downstream of `theme_for` knows which
-spelling was used.
+**Each platform reads only the forms it can act on, and everything else is
+`Blur::None`.** A radius on Windows is not rounded to "some acrylic", and an
+acrylic on macOS is not rounded to "some radius": neither platform guesses at
+what a form it has no way to honor was supposed to mean. `Blur` travels whole
+from the file to the platform module, and the match there is where the
+meaning is decided - `theme_for` resolves nothing about it beyond inheritance
+and the `0`/`"none"` spelling.
 
-- **macOS** (`macos::set_window_blur`): `CGSSetWindowBackgroundBlurRadius`
-  takes an integer radius for one window and the window server blurs whatever
-  that window sits over. Capped at `MAX_BLUR_RADIUS` (64), which is where the
-  cost outruns any visible difference - the same ceiling kitty documents for
-  `background_blur`, the setting this one matches. `holds_unfocused` is
-  ignored: a window-server blur has no focus term, so it already holds.
-- **Windows** (`windows::set_system_backdrop`): no radius, two acrylics, and
-  `holds_unfocused` is what picks between them. **There is no version of this
-  that takes an amount.** Acrylic's blur is DWM's, fixed by the Fluent design
-  it comes from; nothing in `DWMWINDOWATTRIBUTE` carries a radius (the list
-  runs to `DWMWA_LAST = 39` with no such member), and the `ACCENT_POLICY`
-  below has a tint color and no radius either. Don't go looking again.
+- **macOS** (`macos::set_window_blur`): takes `Blur::radius()` and hands it to
+  `CGSSetWindowBackgroundBlurRadius`, which blurs whatever the window sits
+  over. Capped at `MAX_BLUR_RADIUS` (64), which is where the cost outruns any
+  visible difference - the same ceiling kitty documents for `background_blur`,
+  the setting this one matches. The acrylic names come through `radius()` as
+  `0`: a window-server blur has no focus to lose the frost to, so the
+  distinction those names draw is one macOS has no way to be asked about.
+- **Windows** (`windows::set_system_backdrop`): matches the two acrylic names
+  and treats everything else, a radius included, as no blur. **There is no
+  version of this that takes an amount.** Acrylic's blur is DWM's, fixed by
+  the Fluent design it comes from; nothing in `DWMWINDOWATTRIBUTE` carries a
+  radius (the list runs to `DWMWA_LAST = 39` with no such member), and the
+  `ACCENT_POLICY` below has a tint color and no radius either. Don't go
+  looking again.
 
 **The two Windows acrylics, and why there are two.** `DWMSBT_TRANSIENTWINDOW`
 is documented, cheap, and needs build 22523+ - but DWM stops drawing it while
