@@ -270,6 +270,7 @@ impl ThemeConfig {
             palette: self.palette.clone().or_else(|| base.palette.clone()),
             background: BackgroundConfig {
                 alpha: self.background.alpha.or(base.background.alpha),
+                blur: self.background.blur.or(base.background.blur),
             },
             foreground: ForegroundConfig {
                 alpha: self.foreground.alpha.or(base.foreground.alpha),
@@ -293,6 +294,7 @@ impl ThemeConfig {
                 .clone()
                 .unwrap_or_else(|| fallback_palette.to_string()),
             background_alpha: self.background.alpha.unwrap_or(DEFAULT_ALPHA),
+            background_blur: self.background.blur.unwrap_or(DEFAULT_BLUR),
             foreground_alpha: self.foreground.alpha.unwrap_or(DEFAULT_ALPHA),
             editor_font: self.editor.font.resolved(),
             ui_font: self.ui.font.resolved(),
@@ -308,6 +310,7 @@ impl ThemeConfig {
 pub struct ResolvedTheme {
     pub palette: String,
     pub background_alpha: f32,
+    pub background_blur: bool,
     pub foreground_alpha: f32,
     pub editor_font: ResolvedFont,
     pub ui_font: ResolvedFont,
@@ -443,6 +446,14 @@ impl Default for WindowConfig {
 pub struct BackgroundConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
+    /// Whether the desktop showing through is frosted rather than sharp.
+    /// The OS's compositor does the blurring, not JumpPad, so this asks
+    /// rather than guarantees - see `windows.rs`/`macos.rs` for what each
+    /// platform can actually deliver. Nothing to see at `alpha = 1.0`,
+    /// where there is no desktop showing through to frost. Unnamed takes
+    /// the base theme's, and failing that [`DEFAULT_BLUR`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blur: Option<bool>,
 }
 
 /// The same, for the text drawn on that surface. Independent of it, so a
@@ -616,6 +627,13 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 /// theme names one: fully solid, exactly what JumpPad drew before the setting
 /// existed.
 pub const DEFAULT_ALPHA: f32 = 1.0;
+
+/// Whether the desktop behind a translucent window is frosted when neither
+/// the theme nor the base theme says: it isn't, which is what JumpPad showed
+/// before the setting existed. Off is also the cheaper window - a frosted
+/// backdrop is drawn by the compositor on every frame the desktop moves
+/// under it.
+pub const DEFAULT_BLUR: bool = false;
 
 /// JumpPad's global keybindings, loaded from `keybinds.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -995,6 +1013,7 @@ mod tests {
             ResolvedTheme {
                 palette: "light".to_string(),
                 background_alpha: DEFAULT_ALPHA,
+                background_blur: DEFAULT_BLUR,
                 foreground_alpha: DEFAULT_ALPHA,
                 editor_font: ResolvedFont::default(),
                 ui_font: ResolvedFont::default(),
@@ -1107,6 +1126,7 @@ mod tests {
             ResolvedTheme {
                 palette: "Nord".to_string(),
                 background_alpha: 0.8,
+                background_blur: DEFAULT_BLUR,
                 foreground_alpha: 0.9,
                 editor_font: ResolvedFont {
                     family: Some("JetBrains Mono".to_string()),
@@ -1269,6 +1289,63 @@ mod tests {
         assert_eq!(
             empty_base.theme_for(Appearance::Dark),
             no_base.theme_for(Appearance::Dark)
+        );
+    }
+
+    #[test]
+    fn a_theme_with_no_blur_named_leaves_the_desktop_sharp() {
+        let theme = config("[themes.dark]\nbackground.alpha = 0.8")
+            .theme_for(Appearance::Dark);
+        assert!(!theme.background_blur);
+        assert_eq!(theme.background_blur, DEFAULT_BLUR);
+    }
+
+    #[test]
+    fn a_theme_can_ask_for_a_frosted_desktop() {
+        let theme = config(
+            r#"
+            [themes.dark]
+            background.alpha = 0.8
+            background.blur = true
+            "#,
+        )
+        .theme_for(Appearance::Dark);
+
+        assert!(theme.background_blur);
+        assert_eq!(theme.background_alpha, 0.8);
+    }
+
+    /// The same per-leaf inheritance the alpha beside it gets: a shared
+    /// blur, and one slot that opts back out of it.
+    #[test]
+    fn blur_inherits_from_the_base_theme_and_a_theme_can_turn_it_off() {
+        let config = config(
+            r#"
+            [themes.base]
+            background.alpha = 0.8
+            background.blur = true
+
+            [themes.dark]
+
+            [themes.light]
+            background.blur = false
+            "#,
+        );
+
+        assert!(config.theme_for(Appearance::Dark).background_blur);
+        assert!(!config.theme_for(Appearance::Light).background_blur);
+    }
+
+    /// Blur says nothing about how the window is created - the compositor
+    /// is asked for it after the fact - so it can't be what makes a window
+    /// transparent. A theme that asks for one without an alpha to show it
+    /// through gets a solid window and no frost, which is the honest
+    /// answer rather than a translucency it never asked for.
+    #[test]
+    fn blur_alone_does_not_ask_for_a_transparent_window() {
+        assert!(
+            !config("[themes.dark]\nbackground.blur = true")
+                .wants_transparency()
         );
     }
 

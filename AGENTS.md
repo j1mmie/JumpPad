@@ -1098,12 +1098,17 @@ confound that made the premultiply bug so hard to read: both symptoms are
 "too bright, worst on light themes".
 
 **The fix** (`crates/jumppad/src/windows.rs`, wired from
-`JumpPadApp::disable_system_backdrop` on `WindowReady`): re-set the attribute
+`JumpPadApp::apply_window_blur` on `WindowReady`): re-set the attribute
 to `DWMSBT_NONE` once the window exists. Only on a translucent window - on a
 solid one the backdrop is hidden anyway, and turning it off would be a
 gratuitous difference from every other Windows app. Older Windows returns a
 failure `HRESULT` and changes nothing, which is already the desired
 behaviour there.
+
+That same attribute is now the whole of `background.blur` on Windows - the
+material DWM was drawing uninvited is the material a blur wants - so
+`set_system_backdrop` writes `DWMSBT_TRANSIENTWINDOW` (Acrylic) instead of
+`DWMSBT_NONE` when a theme asks. See the blur section below.
 
 `tiny-skia` never showed this: softbuffer presents through a GDI blit into
 the window's redirection bitmap rather than a flip-model swapchain
@@ -1645,6 +1650,72 @@ take a `[patch.crates-io]` fork - and it's global, meaning every rounded
 corner and stroked border in the app (the modal, its focused button, the
 scrollbar) would go jagged to fix a seam the tab bar no longer has.
 
+## Blurring what shows through (`background.blur`)
+
+`[themes] background.blur` frosts the desktop a translucent window shows,
+rather than leaving it sharp. Nothing in this process can reach the
+desktop's pixels, so both implementations are the same shape: ask the OS's
+compositor for a blurred backdrop and let the window's own alpha reveal it.
+
+- **Windows** (`windows::set_system_backdrop`): `DWMSBT_TRANSIENTWINDOW`
+  through `DWMWA_SYSTEMBACKDROP_TYPE` - the very attribute that had to be
+  forced to `DWMSBT_NONE` to stop DWM drawing a Mica backdrop nobody asked
+  for (see the rendering-backend section). One lever, two settings of it.
+- **macOS** (`macos::set_window_blur`): an `NSVisualEffectView` blending
+  `BehindWindow`, installed as the window's *content view* with the view
+  iced renders into re-parented underneath it.
+
+**Why the macOS one swaps the content view instead of adding a subview.**
+The view iced renders into owns its layer, and a layer's own content draws
+*beneath* its sublayers - so an effect view added under the renderer comes
+out on top of the text. The window's content view is the one place that is
+genuinely behind it. `-[NSWindow setContentView:]` fits the incoming view to
+the content area, which is the frame the outgoing one already had, so the
+re-parenting needs no geometry of its own beyond copying that frame down.
+Two things the swap has to put back by hand: the first responder (leaving
+the view hierarchy resigns it, and every keystroke arrives through that
+view), and the autoresizing mask.
+
+**Unlike the alpha beside it, this is a live setting.** A window's
+transparency is fixed when it is created, which is why `wants_transparency`
+asks every theme in the file and why a reload that introduces translucency
+to an opaque session says "restart required". A blur is asked of the
+compositor *after* the window exists, so `apply_theme` just applies it -
+`background.blur` never calls for a new window, and it is deliberately not
+part of `window::settings`. It also does not make a window transparent:
+blur alone with `alpha = 1.0` gets a solid window and no frost, which is the
+honest answer rather than a translucency the file never asked for.
+
+Told to the window on `WindowReady` (so a replacement window is set up like
+the first one), on the alpha crossing into translucency
+(`turn_translucent`), and whenever a reload or an OS light/dark switch moves
+the theme's own answer. Never on a solid window: there is no desktop showing
+through to frost, and on Windows the off case would override DWM's own pick
+for a window nobody can see past the paint.
+
+**Expect it on `jumppad-gpu` and not much on `jumppad`.** The two binaries
+reach the screen by different paths (again). On macOS the software binary
+cannot draw a see-through window at all, so there is nothing for a blur to
+show through. On Windows it presents through a GDI blit into the redirection
+bitmap rather than a flip-model swapchain composited by DWM, and that is
+precisely the path that never showed the *unwanted* Mica backdrop - so it
+most likely will not show a wanted one either. Neither has been checked on a
+real machine yet; if a report comes in, establish which binary it came from
+first, the same as every other transparency report.
+
+**Linux is not wired up, and can't be from here.** Blur on Wayland and
+compositing X11 is the compositor's own window rule (KWin's blur effect,
+Hyprland's `blur` rules, picom), keyed off the window, not something an app
+can ask for through winit. `apply_window_blur` is a no-op function there.
+
+**The AppKit calls are hand-rolled `msg_send!`, and a debug build checks
+them.** `objc2` verifies every message send's argument and return encodings
+against the method's own when `debug_assertions` are on - so a selector
+returning `BOOL` declared as `()` panics rather than misbehaving quietly
+(`-[NSWindow makeFirstResponder:]` is one). The same check is why the
+hand-rolled `CGRect`/`CGPoint`/`CGSize` in `macos.rs` carry `Encoding`s with
+AppKit's own struct names: the names are compared, not just the layout.
+
 ## Opening files
 
 Three entry points reach the same place. `Cmd/Ctrl+O` goes through `rfd`'s
@@ -1865,6 +1936,11 @@ theme's rather than the other way round. `Appearance::default_palette()`
 serves both readings with one lowercase string; palettes are matched
 case-insensitively where they're applied (`resolve_palette` in
 `app.rs`), theme keys are not.
+
+`background.blur` sits in the same section as the alpha and inherits by the
+same per-leaf rule, but it is not the same kind of setting: the alpha is
+fixed against a window created once, the blur is asked of the compositor
+afterwards and applies live. See the blur section above.
 
 Two things that look like bugs and aren't. `wants_transparency` does not
 merge the base theme in first: base is itself a `[themes]` entry, so a

@@ -6,6 +6,8 @@ use std::ffi::CStr;
 
 use iced::window::raw_window_handle::RawWindowHandle;
 use jumppad_config::Appearance;
+use objc2::encode::{Encode, Encoding};
+use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{class, msg_send};
 
@@ -39,6 +41,94 @@ pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
         let _: () = msg_send![ns_window, invalidateShadow];
     }
     log::debug!("jumppad: invalidated the window shadow");
+}
+
+/// Frosts what shows through a translucent window, or takes the frosting
+/// back off, per `[themes] background.blur`.
+///
+/// Nothing in this process can reach the desktop's pixels, so the blurring
+/// is AppKit's: an `NSVisualEffectView` blending `BehindWindow` asks the
+/// window server to blur whatever the window sits over and hand the result
+/// back as the view's own content. The window's alpha then reveals that
+/// instead of the raw desktop.
+///
+/// **It has to go *behind* what iced draws, and a subview cannot.** The view
+/// iced renders into owns its layer, and a layer's own content is drawn
+/// beneath its sublayers - so an effect view added underneath the renderer
+/// would come out on top of the text. The one place that is genuinely behind
+/// it is the window's content view, so the effect view takes that role and
+/// the renderer's view becomes its only child. AppKit sizes the effect view
+/// on the way in - `-[NSWindow setContentView:]` fits the incoming view to
+/// the content area - and the renderer's view is then given those same
+/// bounds, so the swap needs no geometry of its own.
+///
+/// The renderer's view is put back on top when the frosting comes off, so
+/// the two directions leave the same hierarchy a session that never asked
+/// for blur has.
+///
+/// `NSVisualEffectMaterial` is deliberately the plainest one AppKit offers.
+/// The theme's own background color is already painted over this at
+/// `background.alpha`, so a material that brought a strong tint of its own
+/// would fight it; `FullScreenUI` brings the blur and little else.
+pub fn set_window_blur(window: &dyn iced::window::Window, blur: bool) {
+    let Some(ns_window) = ns_window_of(window, "the window blur") else {
+        return;
+    };
+    // SAFETY: `ns_window_of` returned a live `NSWindow`, every selector below
+    // is a plain AppKit one, and iced runs window actions on the main thread,
+    // which is where AppKit requires them. Each view this takes hold of is
+    // owned by a `Retained` for exactly as long as it is out of the view
+    // hierarchy - `setContentView:` is the moment the window lets go of the
+    // outgoing one.
+    unsafe {
+        let content: *mut AnyObject = msg_send![ns_window, contentView];
+        let Some(content) = Retained::retain(content) else {
+            log::warn!("jumppad: no content view; leaving the blur alone");
+            return;
+        };
+        let frosted: bool =
+            msg_send![&*content, isKindOfClass: class!(NSVisualEffectView)];
+
+        match (blur, frosted) {
+            (true, false) => {
+                let effect: Retained<AnyObject> =
+                    msg_send![class!(NSVisualEffectView), new];
+                let _: () =
+                    msg_send![&*effect, setBlendingMode: BLURS_WHAT_IS_BEHIND];
+                let _: () = msg_send![&*effect, setMaterial: PLAINEST_MATERIAL];
+                let _: () = msg_send![&*effect, setState: ALWAYS_BLURRING];
+                let _: () = msg_send![ns_window, setContentView: &*effect];
+
+                let bounds: CGRect = msg_send![&*effect, bounds];
+                let _: () = msg_send![&*content, setFrame: bounds];
+                let _: () = msg_send![
+                    &*content,
+                    setAutoresizingMask: FILLS_ITS_PARENT
+                ];
+                let _: () = msg_send![&*effect, addSubview: &*content];
+                // Leaving the view hierarchy resigned it, and every keystroke
+                // the editor sees arrives through it.
+                let _: bool =
+                    msg_send![ns_window, makeFirstResponder: &*content];
+            }
+            (false, true) => {
+                let subviews: *mut AnyObject = msg_send![&*content, subviews];
+                let renderer: *mut AnyObject = msg_send![subviews, firstObject];
+                let Some(renderer) = Retained::retain(renderer) else {
+                    return;
+                };
+                let _: () = msg_send![ns_window, setContentView: &*renderer];
+                let _: bool =
+                    msg_send![ns_window, makeFirstResponder: &*renderer];
+            }
+            // Already where it should be.
+            _ => return,
+        }
+    }
+    log::debug!(
+        "jumppad: window blur turned {}",
+        if blur { "on" } else { "off" }
+    );
 }
 
 /// Pins the window's light/dark appearance to `pinned`, or leaves it to
@@ -165,4 +255,67 @@ unsafe fn appearance_named(name: &CStr) -> *mut AnyObject {
 /// it.
 unsafe fn ns_string(text: &CStr) -> *mut AnyObject {
     unsafe { msg_send![class!(NSString), stringWithUTF8String: text.as_ptr()] }
+}
+
+/// `NSVisualEffectMaterialFullScreenUI` - see `set_window_blur` for why this
+/// one and not a tinted material.
+const PLAINEST_MATERIAL: isize = 15;
+
+/// `NSVisualEffectBlendingModeBehindWindow`: blur the desktop the window sits
+/// over, rather than whatever this app drew under the view.
+const BLURS_WHAT_IS_BEHIND: isize = 0;
+
+/// `NSVisualEffectStateActive`, rather than the default that follows the
+/// window's active state - an unfocused window losing its frosting would read
+/// as the setting having turned itself off.
+const ALWAYS_BLURRING: isize = 1;
+
+/// `NSViewWidthSizable | NSViewHeightSizable`, so the renderer's view keeps
+/// filling the effect view it now sits inside as the window is resized.
+const FILLS_ITS_PARENT: usize = 2 | 16;
+
+/// AppKit's geometry structs, hand-rolled rather than taken from
+/// `objc2-foundation`: `-[NSView setFrame:]` is the only place the app needs
+/// one, and this crate's whole Objective-C surface is a handful of selectors
+/// reached through `objc2` alone (see `Cargo.toml`).
+///
+/// The names in the `Encoding`s are load-bearing, not documentation: a debug
+/// build checks every message send's types against the method's own, and
+/// checks the struct names along with them.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGSize {
+    width: f64,
+    height: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct CGRect {
+    origin: CGPoint,
+    size: CGSize,
+}
+
+// SAFETY: each is `#[repr(C)]` over the same fields, in the same order, as
+// the AppKit struct it names.
+unsafe impl Encode for CGPoint {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGPoint", &[f64::ENCODING, f64::ENCODING]);
+}
+
+unsafe impl Encode for CGSize {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGSize", &[f64::ENCODING, f64::ENCODING]);
+}
+
+unsafe impl Encode for CGRect {
+    const ENCODING: Encoding =
+        Encoding::Struct("CGRect", &[CGPoint::ENCODING, CGSize::ENCODING]);
 }

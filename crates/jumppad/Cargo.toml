@@ -61,13 +61,13 @@ display-info.workspace = true
 env_logger = "0.11"
 log = "0.4"
 
-# Just enough Objective-C to reach one `NSWindow` setter that neither iced nor
-# winit exposes - see `macos.rs`. This version is already in the tree via
-# winit, so it costs nothing to build.
+# Just enough Objective-C to reach the handful of AppKit calls that neither
+# iced nor winit exposes - see `macos.rs`. This version is already in the tree
+# via winit, so it costs nothing to build.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 
-# Same deal on Windows, for one `DwmSetWindowAttribute` call - see `windows.rs`.
+# Same deal on Windows, for the `DwmSetWindowAttribute` calls - see `windows.rs`.
 # winit already depends on this exact version with `Win32_Graphics_Dwm`
 # enabled (it makes the same call for the attributes it *does* expose), so
 # both features here are already on and this adds nothing to the build.

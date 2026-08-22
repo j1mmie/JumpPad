@@ -123,11 +123,12 @@ pub struct JumpPadApp {
     /// change again.
     showing: Appearance,
     os_appearance: Option<Appearance>,
-    /// All three are written only by `apply_theme`, from the theme the
+    /// All four are written only by `apply_theme`, from the theme the
     /// config and `showing` resolve to.
     theme: Theme,
     ui_text: UiText,
     background_alpha: f32,
+    background_blur: bool,
     /// Frames left until the macOS window shadow is refreshed - see
     /// `SHADOW_REFRESH_FRAMES`.
     shadow_refresh_frames: u8,
@@ -503,6 +504,7 @@ impl JumpPadApp {
             theme: Theme::Light,
             ui_text: ui_text(&jumppad_config::ResolvedFont::default()),
             background_alpha: 1.0,
+            background_blur: false,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir,
@@ -1085,17 +1087,22 @@ impl JumpPadApp {
         Task::none()
     }
 
-    /// Drops the Windows 11 system backdrop from behind a translucent window
-    /// (see `windows.rs`). Runs once, as soon as the window exists - winit has
-    /// already set `DWMSBT_AUTO` by then, so this is strictly an override.
-    /// Skipped on a solid window, where the backdrop is hidden anyway and
-    /// turning it off would be a gratuitous difference from every other app.
+    /// Puts the desktop showing through the window where the theme's
+    /// `background.blur` asks - frosted, or sharp. Each platform has its own
+    /// way of being asked, so this is where they part company.
+    ///
+    /// Only a translucent window is told anything, on either. A solid one
+    /// has no desktop showing through to frost, and on Windows the off case
+    /// also overrides a backdrop winit already asked DWM for, which would be
+    /// a gratuitous difference from every other app on a window nobody can
+    /// see through (see `windows.rs`).
     #[cfg(target_os = "windows")]
-    fn disable_system_backdrop(&self) -> Task<Message> {
+    fn apply_window_blur(&self) -> Task<Message> {
+        let blur = self.background_blur;
         match self.window {
             Some(id) if self.background_alpha < 1.0 => {
-                iced::window::run(id, |window| {
-                    crate::windows::disable_system_backdrop(window);
+                iced::window::run(id, move |window| {
+                    crate::windows::set_system_backdrop(window, blur);
                 })
                 .discard()
             }
@@ -1103,8 +1110,26 @@ impl JumpPadApp {
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    fn disable_system_backdrop(&self) -> Task<Message> {
+    /// Same gate as above, AppKit's own mechanism behind it - the effect
+    /// view in `macos.rs`.
+    #[cfg(target_os = "macos")]
+    fn apply_window_blur(&self) -> Task<Message> {
+        let blur = self.background_blur;
+        match self.window {
+            Some(id) if self.background_alpha < 1.0 => {
+                iced::window::run(id, move |window| {
+                    crate::macos::set_window_blur(window, blur);
+                })
+                .discard()
+            }
+            _ => Task::none(),
+        }
+    }
+
+    /// No blur to ask for anywhere else: X11 and Wayland leave it to the
+    /// compositor's own window rules, which no app-side call can reach.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    fn apply_window_blur(&self) -> Task<Message> {
         Task::none()
     }
 
@@ -1346,6 +1371,7 @@ impl JumpPadApp {
     fn apply_theme(&mut self) -> Task<Message> {
         let theme = self.config.theme_for(self.showing);
         let was_translucent = self.background_alpha < 1.0;
+        let was_blurred = self.background_blur;
 
         self.theme = resolve_palette(
             &theme.palette,
@@ -1364,6 +1390,10 @@ impl JumpPadApp {
             self.editor_config
                 .set_background_alpha(theme.background_alpha);
         }
+        // Unconditional, unlike the alpha above: the window's transparency
+        // is what a session cannot change, and a blur is asked for after the
+        // fact - so this is a live setting whatever the window started as.
+        self.background_blur = theme.background_blur;
         self.editor_config
             .set_foreground_alpha(theme.foreground_alpha);
         self.editor_config.set_font(resolve_font(
@@ -1374,7 +1404,11 @@ impl JumpPadApp {
         self.ui_text = ui_text(&theme.ui_font);
 
         let translucency = if self.background_alpha < 1.0 && !was_translucent {
+            // Already tells the window about the blur, so the two branches
+            // can't both fire.
             self.turn_translucent()
+        } else if self.background_blur != was_blurred {
+            self.apply_window_blur()
         } else {
             Task::none()
         };
@@ -1388,14 +1422,14 @@ impl JumpPadApp {
     /// cross that line without needing a new window, since the window's
     /// transparency was settled at startup for every theme in the file.
     ///
-    /// Both platforms leave the reverse alone: nothing re-enables a system
-    /// backdrop, the same as when a session boots translucent and reloads to
-    /// solid.
+    /// Both platforms leave the reverse alone: nothing puts a window's
+    /// original backdrop back, the same as when a session boots translucent
+    /// and reloads to solid.
     fn turn_translucent(&mut self) -> Task<Message> {
         self.arm_surface_reset();
         self.arm_shadow_refresh();
 
-        self.disable_system_backdrop()
+        self.apply_window_blur()
     }
 
     /// Takes the OS's light/dark setting and switches themes if it moved the
@@ -2027,7 +2061,7 @@ impl JumpPadApp {
                 // it's armed here and fires from the frame countdown.
                 self.arm_surface_reset();
                 Task::batch([
-                    self.disable_system_backdrop(),
+                    self.apply_window_blur(),
                     self.snap_to_monitor(),
                     // Every window arrives here, the first one included, so
                     // this is the only place focus is handed to a new one.
@@ -3659,6 +3693,7 @@ mod tests {
                 jumppad_config::DEFAULT_FONT_SIZE,
             ),
             background_alpha: 1.0,
+            background_blur: false,
             shadow_refresh_frames: 0,
             surface_reset_frames: 0,
             session_dir: PathBuf::from("/tmp"),
@@ -4582,6 +4617,74 @@ mod tests {
         let _ = app.apply_config(config);
         assert_eq!(app.background_alpha, 0.5);
         assert_eq!(app.editor_config.background_alpha(), 0.5);
+    }
+
+    /// Unlike the alpha above, a blur needs no window born anything in
+    /// particular: it is asked of the compositor once the window exists, so
+    /// it is a live setting in every session.
+    #[test]
+    fn apply_config_records_a_themes_blur_whatever_the_window_is() {
+        let mut app = test_app(1);
+        assert!(!app.window_transparent);
+
+        let _ = app.apply_config(config_with_theme("background.blur = true"));
+        assert!(app.background_blur);
+
+        let _ = app.apply_config(config_with_theme("background.blur = false"));
+        assert!(!app.background_blur);
+    }
+
+    /// The blur rides with the theme, so an OS light/dark switch carries it
+    /// the same way it carries the palette.
+    #[test]
+    fn an_appearance_switch_carries_the_blur_with_it() {
+        let mut app = test_app(1);
+        app.window_transparent = true;
+
+        let _ = app.apply_config(
+            toml::from_str(
+                r#"
+                [themes.base]
+                background.alpha = 0.8
+
+                [themes.dark]
+                background.blur = true
+                "#,
+            )
+            .unwrap(),
+        );
+
+        let _ = app.apply_os_appearance(Some(Appearance::Dark));
+        assert!(app.background_blur);
+
+        let _ = app.apply_os_appearance(Some(Appearance::Light));
+        assert!(!app.background_blur);
+    }
+
+    /// A solid window has no desktop showing through to frost, and on
+    /// Windows the call would also override a backdrop nobody can see past
+    /// the paint anyway - so it is never made.
+    #[test]
+    fn a_solid_window_is_told_nothing_about_blur() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        app.background_blur = true;
+
+        assert_eq!(app.background_alpha, 1.0);
+        assert_eq!(app.apply_window_blur().units(), 0);
+    }
+
+    #[test]
+    fn a_translucent_window_is_told_which_way_its_blur_went() {
+        let mut app = test_app(1);
+        app.window = Some(iced::window::Id::unique());
+        app.background_alpha = 0.5;
+
+        if cfg!(any(target_os = "windows", target_os = "macos")) {
+            assert_ne!(app.apply_window_blur().units(), 0);
+            app.background_blur = true;
+            assert_ne!(app.apply_window_blur().units(), 0);
+        }
     }
 
     /// No family in either section, so the assertions stay off the machine's

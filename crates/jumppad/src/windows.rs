@@ -5,9 +5,9 @@
 use iced::window::raw_window_handle::RawWindowHandle;
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Dwm::{
-    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWMSBT_NONE,
-    DWMWA_SYSTEMBACKDROP_TYPE, DwmEnableBlurBehindWindow,
-    DwmSetWindowAttribute,
+    DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND, DWM_SYSTEMBACKDROP_TYPE,
+    DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
+    DwmEnableBlurBehindWindow, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BLACK_BRUSH, CreateRectRgn, DeleteObject, FillRect, GetDC, GetStockObject,
@@ -28,19 +28,22 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
     }
 }
 
-/// Turns off the Windows 11 system backdrop so a translucent window shows the
-/// *desktop* through it rather than a DWM-drawn material.
+/// Puts the Windows 11 system backdrop where `[themes] background.blur`
+/// asks: `DWMSBT_TRANSIENTWINDOW` (Acrylic - a live blur of whatever sits
+/// behind the window) when it is on, and `DWMSBT_NONE` when it is off, so a
+/// translucent window shows the *desktop* through it rather than a DWM-drawn
+/// material nobody asked for.
 ///
-/// **The bright-window-with-decorations fix.** winit unconditionally calls
-/// `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE, ...)` with whatever
-/// `WindowAttributes::platform_specific.backdrop_type` holds, and iced never
-/// surfaces that field, so it stays at winit's `BackdropType::Auto` -
-/// `DWMSBT_AUTO`, "let DWM pick". On Windows 11 DWM's pick for a *decorated*
-/// window is a Mica-style backdrop painted behind the client area. Our alpha
-/// then reveals that material instead of the desktop, and since it is a light,
-/// wallpaper-derived wash the window reads far brighter and more solid than
-/// the configured alpha - dramatically so on a light theme, which is already
-/// close to the material's own brightness.
+/// **The off case is the bright-window-with-decorations fix.** winit
+/// unconditionally calls `DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE,
+/// ...)` with whatever `WindowAttributes::platform_specific.backdrop_type`
+/// holds, and iced never surfaces that field, so it stays at winit's
+/// `BackdropType::Auto` - `DWMSBT_AUTO`, "let DWM pick". On Windows 11 DWM's
+/// pick for a *decorated* window is a Mica-style backdrop painted behind the
+/// client area. Our alpha then reveals that material instead of the desktop,
+/// and since it is a light, wallpaper-derived wash the window reads far
+/// brighter and more solid than the configured alpha - dramatically so on a
+/// light theme, which is already close to the material's own brightness.
 ///
 /// The correlation that pinned it down: `[window] decorations = false` fixes
 /// it outright. An undecorated window has no frame for DWM to hang a backdrop
@@ -48,20 +51,34 @@ fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
 /// through correctly. `DWMSBT_NONE` asks for that same "no material" state
 /// while keeping the titlebar.
 ///
-/// Only `jumppad-gpu` is affected in practice: the `tiny-skia` binary presents
-/// through softbuffer's GDI blit into the window's redirection bitmap rather
-/// than a flip-model swapchain composited by DWM, and comes out correct with
-/// decorations either way.
-pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
+/// **The on case is that same mechanism, wanted.** A backdrop DWM paints
+/// behind the client area is exactly what a blur has to be here - nothing in
+/// this process can reach the desktop's pixels - so asking for the Acrylic
+/// material is the whole implementation. That also fixes the material's
+/// reach: it is drawn behind the client area only, so the frost stops at the
+/// titlebar, which keeps its own system look.
+///
+/// Only `jumppad-gpu` is known to show either state: the `tiny-skia` binary
+/// presents through softbuffer's GDI blit into the window's redirection
+/// bitmap rather than a flip-model swapchain composited by DWM, and never
+/// showed the unwanted backdrop that `DWMSBT_NONE` exists to remove - so it
+/// most likely won't show a wanted one either.
+pub fn set_system_backdrop(window: &dyn iced::window::Window, blur: bool) {
     let Some(hwnd) = hwnd_of(window, "the system backdrop") else {
         return;
     };
 
-    let backdrop = DWMSBT_NONE;
+    let backdrop: DWM_SYSTEMBACKDROP_TYPE = if blur {
+        DWMSBT_TRANSIENTWINDOW
+    } else {
+        DWMSBT_NONE
+    };
     // SAFETY: the handle guarantees a live `HWND`, and the attribute is
     // written from a correctly sized `DWM_SYSTEMBACKDROP_TYPE`. Unsupported
     // on Windows 10 and early 11 builds, where DWM returns a failure `HRESULT`
-    // and changes nothing - which is already the behaviour we want there.
+    // and changes nothing - which for the `DWMSBT_NONE` case is already the
+    // behaviour we want, and for the blur case is the honest answer that
+    // those builds have no material to offer.
     let result = unsafe {
         DwmSetWindowAttribute(
             hwnd,
@@ -75,6 +92,8 @@ pub fn disable_system_backdrop(window: &dyn iced::window::Window) {
         log::debug!(
             "jumppad: no system-backdrop control on this Windows build (0x{result:X})"
         );
+    } else if blur {
+        log::debug!("jumppad: asked DWM to frost the window's backdrop");
     } else {
         log::debug!("jumppad: disabled the window's system backdrop");
     }

@@ -17,6 +17,14 @@
 palette = "Ferra"
 background.alpha = 0.925
 foreground.alpha = 1.0
+# Frosts what shows through the window instead of leaving the desktop sharp.
+# The OS's compositor does the blurring, so how strong it looks and what it
+# costs are the OS's to decide, and there is nothing to see at
+# `background.alpha = 1.0` where no desktop shows through at all. Windows 11
+# (Acrylic) and macOS only. Expect it on `jumppad-gpu`: the software binary
+# reaches the screen by a different path on both platforms, and on macOS that
+# path cannot draw a see-through window in the first place.
+background.blur = false
 editor.font.family = "Consolas"
 editor.font.size = 16.0
 ui.font.family = "Comic Sans MS"
