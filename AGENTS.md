@@ -2103,10 +2103,34 @@ gets from `ends_undo_step` for free and `Edit::Paste` does not, hence the
 explicit `end_burst` in `indent`. Teaching `Paste` to end a step instead would
 change what the clipboard does.
 
-Shift+Tab is deliberately unbound: outdent, multi-line indent, indent-aware
-Enter, autodetection and a status readout are all still to come, and
-`Mods::matches` being exact is what keeps Shift+Tab from falling through to
-plain Tab in the meantime.
+**Tab does two different things, and the selection decides which.** A
+selection holding a line ending - one reaching across two lines, or the whole
+line a triple click took - cannot be replaced by an indent without joining the
+lines it spans, so Tab indents every line it covers and leaves the selection
+standing. Anything narrower is still replaced by the one indent described
+above. `TextArea::block_to_indent` is where the two part company, and
+`lines::covered_lines` then says which lines a block reaches - the same rule
+the line commands and the comment toggle already follow, so a selection whose
+bottom edge sits at column 0 merely starts that line.
+
+Shift+Tab is `Action::Outdent`, the mirror: one indent level off the front of
+every covered line, or of the caret's own line when nothing is selected.
+`Mods::matches` being exact is what keeps it from falling through to plain Tab.
+
+Both directions land on a stop rather than counting bytes, so a line indented
+three spaces at width four gains one space and loses three going back. The two
+therefore undo each other exactly only for a line that already starts on a
+stop; one between two stops is straightened onto the nearest by whichever
+press comes first. Blank lines are left out of both, since indenting one only
+buys it trailing whitespace.
+
+A block indent, a block outdent and a comment toggle are one transformation
+apiece as far as the document is concerned, so `TextArea::transform_lines`
+performs all three: it splices the lines in place as its own undo step and
+carries the caret and any selection across the columns that moved.
+`line_edit.rs` is what the three hand it - the new lines, and where each one's
+columns went. Indent-aware Enter, autodetection and a status readout are all
+still to come.
 
 `[words] separators` is the characters that end a word: what Ctrl/Option+Left
 and Right stop at, what Ctrl/Option+Backspace and Delete take back to, and

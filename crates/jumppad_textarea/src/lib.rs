@@ -3,6 +3,7 @@ mod drag_scroll;
 pub mod font;
 mod history;
 mod indent;
+mod line_edit;
 mod lines;
 mod safe_area;
 mod scrollbar;
@@ -28,6 +29,7 @@ use iced::advanced::text::Highlighter;
 use iced::advanced::text::highlighter::Format;
 use iced::{Background, Border, Color, Element, Fill, Font, Theme};
 use jumppad_actions::Action;
+use line_edit::EditedLines;
 use syntax_registry::{
     Grammar, Handle, HighlightCategory, PollResult, SyntaxRegistry,
 };
@@ -647,11 +649,50 @@ impl TextArea {
         });
     }
 
+    /// Indents: one more level on every line of a selection that reaches
+    /// across a line ending, and otherwise one indent typed at the caret.
+    fn indent(&mut self) -> bool {
+        let Some((first, last)) = self.block_to_indent() else {
+            return self.type_indent();
+        };
+        let indentation = self.settings.indentation();
+        self.transform_lines(first, last, |covered| {
+            indentation.indent_lines(covered)
+        })
+    }
+
+    /// Takes one indent level back off every covered line. A block already
+    /// flush against the left margin is a clean no-op.
+    fn outdent(&mut self) -> bool {
+        let (first, last) = self.covered();
+        let indentation = self.settings.indentation();
+        self.transform_lines(first, last, |covered| {
+            indentation.outdent_lines(covered)
+        })
+    }
+
+    /// The lines Tab indents as a block, or `None` when it types an indent at
+    /// the caret instead.
+    ///
+    /// The dividing line is whether the selection holds a line ending: one
+    /// that does cannot be replaced by an indent without joining the lines it
+    /// spans, which is nobody's idea of what Tab does.
+    fn block_to_indent(&self) -> Option<(usize, usize)> {
+        let spans_lines = match self.selection()? {
+            SavedSelection {
+                kind: SelectionKind::Line,
+                ..
+            } => true,
+            selection => selection.anchor.0 != self.cursor_position().0,
+        };
+        spans_lines.then(|| self.covered())
+    }
+
     /// Inserts one indent over any selection: a tab character, or the spaces
     /// that reach the next stop from where the caret is drawn. Always an
     /// edit - the narrowest indent is still one character - so there is no
     /// no-op case to guard.
-    fn indent(&mut self) -> bool {
+    fn type_indent(&mut self) -> bool {
         let indentation = self.settings.indentation();
         let (line, column) = self.indent_origin();
         let line_text = self.line_text(line).unwrap_or_default();
@@ -685,25 +726,39 @@ impl TextArea {
         let Some(style) = self.comment_style() else {
             return false;
         };
-        let cursor = self.cursor_position();
-        let selection = self.selection();
-        let (first, last) = lines::covered_lines(cursor, selection);
+        let (first, last) = self.covered();
+        self.transform_lines(first, last, |covered| {
+            comment::toggle_comment(covered, &style)
+        })
+    }
+
+    /// Rewrites lines `first..=last` with whatever `transform` makes of them,
+    /// carrying the caret and any selection across the columns it moved. A
+    /// transform with nothing to do is a clean no-op.
+    fn transform_lines(
+        &mut self,
+        first: usize,
+        last: usize,
+        transform: impl FnOnce(&[&str]) -> Option<EditedLines>,
+    ) -> bool {
         let covered = self.covered_text((first, last));
         let covered: Vec<&str> = covered.iter().map(String::as_str).collect();
-        let Some(toggled) = comment::toggle_comment(&covered, &style) else {
+        let Some(edited) = transform(&covered) else {
             return false;
         };
 
-        // Its own undo step - a toggle shouldn't fold into a typing burst -
-        // recorded only now that an edit is certain to happen.
+        let cursor = self.cursor_position();
+        let selection = self.selection();
+        // Its own undo step - a line transform shouldn't fold into a typing
+        // burst - recorded only now that an edit is certain to happen.
         self.history
             .record_isolated(&self.source, self.cursor_state());
         let caret_was = self.content.caret_line(); // the splice moves it
-        self.splice_lines_in_place(first..last + 1, &toggled.lines);
+        self.splice_lines_in_place(first..last + 1, &edited.lines);
         self.resync_source();
         self.edited_from = Some(first);
 
-        let shift = |pos| comment::shift_position(pos, first, &toggled.edits);
+        let shift = |pos| line_edit::shift_position(pos, first, &edited.edits);
         match selection {
             Some(saved) => self.restore_selection(
                 SavedSelection {
@@ -982,6 +1037,7 @@ impl TextEditorWidget for TextArea {
             EditorMessage::Undo => self.apply_history(History::undo),
             EditorMessage::Redo => self.apply_history(History::redo),
             EditorMessage::Indent => self.indent(),
+            EditorMessage::Outdent => self.outdent(),
             EditorMessage::ToggleComment => self.toggle_comment(),
             EditorMessage::DeleteLine => self.delete_line(),
             EditorMessage::MoveLineUp => self.move_line_up(),
@@ -1486,6 +1542,7 @@ pub fn binding_for(action: Action) -> Option<Binding<EditorMessage>> {
         Action::Undo => custom(EditorMessage::Undo),
         Action::Redo => custom(EditorMessage::Redo),
         Action::Indent => custom(EditorMessage::Indent),
+        Action::Outdent => custom(EditorMessage::Outdent),
         Action::ToggleComment => custom(EditorMessage::ToggleComment),
         Action::DeleteLine => custom(EditorMessage::DeleteLine),
         Action::MoveLineUp => custom(EditorMessage::MoveLineUp),
@@ -2244,6 +2301,134 @@ mod tests {
         assert_eq!(editor.text(), "\t");
         assert!(editor.update(EditorMessage::Undo));
         assert_eq!(editor.text(), "");
+    }
+
+    #[test]
+    fn tab_indents_every_line_a_selection_spans_and_keeps_it() {
+        let mut editor = indented_editor("aaa\nbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 1), (1, 2));
+
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\taaa\n\tbbb");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection {
+                anchor: (0, 2),
+                kind: SelectionKind::Range
+            })
+        );
+        assert_eq!(editor.cursor_position(), (1, 3));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_selection_ending_at_column_zero_is_not_indented_on_that_line() {
+        // The rule every line command already follows: a selection whose
+        // bottom edge sits at column 0 merely starts that line.
+        let mut editor =
+            indented_editor("aaa\nbbb\nccc", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 0), (2, 0));
+
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\taaa\n\tbbb\nccc");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_selection_reaching_the_next_line_indents_rather_than_replacing() {
+        // Replacing it would join the two lines, which is nobody's idea of
+        // what Tab does - even though only the first line is covered.
+        let mut editor = indented_editor("aaa\nbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 1), (1, 0));
+
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\taaa\nbbb");
+    }
+
+    #[test]
+    fn a_triple_clicked_line_is_indented_rather_than_replaced() {
+        let mut editor = indented_editor("aaa\nbbb", IndentationStyle::Tabs, 4);
+        editor.move_cursor_to(0, 1);
+        editor.content.perform(text_editor::Action::SelectLine);
+
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\taaa\nbbb");
+    }
+
+    #[test]
+    fn a_block_indent_reaches_each_lines_own_next_stop() {
+        let mut editor =
+            indented_editor("aaa\n  bbb", IndentationStyle::Spaces, 4);
+        select_range(&mut editor, (0, 0), (1, 5));
+
+        editor.update(EditorMessage::Indent);
+        assert_eq!(editor.text(), "    aaa\n    bbb");
+    }
+
+    #[test]
+    fn shift_tab_outdents_every_line_a_selection_spans_and_keeps_it() {
+        let mut editor =
+            indented_editor("\taaa\n\tbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 1), (1, 2));
+
+        assert!(editor.update(EditorMessage::Outdent));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert_eq!(
+            editor.selection(),
+            Some(SavedSelection {
+                anchor: (0, 0),
+                kind: SelectionKind::Range
+            })
+        );
+        assert_eq!(editor.cursor_position(), (1, 1));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn shift_tab_outdents_the_caret_line_with_nothing_selected() {
+        let mut editor = indented_editor("\taaa", IndentationStyle::Tabs, 4);
+        editor.move_cursor_to(0, 2);
+
+        assert!(editor.update(EditorMessage::Outdent));
+        assert_eq!(editor.text(), "aaa");
+        assert_eq!(editor.cursor_position(), (0, 1));
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_block_already_at_the_margin_has_no_outdent_to_make() {
+        let mut editor = indented_editor("aaa\nbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 0), (1, 3));
+
+        assert!(!editor.update(EditorMessage::Outdent));
+        assert_eq!(editor.text(), "aaa\nbbb");
+    }
+
+    #[test]
+    fn each_block_indent_is_its_own_undo_step() {
+        let mut editor = indented_editor("aaa\nbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 0), (1, 3));
+
+        editor.update(EditorMessage::Indent);
+        editor.update(EditorMessage::Indent);
+        assert_eq!(editor.text(), "\t\taaa\n\t\tbbb");
+
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "\taaa\n\tbbb");
+        assert!(editor.update(EditorMessage::Undo));
+        assert_eq!(editor.text(), "aaa\nbbb");
+        assert_source_is_synced(&editor);
+    }
+
+    #[test]
+    fn a_blank_line_inside_an_indented_block_is_left_alone() {
+        let mut editor =
+            indented_editor("aaa\n\nbbb", IndentationStyle::Tabs, 4);
+        select_range(&mut editor, (0, 0), (2, 3));
+
+        assert!(editor.update(EditorMessage::Indent));
+        assert_eq!(editor.text(), "\taaa\n\n\tbbb");
+        assert_source_is_synced(&editor);
     }
 
     #[test]

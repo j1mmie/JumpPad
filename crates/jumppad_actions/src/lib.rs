@@ -112,6 +112,7 @@ actions! {
     Undo => "undo", "Undo", Editor, EditorFocused;
     Redo => "redo", "Redo", Editor, EditorFocused;
     Indent => "indent", "Indent", Editor, EditorFocused;
+    Outdent => "outdent", "Outdent", Editor, EditorFocused;
     ToggleComment =>
         "toggle_comment", "Toggle Comment", Editor, EditorFocused;
     DeleteLine => "delete_line", "Delete Line", Editor, EditorFocused;

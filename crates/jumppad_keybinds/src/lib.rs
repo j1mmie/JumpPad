@@ -52,6 +52,10 @@ impl Mods {
         control: true,
         ..Self::new()
     };
+    pub const SHIFT: Self = Self {
+        shift: true,
+        ..Self::new()
+    };
     pub const JUMP: Self = Self {
         jump: true,
         ..Self::new()
@@ -218,9 +222,10 @@ pub const DEFAULT_KEYS: &[(Action, &[Chord])] = &[
         Action::Redo,
         &[latin(Mods::COMMAND_SHIFT, 'z'), latin(Mods::COMMAND, 'y')],
     ),
-    // Plain Tab, which nothing else can claim: `Mods::matches` is exact, so
-    // the Ctrl+Tab above passes this by rather than shadowing it.
+    // Tab and its mirror, which nothing else can claim: `Mods::matches` is
+    // exact, so the Ctrl+Tab above passes both by rather than shadowing them.
     (Action::Indent, &[named(Mods::NONE, key::Named::Tab)]),
+    (Action::Outdent, &[named(Mods::SHIFT, key::Named::Tab)]),
     (Action::ToggleComment, &[latin(Mods::COMMAND, '/')]),
     (Action::DeleteLine, &[latin(Mods::COMMAND, 'd')]),
     (Action::MoveLineUp, &[named(Mods::ALT, key::Named::ArrowUp)]),
@@ -611,15 +616,28 @@ mod tests {
     }
 
     #[test]
-    fn shift_tab_is_unbound() {
-        // Deliberate: outdent is not built yet, and an exact modifier match
-        // is what keeps Shift+Tab from falling through to plain Tab.
+    fn shift_tab_outdents_rather_than_falling_through_to_plain_tab() {
+        // Which it can only do while `Mods::matches` stays exact.
         assert_eq!(
             action_for(
                 &Key::Named(key::Named::Tab),
                 key::Physical::Code(key::Code::Tab),
                 Modifiers::SHIFT,
                 Context::EditorFocused
+            ),
+            Some(Action::Outdent)
+        );
+    }
+
+    #[test]
+    fn shift_tab_does_not_outdent_with_the_editor_unfocused() {
+        // Same reason plain Tab doesn't: Shift+Tab cycles a dialog backwards.
+        assert_eq!(
+            action_for(
+                &Key::Named(key::Named::Tab),
+                key::Physical::Code(key::Code::Tab),
+                Modifiers::SHIFT,
+                Context::Always
             ),
             None
         );

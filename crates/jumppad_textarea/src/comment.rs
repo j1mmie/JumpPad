@@ -1,6 +1,8 @@
 //! The toggle-comment transformation: pure functions over line texts,
 //! glued to the document by `TextArea::toggle_comment`.
 
+use crate::line_edit::{EditedLines, LineEdit};
+
 /// A file type's comment syntax - this crate's own mirror of the config
 /// type, so it doesn't depend on `jumppad_config`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,28 +11,12 @@ pub enum CommentStyle {
     Multi { left: String, right: String },
 }
 
-/// One edit on a covered line, for shifting a caret column across it.
-/// `column` is in pre-toggle byte coordinates; a positive `delta` inserts
-/// there, a negative one removes `[column, column + |delta|)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LineEdit {
-    pub column: usize,
-    pub delta: isize,
-}
-
-/// The transformed lines plus each line's edits, ascending by column -
-/// empty for an untouched line. Both parallel the input.
-pub struct ToggledLines {
-    pub lines: Vec<String>,
-    pub edits: Vec<Vec<LineEdit>>,
-}
-
 /// Uncomments `lines` when the coverage is already commented in `style`,
 /// else comments it. `None` = nothing to do.
 pub fn toggle_comment(
     lines: &[&str],
     style: &CommentStyle,
-) -> Option<ToggledLines> {
+) -> Option<EditedLines> {
     match style {
         CommentStyle::Single(prefix) => toggle_single(lines, prefix),
         CommentStyle::Multi { left, right } => toggle_multi(lines, left, right),
@@ -47,7 +33,7 @@ fn leading_whitespace_len(line: &str) -> usize {
 
 /// Single-line style: every non-blank line gets the prefix at the leftmost
 /// non-whitespace column, or loses it when all of them already have it.
-fn toggle_single(lines: &[&str], prefix: &str) -> Option<ToggledLines> {
+fn toggle_single(lines: &[&str], prefix: &str) -> Option<EditedLines> {
     let token = prefix.trim_end();
     if token.is_empty() || lines.iter().all(|line| blank(line)) {
         return None;
@@ -66,7 +52,7 @@ fn toggle_single(lines: &[&str], prefix: &str) -> Option<ToggledLines> {
     Some(toggled)
 }
 
-fn single_comment(lines: &[&str], prefix: &str) -> ToggledLines {
+fn single_comment(lines: &[&str], prefix: &str) -> EditedLines {
     let insert_col = lines
         .iter()
         .filter(|line| !blank(line))
@@ -74,14 +60,10 @@ fn single_comment(lines: &[&str], prefix: &str) -> ToggledLines {
         .min()
         .unwrap_or(0);
 
-    let mut toggled = ToggledLines {
-        lines: Vec::new(),
-        edits: Vec::new(),
-    };
+    let mut toggled = EditedLines::default();
     for line in lines {
         if blank(line) {
-            toggled.lines.push(line.to_string());
-            toggled.edits.push(Vec::new());
+            toggled.push_unchanged(line);
             continue;
         }
         // The min indent was measured on another line's whitespace; back it
@@ -94,24 +76,22 @@ fn single_comment(lines: &[&str], prefix: &str) -> ToggledLines {
         commented.push_str(&line[..column]);
         commented.push_str(prefix);
         commented.push_str(&line[column..]);
-        toggled.lines.push(commented);
-        toggled.edits.push(vec![LineEdit {
-            column,
-            delta: prefix.len() as isize,
-        }]);
+        toggled.push(
+            commented,
+            vec![LineEdit {
+                column,
+                delta: prefix.len() as isize,
+            }],
+        );
     }
     toggled
 }
 
-fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> ToggledLines {
-    let mut toggled = ToggledLines {
-        lines: Vec::new(),
-        edits: Vec::new(),
-    };
+fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> EditedLines {
+    let mut toggled = EditedLines::default();
     for line in lines {
         if blank(line) {
-            toggled.lines.push(line.to_string());
-            toggled.edits.push(Vec::new());
+            toggled.push_unchanged(line);
             continue;
         }
         let column = leading_whitespace_len(line);
@@ -126,11 +106,13 @@ fn single_uncomment(lines: &[&str], prefix: &str, token: &str) -> ToggledLines {
         let mut uncommented = String::with_capacity(line.len() - removed);
         uncommented.push_str(&line[..column]);
         uncommented.push_str(&line[column + removed..]);
-        toggled.lines.push(uncommented);
-        toggled.edits.push(vec![LineEdit {
-            column,
-            delta: -(removed as isize),
-        }]);
+        toggled.push(
+            uncommented,
+            vec![LineEdit {
+                column,
+                delta: -(removed as isize),
+            }],
+        );
     }
     toggled
 }
@@ -142,7 +124,7 @@ fn toggle_multi(
     lines: &[&str],
     left: &str,
     right: &str,
-) -> Option<ToggledLines> {
+) -> Option<EditedLines> {
     let left_token = left.trim_end();
     let right_token = right.trim_start();
     if left_token.is_empty() || right_token.is_empty() {
@@ -201,11 +183,8 @@ fn multi_comment(
     last: usize,
     left: &str,
     right: &str,
-) -> ToggledLines {
-    let mut toggled = ToggledLines {
-        lines: Vec::new(),
-        edits: Vec::new(),
-    };
+) -> EditedLines {
+    let mut toggled = EditedLines::default();
     for (index, line) in lines.iter().enumerate() {
         let mut text = line.to_string();
         let mut edits = Vec::new();
@@ -222,8 +201,7 @@ fn multi_comment(
             // end-of-line caret must stay put, i.e. before `right`.
             text.push_str(right);
         }
-        toggled.lines.push(text);
-        toggled.edits.push(edits);
+        toggled.push(text, edits);
     }
     toggled
 }
@@ -236,11 +214,8 @@ fn multi_uncomment(
     right: &str,
     left_token: &str,
     right_token: &str,
-) -> ToggledLines {
-    let mut toggled = ToggledLines {
-        lines: Vec::new(),
-        edits: Vec::new(),
-    };
+) -> EditedLines {
+    let mut toggled = EditedLines::default();
     for (index, line) in lines.iter().enumerate() {
         let left_span = (index == first).then(|| {
             let column = leading_whitespace_len(line);
@@ -290,47 +265,15 @@ fn multi_uncomment(
                 delta: -(removed as isize),
             });
         }
-        toggled.lines.push(text);
-        toggled.edits.push(edits);
+        toggled.push(text, edits);
     }
     toggled
-}
-
-/// Shifts a saved `(line, byte column)` across a line's edits: inserts at
-/// or before it push it right, removals pull it left, and a caret inside a
-/// removed span pins to where the span started.
-pub fn shift_position(
-    pos: (usize, usize),
-    first_line: usize,
-    edits: &[Vec<LineEdit>],
-) -> (usize, usize) {
-    let (line, column) = pos;
-    let Some(line_edits) =
-        line.checked_sub(first_line).and_then(|i| edits.get(i))
-    else {
-        return pos;
-    };
-    let mut shifted = column as isize;
-    for edit in line_edits {
-        if edit.delta >= 0 {
-            if column >= edit.column {
-                shifted += edit.delta;
-            }
-        } else {
-            let removed_end = edit.column + edit.delta.unsigned_abs();
-            if column >= removed_end {
-                shifted += edit.delta;
-            } else if column > edit.column {
-                shifted -= (column - edit.column) as isize;
-            }
-        }
-    }
-    (line, shifted.max(0) as usize)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::line_edit::shift_position;
 
     fn single(prefix: &str) -> CommentStyle {
         CommentStyle::Single(prefix.to_string())
@@ -343,11 +286,11 @@ mod tests {
         }
     }
 
-    fn toggle(lines: &[&str]) -> ToggledLines {
+    fn toggle(lines: &[&str]) -> EditedLines {
         toggle_comment(lines, &single("// ")).unwrap()
     }
 
-    fn toggle_html(lines: &[&str]) -> ToggledLines {
+    fn toggle_html(lines: &[&str]) -> EditedLines {
         toggle_comment(lines, &html_multi()).unwrap()
     }
 
@@ -604,72 +547,5 @@ mod tests {
         // The eat stops at the left removal's edge instead of overlapping it.
         let hollow = toggle_comment(&["<!-- -->"], &style).unwrap();
         assert_eq!(hollow.lines, vec![""]);
-    }
-
-    #[test]
-    fn shift_position_moves_only_columns_at_or_after_the_edit() {
-        let edits = [vec![LineEdit {
-            column: 4,
-            delta: 3,
-        }]];
-        assert_eq!(
-            shift_position((0, 2), 0, &edits),
-            (0, 2),
-            "before the edit"
-        );
-        assert_eq!(shift_position((0, 4), 0, &edits), (0, 7), "at the edit");
-        assert_eq!(
-            shift_position((0, 9), 0, &edits),
-            (0, 12),
-            "after the edit"
-        );
-        assert_eq!(shift_position((5, 9), 0, &edits), (5, 9), "uncovered line");
-    }
-
-    #[test]
-    fn shift_position_clamps_a_caret_inside_a_removed_prefix() {
-        // Caret sat on the second slash of a removed "// " (delta -3).
-        let edits = [vec![LineEdit {
-            column: 4,
-            delta: -3,
-        }]];
-        assert_eq!(shift_position((0, 5), 0, &edits), (0, 4));
-    }
-
-    #[test]
-    fn shift_position_compounds_two_removals_on_one_line() {
-        // "    <!--foo-->" uncommenting: left [4,8), right [11,14).
-        let edits = [vec![
-            LineEdit {
-                column: 4,
-                delta: -4,
-            },
-            LineEdit {
-                column: 11,
-                delta: -3,
-            },
-        ]];
-        assert_eq!(shift_position((0, 2), 0, &edits), (0, 2), "before both");
-        assert_eq!(
-            shift_position((0, 4), 0, &edits),
-            (0, 4),
-            "at left span start"
-        );
-        assert_eq!(
-            shift_position((0, 6), 0, &edits),
-            (0, 4),
-            "inside left span"
-        );
-        assert_eq!(
-            shift_position((0, 9), 0, &edits),
-            (0, 5),
-            "between the spans"
-        );
-        assert_eq!(
-            shift_position((0, 12), 0, &edits),
-            (0, 7),
-            "inside right span"
-        );
-        assert_eq!(shift_position((0, 14), 0, &edits), (0, 7), "at old EOL");
     }
 }
