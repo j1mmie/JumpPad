@@ -38,6 +38,8 @@ pub struct Config {
     pub files: FilesConfig,
     #[serde(skip_serializing_if = "is_default")]
     pub indentation: IndentationConfig,
+    #[serde(skip_serializing_if = "is_default")]
+    pub words: WordsConfig,
     /// `[[languages]]` entries; last so the array-of-tables lands at the
     /// end of the written default file.
     pub languages: Vec<LanguageConfig>,
@@ -689,6 +691,37 @@ impl Default for IndentationConfig {
         Self {
             style: IndentationStyle::Tabs,
             width: 4,
+        }
+    }
+}
+
+/// VS Code's `editor.wordSeparators`, character for character - the list
+/// JumpPad ships with, so a `settings.json` line can be pasted straight
+/// across. Mirrored by `jumppad_textarea`'s `word::DEFAULT_SEPARATORS`,
+/// which is what a widget nobody has told otherwise uses.
+pub const DEFAULT_WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
+
+/// What ends a word: the characters a caret moving by one word stops at,
+/// and the ones a double click stops selecting at.
+///
+/// Whitespace always separates words, whatever this names, so a list never
+/// has to spell out a space, a tab or a newline. Anything the list leaves
+/// out is part of a word - drop `-` from it and `font-size` is one word
+/// rather than three.
+///
+/// The whole list is replaced rather than added to, the way a
+/// user-provided `[[languages]]` array replaces the built-in one, and the
+/// way VS Code's own setting behaves.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WordsConfig {
+    pub separators: String,
+}
+
+impl Default for WordsConfig {
+    fn default() -> Self {
+        Self {
+            separators: DEFAULT_WORD_SEPARATORS.to_string(),
         }
     }
 }
@@ -1939,6 +1972,10 @@ mod tests {
         // is what makes them worth reading back.
         assert_eq!(config.indentation.style, IndentationStyle::Spaces);
         assert_eq!(config.indentation.width, 2);
+        // Same again: the sample's separator list is the default with `-`
+        // taken out of it.
+        assert!(!config.words.separators.contains('-'));
+        assert!(config.words.separators.contains('.'));
         let _: KeybindsConfig = toml::from_str(include_str!(
             "../../../config/keybinds.sample.toml"
         ))
@@ -2083,6 +2120,49 @@ mod tests {
             "#,
         );
         assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn config_toml_with_no_words_section_separates_words_like_vs_code() {
+        let config: Config = toml::from_str("").unwrap();
+        assert_eq!(config.words, WordsConfig::default());
+        assert_eq!(config.words.separators, DEFAULT_WORD_SEPARATORS);
+        // The characters that make a `foo.bar(baz)` four words rather than
+        // one, spot-checked so a mangled escape in the literal shows up.
+        for separator in ['.', '(', ')', '"', '\'', '\\', '-'] {
+            assert!(
+                config.words.separators.contains(separator),
+                "{separator:?} should be a word separator by default"
+            );
+        }
+    }
+
+    #[test]
+    fn a_words_section_replaces_the_whole_list() {
+        let config: Config = toml::from_str(
+            r#"
+
+            [words]
+            separators = ".,"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.words.separators, ".,");
+    }
+
+    /// A list can be emptied, which leaves whitespace as the only thing that
+    /// ends a word - the widget's rule, not something this file can turn off.
+    #[test]
+    fn an_empty_separator_list_is_a_setting_rather_than_a_missing_one() {
+        let config: Config = toml::from_str(
+            r#"
+
+            [words]
+            separators = ""
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.words.separators, "");
     }
 
     #[test]

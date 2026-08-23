@@ -549,6 +549,65 @@ Only the vertical edges walk. The widget wraps (`Wrapping::default()` is
 `Word`, and nothing overrides it), so there is never anything to scroll
 sideways to.
 
+### Where a word ends
+
+`[words] separators` decides it, and it decides it in the three places a word
+is a unit: Ctrl/Option+Left and Right, Ctrl/Option+Backspace and Delete (a
+`Select` then a delete, so they inherit it), and the double click.
+
+**cosmic-text cannot be told any of this.** It answers with Unicode word
+segmentation, from two places nothing outside it reaches: `Motion::LeftWord`
+and `RightWord` inside `cursor_motion`, and `Selection::Word`, which is a
+*sticky* selection whose bounds it recomputes from an anchor on every read.
+So the word actions are caught in `TextArea::apply_action` before they reach
+the buffer, worked out by `word.rs` against the line's own text, and applied
+as a cursor position through `Content::move_to`.
+
+**Three classes, not two.** A character is whitespace, a separator, or a word
+character, and runs of the first two are units in their own right - a double
+click on `->` takes the arrow, and one in a gap of two or more spaces takes
+the spaces. That is also where this parts company with the segmentation it
+replaces: a word-right from in front of `->` now stops after the arrow rather
+than carrying on to the end of the next word, which is what VS Code does and
+what `unicode_word_indices` - which yields only the segments holding letters
+and digits - cannot express. Whitespace is never part of a word whatever the
+list says, which is why a separator list never has to name it.
+
+**A double click takes the run the caret is in, and a caret sits between two
+characters.** The higher-ranked of the two decides which run that is - word
+over separator over whitespace - so clicking the `=` in `a = b` takes the `=`
+from either side of it, and a caret hard against the end of a word takes the
+word rather than the space after it. A tie goes to the left.
+
+**A motion lands on the far side of a word, not the near one.** Word-left
+goes to the start of the word behind the caret, word-right to the end of the
+word ahead of it; that is cosmic-text's own rule, and VS Code's. The only way
+either leaves its line is by running out of it. A motion over a selection
+merely collapses it onto the edge it was heading for - iced's rule for every
+motion, decided before a word boundary is ever asked for - so that one case
+is handed to the buffer untouched.
+
+**A double click leaves an ordinary range, and `SelectionKind::Word` is gone
+with it.** Both ends are known here, so there is nothing for a kind to imply
+and nothing to rebuild on restore. `SelectionKind::Line` stays: a triple
+click is still cosmic-text's `Selection::Line`, bounds and all.
+
+**A drag out of a double-clicked word goes on taking whole words**, which is
+what `TextArea::word_drag_from` holds: where the double click landed, kept
+until anything but a drag moves the caret, so each drag can re-measure both
+ends. cosmic-text got that for free from `Selection::Word` being sticky; a
+plain range has to be widened again per drag. A shift+click arrives as a
+`Drag` too, so it extends by words as well - which is what VS Code and a
+browser both do after a double click.
+
+**Gotcha - setting a cursor is not the same as moving one.** cosmic-text
+remembers the column an Up or Down is aiming for until a sideways *motion*
+clears it, and `move_to` is not one - so word-left followed by Down would
+land back on the column word-left had just left. `set_cursor` performs a
+`Move` for exactly that, plus a second one ahead of it when there is a
+selection to collapse, since a `Move` over a selection never reaches the
+motion.
+
 ### Clipping the text (and why the tab bar collected old text)
 
 The editor hands `fill_editor` a clip a sliver shorter than the text area
@@ -2048,6 +2107,23 @@ Shift+Tab is deliberately unbound: outdent, multi-line indent, indent-aware
 Enter, autodetection and a status readout are all still to come, and
 `Mods::matches` being exact is what keeps Shift+Tab from falling through to
 plain Tab in the meantime.
+
+`[words] separators` is the characters that end a word: what Ctrl/Option+Left
+and Right stop at, what Ctrl/Option+Backspace and Delete take back to, and
+where a double click stops selecting. It defaults to VS Code's
+`editor.wordSeparators` character for character, so a `settings.json` line
+can be pasted straight across, and a string here replaces that list wholesale
+rather than adding to it - the same rule a user-provided `[[languages]]`
+array follows. Whitespace ends a word whether or not the string names it,
+which makes `separators = ""` a usable setting (only whitespace separates)
+rather than a broken one. What the setting then means is the widget's, in
+`word.rs`; see the text-area fork's section above.
+
+The default list is written out twice - `DEFAULT_WORD_SEPARATORS` here and
+`word::DEFAULT_SEPARATORS` in `jumppad_textarea` - because neither crate may
+depend on the other, the same split `[indentation]`'s default width already
+has. `a_new_app_starts_on_the_default_word_separators` in `app.rs` keeps the
+two the same list, that being the crate that can see both.
 
 ### Themes and the base theme
 

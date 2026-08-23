@@ -81,9 +81,9 @@ pub trait TextEditorWidget {
 pub const EDITOR_WIDGET_ID: &str = "editor";
 
 /// A selection saved when a tab is deselected: the fixed anchor plus how
-/// the selection was made. Word/line selections (double/triple click) keep
-/// their anchor at the click position *inside* the selected region - the
-/// bounds live in the kind, so an anchor-to-cursor range can't rebuild them.
+/// the selection was made. A line selection (triple click) keeps its anchor
+/// at the click position *inside* the selected line - the bounds live in the
+/// kind, so an anchor-to-cursor range can't rebuild them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SavedSelection {
     pub anchor: (usize, usize),
@@ -93,10 +93,10 @@ pub struct SavedSelection {
 /// How a [`SavedSelection`] gets rebuilt on restore.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SelectionKind {
-    /// A plain anchor-to-cursor span (mouse drag, shift+arrows, select-all).
+    /// A plain anchor-to-cursor span (mouse drag, shift+arrows, select-all,
+    /// and the word a double click takes - the widget measures that one
+    /// itself, so it arrives with both ends already in the cursor pair).
     Range,
-    /// The word around the anchor (double click).
-    Word,
     /// The line containing the anchor (triple click).
     Line,
 }

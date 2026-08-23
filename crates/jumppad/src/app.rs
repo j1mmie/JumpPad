@@ -453,6 +453,9 @@ impl JumpPadApp {
         editor_config.set_undo_depth(config.history.depth);
         editor_config.set_comment_styles(build_comment_styles(&config));
         editor_config.set_indentation(build_indentation(&config));
+        editor_config.set_word_separators(
+            jumppad_textarea::WordSeparators::new(&config.words.separators),
+        );
 
         let registry = syntax_registry::SyntaxRegistry::new(
             search_dirs,
@@ -1318,6 +1321,14 @@ impl JumpPadApp {
         // changed (see AGENTS.md on the repaint nudge).
         if new.indentation != current.indentation {
             self.editor_config.set_indentation(build_indentation(&new));
+        }
+
+        // No repaint: nothing on screen changes until the next word motion
+        // or double click, and neither draws anything the old list did.
+        if new.words != current.words {
+            self.editor_config.set_word_separators(
+                jumppad_textarea::WordSeparators::new(&new.words.separators),
+            );
         }
 
         // Settings a window is handed once, at creation. Nothing can reach
@@ -3751,8 +3762,10 @@ mod tests {
         app.next_id = 2;
 
         // Tab 0: a double-click-style word selection (Click then SelectWord,
-        // the sequence the widget publishes). Regression case: a word
-        // selection's anchor sits at the cursor, not across the range.
+        // the sequence the widget publishes). Which word it lands on is the
+        // hit test's business - it depends on the font the machine has - so
+        // what is asserted here is that a word was taken, and below that the
+        // tab still has it after two switches.
         let _ = app.update(Message::Editor(
             0,
             EditorMessage::Action(Action::Click(iced::Point::new(10.0, 4.0))),
@@ -3762,11 +3775,12 @@ mod tests {
             EditorMessage::Action(Action::SelectWord),
         ));
         let word = app.tabs[0].editor.selection();
+        let word_cursor = app.tabs[0].editor.cursor_position();
         assert!(
             matches!(
                 word,
                 Some(SavedSelection {
-                    kind: SelectionKind::Word,
+                    kind: SelectionKind::Range,
                     ..
                 })
             ),
@@ -3785,6 +3799,7 @@ mod tests {
         // Both tabs hold their own selection, verified across two round trips.
         let _ = app.update(Message::SelectTab(0));
         assert_eq!(app.tabs[0].editor.selection(), word);
+        assert_eq!(app.tabs[0].editor.cursor_position(), word_cursor);
 
         let _ = app.update(Message::SelectTab(1));
         assert_eq!(
@@ -5255,6 +5270,42 @@ mod tests {
         let _ = app.apply_config(config);
 
         assert_eq!(app.editor_config.indentation().width(), 1);
+    }
+
+    #[test]
+    fn a_new_app_starts_on_the_default_word_separators() {
+        // The default list is written out in two crates - `jumppad_config`
+        // can't depend on the widget's copy and the widget can't depend on
+        // the config's - so this is what keeps the two the same list.
+        let app = test_app(1);
+        assert_eq!(
+            app.editor_config.word_separators(),
+            jumppad_textarea::WordSeparators::new(
+                jumppad_config::DEFAULT_WORD_SEPARATORS
+            )
+        );
+        assert_eq!(
+            jumppad_config::WordsConfig::default().separators,
+            jumppad_config::DEFAULT_WORD_SEPARATORS
+        );
+    }
+
+    #[test]
+    fn apply_config_reaches_the_shared_word_separators() {
+        let mut app = test_app(1);
+        let config = jumppad_config::Config {
+            words: jumppad_config::WordsConfig {
+                separators: ".,".to_string(),
+            },
+            ..Default::default()
+        };
+
+        let _ = app.apply_config(config);
+
+        assert_eq!(
+            app.editor_config.word_separators(),
+            jumppad_textarea::WordSeparators::new(".,")
+        );
     }
 
     #[test]

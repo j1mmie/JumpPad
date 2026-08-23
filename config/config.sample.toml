@@ -75,6 +75,17 @@ drag_speed = 1.0
 [files]
 save_conflict_resolution = "ask"
 
+[words]
+# What ends a word, for Ctrl/Option+Left and Right and for the double click
+# that selects one. The whole list is replaced, not added to, and whitespace
+# always ends a word whether or not it is named here.
+#
+# The default is VS Code's own `editor.wordSeparators`:
+#   "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?"
+# This one takes `-` out of it, so `font-size` reads as one word rather than
+# three.
+separators = "`~!@#$%^&*()=+[{]}\\|;:'\",.<>/?"
+
 [indentation]
 # "tabs" inserts one tab character; "spaces" inserts however many spaces
 # reach the next stop from where the caret is. `width` is the columns

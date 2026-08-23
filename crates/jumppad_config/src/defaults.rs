@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use crate::{
     CommentSyntax, Config, FilesConfig, HistoryConfig, IndentationConfig,
     LanguageConfig, ModeConfig, ScrollConfig, VisorConfig, WindowConfig,
+    WordsConfig,
 };
 
 fn lang(
@@ -88,6 +89,7 @@ pub(crate) fn config() -> Config {
         history: HistoryConfig::default(),
         files: FilesConfig::default(),
         indentation: IndentationConfig::default(),
+        words: WordsConfig::default(),
         languages,
     }
 }

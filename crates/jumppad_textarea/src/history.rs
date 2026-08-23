@@ -414,14 +414,10 @@ mod tests {
 
     #[test]
     fn undo_preserves_the_selection_kind() {
-        // Guards the `SavedSelection` shape: a word/line selection carries its
+        // Guards the `SavedSelection` shape: a line selection carries its
         // bounds in the kind, not in an anchor-to-cursor span, so flattening
         // the step back to a bare pair of positions would lose them.
-        for kind in [
-            SelectionKind::Range,
-            SelectionKind::Word,
-            SelectionKind::Line,
-        ] {
+        for kind in [SelectionKind::Range, SelectionKind::Line] {
             let mut history = History::new();
             let before = selected((0, 2), (0, 2), kind);
             history.record_before_edit(&doc("hello"), before);

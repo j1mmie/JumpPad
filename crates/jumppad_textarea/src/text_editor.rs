@@ -40,7 +40,8 @@ use std::ops::DerefMut;
 use std::sync::Arc;
 
 pub use text::editor::{
-    Action, Cursor, Edit, Line, LineEnding, Motion, Position, Selection,
+    Action, Cursor, Direction, Edit, Line, LineEnding, Motion, Position,
+    Selection,
 };
 
 /// The scrollbar's geometry for wherever the document currently sits, or

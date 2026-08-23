@@ -32,11 +32,9 @@ pub fn covered_lines(
         return (cursor.0, cursor.0);
     };
     match selection.kind {
-        // Word and Line selections report anchor == cursor and never span
-        // lines - the real bounds live in the kind.
-        SelectionKind::Word | SelectionKind::Line => {
-            (selection.anchor.0, selection.anchor.0)
-        }
+        // A Line selection reports anchor == cursor and never spans lines -
+        // the real bounds live in the kind.
+        SelectionKind::Line => (selection.anchor.0, selection.anchor.0),
         SelectionKind::Range => {
             let (top, bottom) = if selection.anchor <= cursor {
                 (selection.anchor, cursor)
@@ -150,14 +148,12 @@ mod tests {
     }
 
     #[test]
-    fn word_and_line_selections_cover_the_anchor_line_only() {
-        for kind in [SelectionKind::Word, SelectionKind::Line] {
-            let selection = Some(SavedSelection {
-                anchor: (2, 5),
-                kind,
-            });
-            assert_eq!(covered_lines((2, 5), selection), (2, 2));
-        }
+    fn a_line_selection_covers_the_anchor_line_only() {
+        let selection = Some(SavedSelection {
+            anchor: (2, 5),
+            kind: SelectionKind::Line,
+        });
+        assert_eq!(covered_lines((2, 5), selection), (2, 2));
     }
 
     #[test]

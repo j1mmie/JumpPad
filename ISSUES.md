@@ -15,6 +15,3 @@ Notepad and other text editors solve this by highlighting an invisible character
 
 Cursor should reset blink whenever window gains focus. Whenever the window gains focus, the cursor should immediately be visible.
 
---
-
-Need support for custom word separator charactors. Similar to VSCode's `editor.wordSeparators`

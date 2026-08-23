@@ -8,9 +8,11 @@ mod safe_area;
 mod scrollbar;
 mod text_delta;
 pub mod text_editor;
+mod word;
 
 pub use comment::CommentStyle;
 pub use indent::{Indentation, IndentationStyle};
+pub use word::WordSeparators;
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -31,7 +33,7 @@ use syntax_registry::{
 };
 use text_delta::TextDelta;
 use text_editor::{
-    Binding, Content, Cursor, Motion, Position, Status, text_editor,
+    Binding, Content, Cursor, Direction, Motion, Position, Status, text_editor,
 };
 
 /// Re-exported so the app can write the [`KeyResolver`] it hands down without
@@ -80,6 +82,11 @@ pub struct SharedEditorConfig {
     /// in an atomic because it is two fields, like [`Self::font`]; read once
     /// per view and once per Tab press, neither of them hot.
     indentation: RwLock<Indentation>,
+    /// What ends a word, for the word motions and the double click. Behind a
+    /// lock for the same reason [`Self::font`] is - it is a string, not a
+    /// number - and read once per word action, which is one keystroke or one
+    /// click.
+    word_separators: RwLock<WordSeparators>,
 }
 
 impl SharedEditorConfig {
@@ -96,6 +103,7 @@ impl SharedEditorConfig {
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
             indentation: RwLock::new(Indentation::default()),
+            word_separators: RwLock::new(WordSeparators::default()),
         })
     }
 
@@ -196,6 +204,16 @@ impl SharedEditorConfig {
     pub fn set_indentation(&self, indentation: Indentation) {
         *self.indentation.write().unwrap() = indentation;
     }
+
+    /// The characters a word ends at, for the word motions and the double
+    /// click. VS Code's list until a config names another.
+    pub fn word_separators(&self) -> WordSeparators {
+        self.word_separators.read().unwrap().clone()
+    }
+
+    pub fn set_word_separators(&self, separators: WordSeparators) {
+        *self.word_separators.write().unwrap() = separators;
+    }
 }
 
 /// A [`TextEditorWidget`] backed by this crate's forked [`text_editor`], with
@@ -230,6 +248,11 @@ pub struct TextArea {
     /// rather than a copy of the whole match list.
     find_matches: Arc<Vec<FindMatch>>,
     find_current: Option<usize>,
+    /// Where the double click that started a word selection landed, while
+    /// one is live. It is what a drag out of that word measures from, so the
+    /// selection goes on taking whole words at both ends; anything else that
+    /// moves the caret clears it.
+    word_drag_from: Option<Position>,
 }
 
 /// Scales every syntax-highlighted color `color_for` produces. Global
@@ -285,6 +308,7 @@ impl TextArea {
             extension: extension.map(str::to_lowercase),
             find_matches: Arc::new(Vec::new()),
             find_current: None,
+            word_drag_from: None,
         }
     }
 
@@ -453,7 +477,7 @@ impl TextArea {
             self.history
                 .record_before_edit(&self.source, self.cursor_state());
         }
-        self.content.perform(action);
+        self.apply_action(action);
         if let Some(touched_before) = touched_before {
             self.resync_source();
             self.edited_from =
@@ -463,6 +487,164 @@ impl TextArea {
             self.history.end_burst();
         }
         is_edit
+    }
+
+    /// Hands one action to the document, answering the word-boundary ones
+    /// here rather than letting them reach the buffer.
+    ///
+    /// cosmic-text decides where a word ends by Unicode segmentation and
+    /// takes no argument on the subject, so `[words] separators` can only
+    /// apply from outside it: what a word motion or a double click asks for
+    /// is worked out in `word.rs` and arrives as a cursor position.
+    fn apply_action(&mut self, action: text_editor::Action) {
+        use text_editor::Action;
+
+        // A word drag lives from the double click that starts it until
+        // anything else moves the caret. A shift+click arrives as a `Drag`
+        // of its own, so it extends the selection by whole words - which is
+        // what VS Code and a browser both do after a double click.
+        if !matches!(action, Action::SelectWord | Action::Drag(_)) {
+            self.word_drag_from = None;
+        }
+        match action {
+            Action::SelectWord => self.select_word(),
+            Action::Drag(at) if self.word_drag_from.is_some() => {
+                self.content.perform(Action::Drag(at));
+                self.extend_word_selection();
+            }
+            Action::Move(motion @ (Motion::WordLeft | Motion::WordRight)) => {
+                // A motion over a selection only collapses it onto the edge
+                // it is heading for, whatever the motion was - so the
+                // buffer's own answer is right here, and its idea of a word
+                // never comes into it.
+                if self.content.cursor().selection.is_some() {
+                    self.content.perform(Action::Move(motion));
+                } else {
+                    let target = self.word_target(motion.direction());
+                    self.set_cursor(target, None);
+                }
+            }
+            Action::Select(motion @ (Motion::WordLeft | Motion::WordRight)) => {
+                let cursor = self.content.cursor();
+                let anchor = cursor.selection.unwrap_or(cursor.position);
+                let target = self.word_target(motion.direction());
+                self.set_cursor(target, Some(anchor));
+            }
+            action => self.content.perform(action),
+        }
+    }
+
+    /// The word around the caret, selected outright - a double click.
+    ///
+    /// The click that placed the caret has already been performed by the
+    /// time this arrives, so the caret is standing exactly where the pointer
+    /// is and the run around it is what the pointer picked out.
+    fn select_word(&mut self) {
+        let position = self.content.cursor().position;
+        self.word_drag_from = Some(position);
+        let (start, end) = self.run_around(position);
+        self.set_cursor(end, Some(start));
+    }
+
+    /// Takes a word drag out to whole runs at both ends, from wherever the
+    /// drag has just left the caret. The end the pointer is on moves; the
+    /// other stays wrapped around the word the double click landed in.
+    fn extend_word_selection(&mut self) {
+        let Some(origin) = self.word_drag_from else {
+            return;
+        };
+        // The document can have been rebuilt since the double click, and a
+        // position past the end of it would slice a line in half.
+        let origin =
+            clamp_position(&self.content, (origin.line, origin.column));
+        let position = self.content.cursor().position;
+        let (origin_start, origin_end) = self.run_around(origin);
+        let (start, end) = self.run_around(position);
+        if (position.line, position.column) < (origin.line, origin.column) {
+            self.set_cursor(start, Some(origin_end));
+        } else {
+            self.set_cursor(end, Some(origin_start));
+        }
+    }
+
+    /// The run of like characters around a position: the word a double click
+    /// takes, or the punctuation or the whitespace it landed in instead.
+    fn run_around(&self, position: Position) -> (Position, Position) {
+        let text = self.line_text(position.line).unwrap_or_default();
+        let run = self
+            .settings
+            .word_separators()
+            .run_around(&text, position.column);
+        let at = |column| Position {
+            line: position.line,
+            column,
+        };
+        (at(run.start), at(run.end))
+    }
+
+    /// Where one word motion lands from wherever the caret is: the start of
+    /// the word behind it, or the end of the word ahead of it - and the line
+    /// above or below once this one has run out, which is the only way
+    /// either motion leaves the line it started on.
+    fn word_target(&self, direction: Direction) -> Position {
+        let position = self.content.cursor().position;
+        let text = self.line_text(position.line).unwrap_or_default();
+        let separators = self.settings.word_separators();
+        match direction {
+            Direction::Left if position.column == 0 => {
+                match position.line.checked_sub(1) {
+                    Some(line) => Position {
+                        line,
+                        column: self.line_text(line).unwrap_or_default().len(),
+                    },
+                    // The start of the document: nowhere left to go.
+                    None => position,
+                }
+            }
+            Direction::Left => Position {
+                column: separators.start_before(&text, position.column),
+                ..position
+            },
+            Direction::Right if position.column >= text.len() => {
+                if position.line + 1 < self.content.line_count() {
+                    Position {
+                        line: position.line + 1,
+                        column: 0,
+                    }
+                } else {
+                    position
+                }
+            }
+            Direction::Right => Position {
+                column: separators.end_after(&text, position.column),
+                ..position
+            },
+        }
+    }
+
+    /// Puts the caret at `position`, with `anchor` as the other end of a
+    /// selection, or with nothing selected at all.
+    ///
+    /// The `Move`s do two things `Content::move_to` cannot, and where they
+    /// land doesn't matter since `move_to` overwrites it. They drop a
+    /// selection still standing - `move_to` can set one but never clear one.
+    /// And the one that actually *moves* clears the column an Up or Down is
+    /// aiming for, which a caret that has just been moved sideways has no
+    /// business keeping: without it, word-left followed by Down lands on the
+    /// column before the word motion rather than after it. A `Move` over a
+    /// selection only collapses it, so reaching the motion can take two.
+    fn set_cursor(&mut self, position: Position, anchor: Option<Position>) {
+        let anchor = anchor.filter(|anchor| *anchor != position);
+        if self.content.cursor().selection.is_some() {
+            self.content
+                .perform(text_editor::Action::Move(Motion::Right));
+        }
+        self.content
+            .perform(text_editor::Action::Move(Motion::Right));
+        self.content.move_to(Cursor {
+            position,
+            selection: anchor,
+        });
     }
 
     /// Inserts one indent over any selection: a tab character, or the spaces
@@ -869,18 +1051,8 @@ impl TextEditorWidget for TextArea {
     }
 
     fn move_cursor_to(&mut self, line: usize, column: usize) {
-        // `move_to` with no selection leaves an existing one in place, so a
-        // stale selection has to be dropped explicitly first. Any non-edge
-        // `Move` collapses it (the cursor lands wherever `move_to` says next).
-        if self.content.cursor().selection.is_some() {
-            self.content
-                .perform(text_editor::Action::Move(Motion::Right));
-        }
         let position = clamp_position(&self.content, (line, column));
-        self.content.move_to(Cursor {
-            position,
-            selection: None,
-        });
+        self.set_cursor(position, None);
     }
 
     fn set_find_matches(
@@ -907,21 +1079,17 @@ impl TextEditorWidget for TextArea {
             });
         }
         // Anchor == cursor: either a leftover collapsed range (not a real
-        // selection) or a word/line selection from a double/triple click,
-        // whose bounds live in the selection kind rather than the cursor
-        // pair. The selected text tells the cases apart - and which kind.
-        let selected =
-            self.content.selection().filter(|text| !text.is_empty())?;
-        let line = self.content.line(anchor.line)?;
-        let kind =
-            if selected.trim_end_matches(['\r', '\n']) == line.text.as_ref() {
-                SelectionKind::Line
-            } else {
-                SelectionKind::Word
-            };
+        // selection) or the line a triple click took, whose bounds live in
+        // the kind rather than in the cursor pair. Whether anything is
+        // actually selected tells the two apart. A double click needs no
+        // case of its own - it makes a plain range like any other, since the
+        // word it takes is measured here rather than by the buffer.
+        if self.content.selection().is_none_or(|text| text.is_empty()) {
+            return None;
+        }
         Some(SavedSelection {
             anchor: anchor_position,
-            kind,
+            kind: SelectionKind::Line,
         })
     }
 
@@ -933,23 +1101,11 @@ impl TextEditorWidget for TextArea {
         let anchor = clamp_position(&self.content, selection.anchor);
         match selection.kind {
             SelectionKind::Range => {
-                self.content.move_to(Cursor {
-                    position: clamp_position(&self.content, cursor),
-                    selection: Some(anchor),
-                });
-            }
-            SelectionKind::Word => {
-                self.content.move_to(Cursor {
-                    position: anchor,
-                    selection: None,
-                });
-                self.content.perform(text_editor::Action::SelectWord);
+                let position = clamp_position(&self.content, cursor);
+                self.set_cursor(position, Some(anchor));
             }
             SelectionKind::Line => {
-                self.content.move_to(Cursor {
-                    position: anchor,
-                    selection: None,
-                });
+                self.set_cursor(anchor, None);
                 self.content.perform(text_editor::Action::SelectLine);
             }
         }
@@ -1934,6 +2090,12 @@ mod tests {
         EditorMessage::Action(text_editor::Action::Edit(edit))
     }
 
+    /// The message an action arrives as - the route the word-boundary ones
+    /// have to take, since `Content::perform` never sees them.
+    fn action(action: text_editor::Action) -> EditorMessage {
+        EditorMessage::Action(action)
+    }
+
     fn editor_with_style(
         text: &str,
         extension: &str,
@@ -2680,13 +2842,12 @@ mod tests {
     }
 
     #[test]
-    fn undo_restores_a_word_selection_as_a_word_selection() {
-        // The kind matters, not just the text: a word selection anchors at
-        // the click position with its bounds implied, so restoring it as a
-        // plain anchor-to-cursor range would collapse it to nothing.
+    fn undo_restores_a_double_clicked_word_still_selected() {
+        // Typing over a double-clicked word and undoing brings the word
+        // back selected, the same as undoing over any other selection.
         let mut editor = plain_editor("hello world");
         editor.move_cursor_to(0, 8); // inside "world"
-        editor.content.perform(text_editor::Action::SelectWord);
+        editor.update(action(text_editor::Action::SelectWord));
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
 
         editor.update(edit(text_editor::Edit::Insert('X')));
@@ -2696,8 +2857,11 @@ mod tests {
         assert_eq!(editor.text(), "hello world");
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
         assert_eq!(
-            editor.selection().map(|s| s.kind),
-            Some(SelectionKind::Word)
+            editor.selection(),
+            Some(SavedSelection {
+                anchor: (0, 6),
+                kind: SelectionKind::Range,
+            })
         );
     }
 
@@ -2804,24 +2968,28 @@ mod tests {
     #[test]
     fn word_selection_round_trips_through_save_and_restore() {
         let mut editor = plain_editor("hello world");
-        // A double click: Click places the cursor, SelectWord selects around it.
+        // A double click: Click places the cursor, SelectWord selects around
+        // it - and saves as an ordinary range, since the word's bounds are
+        // measured here rather than left implied for the buffer to redo.
         editor.move_cursor_to(0, 8); // inside "world"
-        editor.content.perform(text_editor::Action::SelectWord);
+        editor.update(action(text_editor::Action::SelectWord));
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
 
         let saved = editor.selection().expect("word selection should save");
         assert_eq!(
             saved,
             SavedSelection {
-                anchor: (0, 8),
-                kind: SelectionKind::Word
+                anchor: (0, 6),
+                kind: SelectionKind::Range
             }
         );
+        let cursor = editor.cursor_position();
+        assert_eq!(cursor, (0, 11));
 
         // Simulate the tab going away and coming back: clear, then restore.
         editor.move_cursor_to(0, 0);
         assert_eq!(editor.selection(), None);
-        editor.restore_selection(saved, (0, 8));
+        editor.restore_selection(saved, cursor);
         assert_eq!(editor.content.selection().as_deref(), Some("world"));
         assert_eq!(editor.selection(), Some(saved));
     }
@@ -2837,6 +3005,235 @@ mod tests {
         editor.move_cursor_to(0, 0);
         editor.restore_selection(saved, (1, 3));
         assert_eq!(editor.content.selection().as_deref(), Some("second line"));
+    }
+
+    /// One press of the word-left / word-right motion, as `Binding::Move`
+    /// builds it from Ctrl+Left / Ctrl+Right.
+    fn word_motion(motion: Motion) -> EditorMessage {
+        action(text_editor::Action::Move(motion.widen()))
+    }
+
+    fn word_selection(motion: Motion) -> EditorMessage {
+        action(text_editor::Action::Select(motion.widen()))
+    }
+
+    #[test]
+    fn a_double_click_takes_the_word_the_caret_is_in() {
+        let mut editor = plain_editor("alpha beta gamma");
+        editor.move_cursor_to(0, 8); // inside "beta"
+        editor.update(action(text_editor::Action::SelectWord));
+
+        assert_eq!(editor.content.selection().as_deref(), Some("beta"));
+        assert_eq!(editor.cursor_position(), (0, 10));
+    }
+
+    #[test]
+    fn a_double_click_takes_the_run_it_lands_in_when_that_is_no_word() {
+        // Punctuation is taken as its own run, and whitespace as its own -
+        // which is what keeps a double click on an operator off the words
+        // either side of it.
+        let mut editor = plain_editor("value ==  1");
+        editor.move_cursor_to(0, 7); // between the two `=`
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("=="));
+
+        editor.move_cursor_to(0, 9); // between the two spaces
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("  "));
+
+        // A caret with a word on one side of it takes the word, whichever
+        // side that is - which is why only a gap of two or more can be
+        // double clicked into at all.
+        editor.move_cursor_to(0, 10);
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn a_double_click_stops_where_the_configured_separators_say() {
+        // The whole point of the setting: `-` is on the default list, so a
+        // hyphenated name is two words - and a config that drops it makes
+        // the same text one.
+        let mut editor = plain_editor("font-size");
+        editor.move_cursor_to(0, 2);
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("font"));
+
+        editor
+            .settings
+            .set_word_separators(WordSeparators::new(":"));
+        editor.move_cursor_to(0, 2);
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("font-size"));
+    }
+
+    #[test]
+    fn the_word_motions_land_on_the_far_side_of_each_word() {
+        // Word-right ends on the word ahead, word-left starts on the word
+        // behind - so a round trip crosses the same words rather than
+        // sticking on the boundary between two of them.
+        let mut editor = plain_editor("alpha beta");
+        editor.move_cursor_to(0, 0);
+
+        editor.update(word_motion(Motion::Right));
+        assert_eq!(editor.cursor_position(), (0, 5));
+        editor.update(word_motion(Motion::Right));
+        assert_eq!(editor.cursor_position(), (0, 10));
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 6));
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 0));
+        // Already at the end of the document: nowhere left to go.
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 0));
+    }
+
+    #[test]
+    fn a_word_motion_stops_at_a_run_of_separators() {
+        let mut editor = plain_editor("foo(bar)");
+        editor.move_cursor_to(0, 0);
+
+        for column in [3, 4, 7, 8] {
+            editor.update(word_motion(Motion::Right));
+            assert_eq!(editor.cursor_position(), (0, column));
+        }
+    }
+
+    #[test]
+    fn a_word_motion_honours_the_configured_separators() {
+        let mut editor = plain_editor("font-size: 12");
+        editor
+            .settings
+            .set_word_separators(WordSeparators::new(":"));
+        editor.move_cursor_to(0, 0);
+
+        editor.update(word_motion(Motion::Right));
+        assert_eq!(editor.cursor_position(), (0, 9), "past \"font-size\"");
+    }
+
+    #[test]
+    fn a_word_motion_crosses_a_line_once_this_one_has_run_out() {
+        let mut editor = plain_editor(
+            "one
+two",
+        );
+        editor.move_cursor_to(0, 3);
+
+        editor.update(word_motion(Motion::Right));
+        assert_eq!(editor.cursor_position(), (1, 0));
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 3));
+    }
+
+    #[test]
+    fn a_word_motion_over_a_selection_only_collapses_it() {
+        // iced's rule for every motion, and the word ones keep it: the caret
+        // lands on the edge it was heading for and goes no further.
+        let mut editor = plain_editor("alpha beta gamma");
+        editor.restore_selection(
+            SavedSelection {
+                anchor: (0, 6),
+                kind: SelectionKind::Range,
+            },
+            (0, 10),
+        );
+
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 6));
+        assert_eq!(editor.selection(), None);
+    }
+
+    #[test]
+    fn shift_and_a_word_motion_extend_the_selection() {
+        let mut editor = plain_editor("alpha beta");
+        editor.move_cursor_to(0, 0);
+
+        editor.update(word_selection(Motion::Right));
+        assert_eq!(editor.content.selection().as_deref(), Some("alpha"));
+        editor.update(word_selection(Motion::Right));
+        assert_eq!(editor.content.selection().as_deref(), Some("alpha beta"));
+        // ...and back onto the anchor, which leaves nothing selected rather
+        // than an empty range.
+        editor.update(word_selection(Motion::Left));
+        editor.update(word_selection(Motion::Left));
+        assert_eq!(editor.selection(), None);
+        assert_eq!(editor.cursor_position(), (0, 0));
+    }
+
+    #[test]
+    fn a_word_delete_takes_the_word_the_separators_name() {
+        // `word_delete_backward` is a `Select` then a `Backspace`, so the
+        // separators decide what it deletes.
+        let delete_word_left = |separators: &str| {
+            let mut editor = plain_editor("font-size");
+            editor
+                .settings
+                .set_word_separators(WordSeparators::new(separators));
+            editor.move_cursor_to(0, 9);
+            editor.update(word_selection(Motion::Left));
+            editor.update(edit(text_editor::Edit::Backspace));
+            assert_source_is_synced(&editor);
+            editor.text()
+        };
+
+        assert_eq!(delete_word_left(word::DEFAULT_SEPARATORS), "font-");
+        assert_eq!(delete_word_left(""), "");
+    }
+
+    #[test]
+    fn a_drag_out_of_a_double_clicked_word_takes_whole_words() {
+        let mut editor = plain_editor("alpha beta gamma");
+        editor.move_cursor_to(0, 2); // inside "alpha"
+        editor.update(action(text_editor::Action::SelectWord));
+        assert_eq!(editor.content.selection().as_deref(), Some("alpha"));
+
+        // A drag's own hit test needs a laid-out buffer to answer; what it
+        // produces is a caret, and these are the carets it would produce -
+        // part-way into the word on either side of the one it started in.
+        let drag_to = |editor: &mut TextArea, column| {
+            editor.content.move_to(Cursor {
+                position: Position { line: 0, column },
+                selection: None,
+            });
+            editor.extend_word_selection();
+        };
+
+        drag_to(&mut editor, 13);
+        assert_eq!(
+            editor.content.selection().as_deref(),
+            Some("alpha beta gamma")
+        );
+        drag_to(&mut editor, 1);
+        assert_eq!(editor.content.selection().as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn a_word_motion_leaves_up_and_down_aiming_at_the_new_column() {
+        // cosmic-text remembers the column an Up or Down is aiming for until
+        // a sideways motion clears it, and a word motion that only sets the
+        // cursor would leave it standing - so Down after word-left would go
+        // back to the column word-left had just left.
+        let mut editor = plain_editor("alpha beta\nalpha beta");
+        editor.move_cursor_to(0, 8);
+        editor.update(action(text_editor::Action::Move(Motion::Down)));
+        assert_eq!(editor.cursor_position(), (1, 8), "the column is now aimed");
+        editor.update(action(text_editor::Action::Move(Motion::Up)));
+
+        editor.update(word_motion(Motion::Left));
+        assert_eq!(editor.cursor_position(), (0, 6));
+        editor.update(action(text_editor::Action::Move(Motion::Down)));
+        assert_eq!(editor.cursor_position(), (1, 6));
+    }
+
+    #[test]
+    fn a_word_drag_lasts_until_something_else_moves_the_caret() {
+        let mut editor = plain_editor("alpha beta");
+        editor.move_cursor_to(0, 2);
+        editor.update(action(text_editor::Action::SelectWord));
+        assert!(editor.word_drag_from.is_some());
+
+        editor.update(action(text_editor::Action::Click(iced::Point::ORIGIN)));
+        assert!(editor.word_drag_from.is_none(), "a click ends the drag");
     }
 
     #[test]
