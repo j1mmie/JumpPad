@@ -125,8 +125,8 @@ fn start_watcher(
     let mut watcher = match notify::recommended_watcher(callback) {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!(
-                "jumppad: file watcher unavailable ({err}) - \
+            log::warn!(
+                "file watcher unavailable ({err}) - \
                  open files are still re-checked when the window regains focus"
             );
             return None;
@@ -140,8 +140,8 @@ fn start_watcher(
         if let Err(err) =
             watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
         {
-            eprintln!(
-                "jumppad: couldn't watch {} for file changes: {err}",
+            log::warn!(
+                "couldn't watch {} for file changes: {err}",
                 dir.display()
             );
         }

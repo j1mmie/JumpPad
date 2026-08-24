@@ -11,7 +11,8 @@ use crate::loader;
 enum Entry {
     Loading,
     Loaded(Arc<Grammar>),
-    // Reason kept for future UI surfacing (logged via eprintln! today, not read back).
+    // Reason kept for future UI surfacing (logged via `log::warn!` today,
+    // not read back).
     Unavailable(#[allow(dead_code)] String),
 }
 
@@ -89,16 +90,14 @@ impl SyntaxRegistry {
         let mut state = self.state.lock().unwrap();
         match state.get_mut(grammar_name) {
             Some((_, refcount)) => {
-                eprintln!(
-                    "syntax_registry: {grammar_name}: reusing cached/in-flight entry (refcount -> {})",
+                log::debug!(
+                    "{grammar_name}: reusing cached/in-flight entry (refcount -> {})",
                     *refcount + 1
                 );
                 *refcount += 1;
             }
             None => {
-                eprintln!(
-                    "syntax_registry: {grammar_name}: no cached entry, spawning load"
-                );
+                log::debug!("{grammar_name}: no cached entry, spawning load");
                 state.insert(grammar_name.to_owned(), (Entry::Loading, 1));
                 drop(state);
 
@@ -138,13 +137,11 @@ impl SyntaxRegistry {
             }
             *entry = match result {
                 Ok(grammar) => {
-                    eprintln!(
-                        "syntax_registry: {grammar_name}: loaded successfully"
-                    );
+                    log::debug!("{grammar_name}: loaded successfully");
                     Entry::Loaded(Arc::new(grammar))
                 }
                 Err(reason) => {
-                    eprintln!("syntax_registry: {grammar_name}: {reason}");
+                    log::warn!("{grammar_name}: {reason}");
                     Entry::Unavailable(reason)
                 }
             };
@@ -175,8 +172,8 @@ impl SyntaxRegistry {
         let query = match Query::new(language, &source) {
             Ok(query) => query,
             Err(err) => {
-                eprintln!(
-                    "syntax_registry: {grammar_name}: injections.scm failed to compile, ignoring: {err}"
+                log::warn!(
+                    "{grammar_name}: injections.scm failed to compile, ignoring: {err}"
                 );
                 return (None, HashMap::new());
             }
@@ -225,13 +222,9 @@ impl SyntaxRegistry {
                 return;
             };
             *refcount -= 1;
-            eprintln!(
-                "syntax_registry: {grammar_name}: released (refcount -> {refcount})"
-            );
+            log::debug!("{grammar_name}: released (refcount -> {refcount})");
             if *refcount == 0 {
-                eprintln!(
-                    "syntax_registry: {grammar_name}: evicting, no tabs left using it"
-                );
+                log::debug!("{grammar_name}: evicting, no tabs left using it");
                 state.remove(grammar_name)
             } else {
                 None

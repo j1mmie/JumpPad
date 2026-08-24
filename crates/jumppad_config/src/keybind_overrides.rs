@@ -259,8 +259,8 @@ pub(crate) fn resolved_overrides(
         .filter_map(|(name, hotkey)| match resolve(hotkey) {
             Some(resolved) => Some((name.clone(), resolved)),
             None => {
-                eprintln!(
-                    "jumppad_config: override {name:?} uses a key with no iced equivalent, ignoring"
+                log::warn!(
+                    "override {name:?} uses a key with no iced equivalent, ignoring"
                 );
                 None
             }

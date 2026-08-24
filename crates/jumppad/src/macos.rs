@@ -39,7 +39,7 @@ pub fn invalidate_window_shadow(window: &dyn iced::window::Window) {
     unsafe {
         let _: () = msg_send![ns_window, invalidateShadow];
     }
-    log::debug!("jumppad: invalidated the window shadow");
+    log::debug!("invalidated the window shadow");
 }
 
 /// Frosts what shows through a translucent window, to `radius`, or takes the
@@ -74,7 +74,7 @@ pub fn set_window_blur(window: &dyn iced::window::Window, radius: u32) {
     };
     let Some(blur) = window_server_blur() else {
         log::warn!(
-            "jumppad: no CGSSetWindowBackgroundBlurRadius on this macOS; \
+            "no CGSSetWindowBackgroundBlurRadius on this macOS; \
              leaving [themes] background.blur unhonored"
         );
         return;
@@ -103,10 +103,10 @@ pub fn set_window_blur(window: &dyn iced::window::Window, radius: u32) {
     };
 
     if result == 0 {
-        log::debug!("jumppad: window blur radius set to {radius}");
+        log::debug!("window blur radius set to {radius}");
     } else {
         log::warn!(
-            "jumppad: the window server refused a blur radius of {radius} ({result})"
+            "the window server refused a blur radius of {radius} ({result})"
         );
     }
 }
@@ -141,7 +141,7 @@ pub fn pin_appearance(
         };
         let _: () = msg_send![ns_window, setAppearance: appearance];
     }
-    log::debug!("jumppad: window appearance pinned to {pinned:?}");
+    log::debug!("window appearance pinned to {pinned:?}");
 }
 
 /// What the OS's light/dark setting says right now.
@@ -171,7 +171,7 @@ fn ns_window_of(
     what: &str,
 ) -> Option<*mut AnyObject> {
     let Ok(handle) = window.window_handle() else {
-        log::warn!("jumppad: no window handle; leaving the {what} alone");
+        log::warn!("no window handle; leaving the {what} alone");
         return None;
     };
     let RawWindowHandle::AppKit(handle) = handle.as_raw() else {

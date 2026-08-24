@@ -1,8 +1,9 @@
-// TEMPORARILY DISABLED for Windows debugging (syntax highlighting not
-// showing up) - re-enable once resolved so release builds hide the console
-// again: #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// The console-hiding `windows_subsystem` attribute lives on the two binary
+// crate roots in `src/bin/`, not here - it is ignored on a library. What
+// hands a terminal back on demand is `JUMPPAD_DEBUG`; see `debug.rs`.
 
 mod app;
+mod debug;
 mod docwatch;
 mod find;
 mod hotkey;
@@ -16,6 +17,7 @@ mod window;
 pub(crate) mod windows;
 
 use std::ffi::OsString;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use app::JumpPadApp;
@@ -73,11 +75,16 @@ const OPAQUE_WINDOW_REASON: Option<&str> = if cfg!(all(
 
 /// Shared entry point for both the `jumppad` (tiny-skia) and `jumppad-gpu` (wgpu) binaries.
 pub fn run() -> iced::Result {
+    // First, before anything with something to report gets to run. Opens a
+    // console and installs the logger when `JUMPPAD_DEBUG` is set, and does
+    // nothing whatsoever when it isn't - see `debug.rs`.
+    debug::start();
+
     let mut argv = std::env::args_os();
     let program = program_name(argv.next().as_ref());
     let paths = match parse_args(argv) {
         Invocation::Help => {
-            println!(
+            answer_the_shell(&format!(
                 "\
 {program} - a lightweight plaintext editor
 
@@ -88,12 +95,19 @@ empty tab saved to that path on the first save.
 
 Options:
   -h, --help       Print this help
-  -V, --version    Print the version"
-            );
+  -V, --version    Print the version
+
+Environment:
+  {debug_var}=1  Open a terminal and log to it",
+                debug_var = debug::ENV_VAR,
+            ));
             return Ok(());
         }
         Invocation::Version => {
-            println!("{program} {}", env!("CARGO_PKG_VERSION"));
+            answer_the_shell(&format!(
+                "{program} {}",
+                env!("CARGO_PKG_VERSION")
+            ));
             return Ok(());
         }
         Invocation::Open(paths) => paths,
@@ -104,20 +118,13 @@ Options:
     // the window on screen still matches the file - see `window::replace`.
     let window = window::settings(&config);
 
-    // Defaults to `info` level (still overridable via `RUST_LOG`) so
-    // `iced_wgpu`'s own adapter/format/alpha-mode logging is visible.
-    let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("info"),
-    )
-    .try_init();
-
     // Neither backend can do transparency on every platform, and the failure
     // is silent - the window just comes up solid, which reads as a rendering
     // bug rather than a wrong-binary problem. Say so up front instead.
     if window.transparent
         && let Some(reason) = OPAQUE_WINDOW_REASON
     {
-        eprintln!("jumppad: {reason}");
+        log::warn!("{reason}");
     }
 
     // `config` and `paths` are cloned per call since the boot closure must be
@@ -142,6 +149,24 @@ Options:
     .theme(JumpPadApp::theme)
     .style(JumpPadApp::style)
     .run()
+}
+
+/// Answers `--help`/`--version` on the terminal that asked.
+///
+/// These two are the standing exception to the `JUMPPAD_DEBUG` rule in
+/// `debug.rs`: they are the reply to something typed at a prompt rather than
+/// a report on how the app is doing, and a packager checking `--version`
+/// shouldn't have to know a debug switch exists. Because both binaries link
+/// as GUI programs, though, that reply has nowhere to land until we ask for
+/// the launching shell's console - hence the attach, which is a no-op
+/// everywhere but Windows.
+///
+/// `writeln!` rather than `println!`, and the result dropped: a launch with
+/// no console behind it at all (a shortcut, the Start menu, stdout closed)
+/// should end the process quietly, not panic on the way out.
+fn answer_the_shell(text: &str) {
+    debug::console::attach_to_parent();
+    let _ = writeln!(std::io::stdout(), "{text}");
 }
 
 #[cfg(test)]

@@ -930,15 +930,15 @@ pub fn load() -> Config {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        eprintln!("jumppad_config: found config at {}", path.display());
-        eprintln!("jumppad_config: --- contents of {} ---", path.display());
-        eprintln!("{text}");
-        eprintln!("jumppad_config: --- end contents ---");
+        log::debug!("found config at {}", path.display());
+        log::debug!("--- contents of {} ---", path.display());
+        log::debug!("{text}");
+        log::debug!("--- end contents ---");
         return match toml::from_str(&text) {
             Ok(config) => config,
             Err(err) => {
-                eprintln!(
-                    "jumppad_config: {}: {err}, using built-in defaults instead",
+                log::warn!(
+                    "{}: {err}, using built-in defaults instead",
                     path.display()
                 );
                 Config::default()
@@ -946,8 +946,8 @@ pub fn load() -> Config {
         };
     }
 
-    eprintln!(
-        "jumppad_config: no config file found (checked: {}), writing built-in defaults",
+    log::info!(
+        "no config file found (checked: {}), writing built-in defaults",
         paths
             .iter()
             .map(|p| p.display().to_string())
@@ -966,24 +966,19 @@ fn write_default(path: &std::path::Path, config: &Config) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!(
-            "jumppad_config: couldn't create {}: {err}",
-            parent.display()
-        );
+        log::warn!("couldn't create {}: {err}", parent.display());
         return;
     }
     match toml::to_string_pretty(config) {
         Ok(text) => {
             if let Err(err) = std::fs::write(path, text) {
-                eprintln!(
-                    "jumppad_config: couldn't write default config to {}: {err}",
+                log::warn!(
+                    "couldn't write default config to {}: {err}",
                     path.display()
                 );
             }
         }
-        Err(err) => eprintln!(
-            "jumppad_config: couldn't serialize default config: {err}"
-        ),
+        Err(err) => log::warn!("couldn't serialize default config: {err}"),
     }
 }
 
@@ -1008,12 +1003,12 @@ pub fn load_keybinds() -> KeybindsConfig {
         let Ok(text) = std::fs::read_to_string(path) else {
             continue;
         };
-        eprintln!("jumppad_config: found keybinds at {}", path.display());
+        log::debug!("found keybinds at {}", path.display());
         return match toml::from_str(&text) {
             Ok(keybinds) => keybinds,
             Err(err) => {
-                eprintln!(
-                    "jumppad_config: {}: {err}, using built-in default keybinds instead",
+                log::warn!(
+                    "{}: {err}, using built-in default keybinds instead",
                     path.display()
                 );
                 KeybindsConfig::default()
@@ -1021,8 +1016,8 @@ pub fn load_keybinds() -> KeybindsConfig {
         };
     }
 
-    eprintln!(
-        "jumppad_config: no keybinds file found (checked: {}), writing built-in defaults",
+    log::info!(
+        "no keybinds file found (checked: {}), writing built-in defaults",
         paths
             .iter()
             .map(|p| p.display().to_string())
@@ -1041,24 +1036,19 @@ fn write_default_keybinds(path: &std::path::Path, keybinds: &KeybindsConfig) {
         return;
     };
     if let Err(err) = std::fs::create_dir_all(parent) {
-        eprintln!(
-            "jumppad_config: couldn't create {}: {err}",
-            parent.display()
-        );
+        log::warn!("couldn't create {}: {err}", parent.display());
         return;
     }
     match toml::to_string_pretty(keybinds) {
         Ok(text) => {
             if let Err(err) = std::fs::write(path, text) {
-                eprintln!(
-                    "jumppad_config: couldn't write default keybinds to {}: {err}",
+                log::warn!(
+                    "couldn't write default keybinds to {}: {err}",
                     path.display()
                 );
             }
         }
-        Err(err) => eprintln!(
-            "jumppad_config: couldn't serialize default keybinds: {err}"
-        ),
+        Err(err) => log::warn!("couldn't serialize default keybinds: {err}"),
     }
 }
 
@@ -1492,7 +1482,10 @@ mod tests {
 
     #[test]
     fn each_acrylic_name_is_its_own_answer() {
-        assert_eq!(blur_of(r#"background.blur = "acrylic10""#), Blur::Acrylic10);
+        assert_eq!(
+            blur_of(r#"background.blur = "acrylic10""#),
+            Blur::Acrylic10
+        );
         assert_eq!(
             blur_of(r#"background.blur = "acrylic11""#),
             Blur::Acrylic11
@@ -1565,9 +1558,7 @@ mod tests {
     /// rewrites doesn't turn a name into a number or the other way round.
     #[test]
     fn each_blur_form_round_trips() {
-        for written in
-            ["24", r#""none""#, r#""acrylic10""#, r#""acrylic11""#]
-        {
+        for written in ["24", r#""none""#, r#""acrylic10""#, r#""acrylic11""#] {
             let config =
                 config(&format!("[themes.dark]\nbackground.blur = {written}"));
             let round_tripped: Config =

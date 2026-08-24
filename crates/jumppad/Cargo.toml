@@ -59,7 +59,7 @@ toml.workspace = true
 global-hotkey.workspace = true
 display-info.workspace = true
 env_logger = "0.11"
-log = "0.4"
+log.workspace = true
 
 # Just enough Objective-C to reach the handful of AppKit calls that neither
 # iced nor winit exposes - see `macos.rs`. This version is already in the tree
@@ -74,12 +74,16 @@ libc = "0.2"
 # Same deal on Windows, for the `DwmSetWindowAttribute` calls - see `windows.rs`.
 # winit already depends on this exact version with `Win32_Graphics_Dwm`
 # enabled (it makes the same call for the attributes it *does* expose), so
-# both features here are already on and this adds nothing to the build.
+# every feature here except `Win32_System_Console` is already on and costs
+# the build nothing. That one is ours: it covers the
+# `AllocConsole`/`AttachConsole`/`SetStdHandle` calls `debug.rs` makes to
+# hand a GUI-subsystem process a terminal on demand.
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.52", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
+    "Win32_System_Console",
     "Win32_System_LibraryLoader",
     "Win32_UI_WindowsAndMessaging",
 ] }

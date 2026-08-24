@@ -265,8 +265,8 @@ fn start_watcher(
     let mut watcher = match notify::recommended_watcher(callback) {
         Ok(watcher) => watcher,
         Err(err) => {
-            eprintln!(
-                "jumppad: config watcher unavailable ({err}) - \
+            log::warn!(
+                "config watcher unavailable ({err}) - \
                  config reloads still happen on save and window focus"
             );
             return None;
@@ -279,8 +279,8 @@ fn start_watcher(
         if let Err(err) =
             watcher.watch(&dir, notify::RecursiveMode::NonRecursive)
         {
-            eprintln!(
-                "jumppad: couldn't watch {} for config changes: {err}",
+            log::warn!(
+                "couldn't watch {} for config changes: {err}",
                 dir.display()
             );
         }

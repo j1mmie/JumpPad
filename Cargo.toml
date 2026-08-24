@@ -64,6 +64,12 @@ iced_core = "0.14"
 tree-sitter = { version = "0.26", features = ["wasm"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Shared rather than per-crate because every crate that has something to say
+# now says it through `log`, and only `jumppad` decides whether anyone is
+# listening - see `crates/jumppad/src/debug.rs`. The facade costs a relaxed
+# atomic load per call site while no logger is installed, which is the case
+# for every run that didn't ask for one.
+log = "0.4"
 global-hotkey = { version = "0.8", features = ["serde"] }
 display-info = "0.5"
 editor_core = { path = "crates/editor_core" }

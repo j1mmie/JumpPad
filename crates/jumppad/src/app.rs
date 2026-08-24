@@ -1178,7 +1178,7 @@ impl JumpPadApp {
                 }
             };
             if let Err(err) = result {
-                eprintln!("jumppad: couldn't reload {}: {err}", file.name());
+                log::warn!("couldn't reload {}: {err}", file.name());
                 self.error = Some(format!(
                     "{}: {err} - keeping the previous settings",
                     file.name()
@@ -2128,9 +2128,7 @@ impl JumpPadApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!(
-                "jumppad: couldn't determine the primary monitor's bounds"
-            );
+            log::warn!("couldn't determine the primary monitor's bounds");
             return Task::none();
         };
         Task::batch([
@@ -2149,9 +2147,7 @@ impl JumpPadApp {
             return Task::none();
         };
         let Some(monitor) = visor::primary_monitor_bounds() else {
-            eprintln!(
-                "jumppad: couldn't determine the primary monitor's bounds"
-            );
+            log::warn!("couldn't determine the primary monitor's bounds");
             return Task::none();
         };
 
@@ -2791,8 +2787,8 @@ fn warn_unrecognized_overrides(
 ) {
     for name in overrides.keys() {
         if Action::from_name(name).is_none() {
-            eprintln!(
-                "jumppad_config: keybinds.toml overrides an unrecognized command {name:?}, ignoring"
+            log::warn!(
+                "keybinds.toml overrides an unrecognized command {name:?}, ignoring"
             );
         }
     }
@@ -3283,7 +3279,7 @@ fn build_indentation(
 /// A reloaded setting that only applies at startup. Logged, not shown in
 /// the banner: the change is valid, it just waits for the next start.
 fn restart_required(what: &str) {
-    eprintln!("jumppad: {what} changed - takes effect on restart");
+    log::info!("{what} changed - takes effect on restart");
 }
 
 /// What the OS reports, in JumpPad's terms. `None` means it stated no
@@ -3317,8 +3313,8 @@ fn resolve_palette(name: &str, fallback: Theme) -> Theme {
                 .map(Theme::to_string)
                 .collect::<Vec<_>>()
                 .join(", ");
-            eprintln!(
-                "jumppad: unknown palette {name:?}, using default. Valid options: {valid}"
+            log::warn!(
+                "unknown palette {name:?}, using default. Valid options: {valid}"
             );
             fallback
         }
@@ -3337,8 +3333,8 @@ pub(crate) fn resolve_font(family: Option<&str>, fallback: Font) -> Font {
     };
 
     jumppad_textarea::font::installed(name).unwrap_or_else(|| {
-        eprintln!(
-            "jumppad: font family {name:?} isn't installed, using the default font"
+        log::warn!(
+            "font family {name:?} isn't installed, using the default font"
         );
         fallback
     })
@@ -3386,13 +3382,13 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                     .collect();
                 wasm_files.sort();
                 if wasm_files.is_empty() {
-                    eprintln!(
-                        "jumppad: {}: exists but no .wasm files found",
+                    log::debug!(
+                        "{}: exists but no .wasm files found",
                         dir.display()
                     );
                 } else {
-                    eprintln!(
-                        "jumppad: {}: found {} .wasm file(s): {}",
+                    log::debug!(
+                        "{}: found {} .wasm file(s): {}",
                         dir.display(),
                         wasm_files.len(),
                         wasm_files.join(", ")
@@ -3400,8 +3396,8 @@ fn log_wasm_files_found(dirs: &[PathBuf]) {
                 }
             }
             Err(err) => {
-                eprintln!(
-                    "jumppad: {}: couldn't read directory: {err}",
+                log::debug!(
+                    "{}: couldn't read directory: {err}",
                     dir.display()
                 );
             }
@@ -4670,8 +4666,9 @@ mod tests {
     fn the_acrylic_names_arrive_as_a_blur_the_platforms_can_read() {
         let mut app = test_app(1);
 
-        let _ = app
-            .apply_config(config_with_theme(r#"background.blur = "acrylic10""#));
+        let _ = app.apply_config(config_with_theme(
+            r#"background.blur = "acrylic10""#,
+        ));
         assert_eq!(app.background_blur, Blur::Acrylic10);
 
         let _ = app.apply_config(config_with_theme(

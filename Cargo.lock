@@ -2170,6 +2170,7 @@ version = "0.1.0"
 dependencies = [
  "global-hotkey",
  "iced_core",
+ "log",
  "serde",
  "toml",
 ]
@@ -3929,6 +3930,7 @@ dependencies = [
 name = "syntax_registry"
 version = "0.1.0"
 dependencies = [
+ "log",
  "tree-sitter",
 ]
 

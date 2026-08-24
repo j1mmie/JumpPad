@@ -27,7 +27,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::GetWindowRect;
 /// window (or the handle has already gone away).
 fn hwnd_of(window: &dyn iced::window::Window, what: &str) -> Option<HWND> {
     let Ok(handle) = window.window_handle() else {
-        log::warn!("jumppad: no window handle; leaving {what} alone");
+        log::warn!("no window handle; leaving {what} alone");
         return None;
     };
     match handle.as_raw() {
@@ -120,12 +120,12 @@ fn set_backdrop_type(hwnd: HWND, backdrop: DWM_SYSTEMBACKDROP_TYPE) {
 
     if result < 0 {
         log::debug!(
-            "jumppad: no system-backdrop control on this Windows build (0x{result:X})"
+            "no system-backdrop control on this Windows build (0x{result:X})"
         );
     } else if backdrop == DWMSBT_TRANSIENTWINDOW {
-        log::debug!("jumppad: asked DWM to frost the window's backdrop");
+        log::debug!("asked DWM to frost the window's backdrop");
     } else {
-        log::debug!("jumppad: disabled the window's system backdrop");
+        log::debug!("disabled the window's system backdrop");
     }
 }
 
@@ -144,7 +144,7 @@ fn set_accent_acrylic(hwnd: HWND, frosted: bool) {
     let Some(set_composition_attribute) = accent_policy_setter() else {
         if frosted {
             log::warn!(
-                "jumppad: no SetWindowCompositionAttribute on this Windows; \
+                "no SetWindowCompositionAttribute on this Windows; \
                  leaving [themes] background.blur = \"acrylic11\" unhonored"
             );
         }
@@ -183,10 +183,10 @@ fn set_accent_acrylic(hwnd: HWND, frosted: bool) {
     };
 
     if applied == 0 {
-        log::warn!("jumppad: the accent-policy acrylic was refused");
+        log::warn!("the accent-policy acrylic was refused");
     } else {
         log::debug!(
-            "jumppad: accent-policy acrylic turned {}",
+            "accent-policy acrylic turned {}",
             if frosted { "on" } else { "off" }
         );
     }
@@ -282,11 +282,9 @@ pub fn reset_redirection_surface(window: &dyn iced::window::Window) {
         DeleteObject(region as _);
 
         if result < 0 {
-            log::warn!(
-                "jumppad: could not re-arm per-pixel alpha (0x{result:X})"
-            );
+            log::warn!("could not re-arm per-pixel alpha (0x{result:X})");
         } else {
-            log::debug!("jumppad: reset the window's redirection surface");
+            log::debug!("reset the window's redirection surface");
         }
     }
 }

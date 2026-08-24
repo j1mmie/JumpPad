@@ -2419,10 +2419,86 @@ whole window.
 
 [Lucide]: https://lucide.dev
 
+## Talking to a terminal
+
+Both binaries link as Windows GUI programs, so a launched JumpPad has no
+console window and no working stdout. `JUMPPAD_DEBUG=1` is what hands one
+back. `crates/jumppad/src/debug.rs` owns the whole switch; the rules that
+fall out of it are worth knowing before you add a diagnostic.
+
+**Diagnostics go through `log::*`, never `println!`/`eprintln!`.** Not a
+style preference. `debug::start()` installs a logger only when
+`JUMPPAD_DEBUG` is set, and the `log` facade discards every record until
+someone calls `set_logger` - so routing through `log` *is* the off switch. A
+bare print bypasses it, and on a console-less Windows run it writes into the
+void anyway, which is the worse half: it looks like it worked.
+
+That applies to `jumppad_config` and `syntax_registry` too. They log through
+the same facade and take no view on whether anyone is listening; only the
+binary decides that.
+
+Levels, as used here: `warn!` for something that went wrong or input that
+got ignored, `info!` for a notable action taken (a default config written, a
+setting that needs a restart), `debug!` for startup discovery and lifecycle
+tracing (which config file was found, grammar refcounts). The default filter
+under `JUMPPAD_DEBUG` is `debug`; `RUST_LOG` still overrides it, so
+`RUST_LOG=jumppad=trace,wgpu_core=warn` works for narrowing in.
+
+Messages carry no `jumppad:` prefix - `env_logger` already prints the module
+target, and a hand-written prefix just prints it twice.
+
+**`--help` and `--version` are the one exception** and still write to
+stdout: they answer something typed at a prompt rather than reporting on the
+app, and a packager checking `--version` shouldn't need to know a debug
+switch exists. `answer_the_shell` in `lib.rs` attaches to the launching
+shell's console first so the reply has somewhere to land.
+
+### Where the attribute lives
+
+`#![windows_subsystem = "windows"]` sits on both binary crate roots in
+`crates/jumppad/src/bin/`, not in `lib.rs`. It is read off the crate root of
+the binary being linked and ignored on every other crate type, so the copy
+that used to sit in `lib.rs` never did anything - it was commented out for
+an in-progress Windows highlighting investigation that needed console
+output, and that investigation was being served by the *absence of a
+release build*, not by the comment.
+
+It is unconditional rather than `cfg_attr(not(debug_assertions), ...)`.
+Tying it to the profile would mean the console you get while developing
+isn't the console you get from a release binary, which is the gap that hides
+a startup bug until someone ships. `JUMPPAD_DEBUG=1` is the way back in on
+either profile.
+
+### Getting a console in front of a GUI process
+
+On Windows, `debug::console::attach()` prefers the console that launched the
+process (`AttachConsole(ATTACH_PARENT_PROCESS)`) and only allocates one of
+its own when there isn't one - so running it from a shell puts the output in
+that shell, where it can be scrolled and selected, while a launch from
+Explorer gets a window.
+
+The part that isn't obvious: `AllocConsole` sets the three standard handles
+up itself, but `AttachConsole` leaves them null on a process that started
+without them, and `println!` keeps writing nowhere. `bind_std_handles`
+opens the console's own `CONOUT$`/`CONIN$` and installs those with
+`SetStdHandle`, which covers both paths. It works retroactively for code
+already compiled into iced and wgpu because std looks `GetStdHandle` up on
+every write rather than caching it at first use.
+
+`windows-sys` 0.52 spells `HANDLE` and `HWND` as bare `isize`, not as
+pointers - a null check is `!= 0`, and `RawHandle` from `std` needs an
+`as HANDLE` cast. (This changed in later `windows-sys` versions; the pin
+here is winit's.)
+
+macOS and Linux have nothing to attach to: `windows_subsystem` is a
+Windows-only linker setting, a shell launch inherited its stdio already, and
+a Finder or `.desktop` launch has no console in the first place. The
+`console` module is a pair of no-ops there and `JUMPPAD_DEBUG` is purely
+about whether a logger gets installed.
+
 ## Miscellaneous things worth knowing before you "fix" them
 
-- `lib.rs` has `windows_subsystem = "windows"` (which hides the console
-  window on release builds) temporarily disabled, with a comment saying
-  why: an in-progress Windows highlighting bug needed console output to
-  debug. Don't silently re-enable it as a "cleanup" without checking
-  whether that investigation is actually finished.
+- The `jumppad_textarea` tests still use `println!`. That is fine and not an
+  oversight - the ban above is on diagnostics from the running app, and
+  `cargo test` captures test output and prints it per-test on failure, which
+  a logger would not do.

@@ -25,7 +25,7 @@ pub(crate) fn find_injections_source(
     match std::fs::read_to_string(&path) {
         Ok(source) => Some(source),
         Err(err) => {
-            eprintln!("syntax_registry: reading {}: {err}", path.display());
+            log::warn!("reading {}: {err}", path.display());
             None
         }
     }
