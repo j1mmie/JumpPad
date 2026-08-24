@@ -2498,6 +2498,14 @@ about whether a logger gets installed.
 
 ## Miscellaneous things worth knowing before you "fix" them
 
+- `.cargo/config.toml` sets `CFLAGS_*_pc_windows_msvc = "-DLIBWASM_STATIC"`.
+  That is not a stray build tweak - it is the only place the define can go.
+  `tree-sitter`'s build script compiles its C against wasmtime's headers and
+  passes no such define, so on MSVC every `wasm_*`/`wasmtime_*` declaration
+  comes out `__declspec(dllimport)` while the symbols are actually linked
+  statically, and the linker emits ~50 `LNK4217` warnings fixing it up. The
+  long comment in that file has the details. Deleting it brings the noise
+  back.
 - The `jumppad_textarea` tests still use `println!`. That is fine and not an
   oversight - the ban above is on diagnostics from the running app, and
   `cargo test` captures test output and prints it per-test on failure, which

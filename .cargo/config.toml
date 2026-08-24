@@ -6,3 +6,35 @@ run_debug_gpu   = "run           -p jumppad --bin jumppad-gpu --no-default-featu
 # Builds `assets/fonts/jumppad-icons.ttf` from the drawings in
 # `assets/icons`. Only needed after changing an icon - the font is committed.
 build_fonts     = "run -p icon_font_builder"
+
+# Silences ~50 `LNK4217` warnings from the MSVC linker, each naming a
+# `wasm_*`/`wasmtime_*` symbol that `libtree_sitter`'s C code "imports" but
+# that is really linked statically right beside it.
+#
+# `tree-sitter`'s `wasm` feature compiles `lib.c` against wasmtime's C
+# headers, and `wasm.h` decides there how the API is linked:
+#
+#     #if defined(_WIN32) && !defined(__MINGW32__) && !defined(LIBWASM_STATIC)
+#     #define WASM_API_EXTERN __declspec(dllimport)
+#
+# Nothing in that chain tells it otherwise, so on MSVC every declaration
+# comes out `dllimport` - a promise to call through a DLL import table. The
+# symbols are actually provided by `wasmtime-c-api-impl`, a Rust staticlib
+# linked into the same binary, so the linker fixes each call up with a thunk
+# and warns that it had to. Correct either way, one pointless indirection per
+# call, fifty lines of noise per build.
+#
+# `LIBWASM_STATIC` is the header's own escape hatch for exactly this case and
+# covers every warned symbol: the `wasmtime_*` declarations in
+# `wasmtime/*.h` go through the same `WASM_API_EXTERN`. MinGW is already
+# exempt above, which is why the `x86_64-pc-windows-gnu` cross-build never
+# showed these.
+#
+# It has to arrive as `CFLAGS` because `tree-sitter`'s build script owns the
+# `cc::Build` and passes no such define - there is no Cargo-level knob for
+# it short of patching the crate. Cargo leaves an existing `CFLAGS_*` in the
+# environment alone rather than overriding it, so anyone who sets their own
+# keeps it (and gets the warnings back).
+[env]
+CFLAGS_x86_64_pc_windows_msvc = "-DLIBWASM_STATIC"
+CFLAGS_aarch64_pc_windows_msvc = "-DLIBWASM_STATIC"
