@@ -2496,12 +2496,10 @@ about whether a logger gets installed.
 
 ## Which GPU the hardware binary asks for
 
-`[gpu] power` picks the adapter, and it defaults to `"low"` - the integrated
-one. That is not iced's default: iced asks for `HighPerformance` when nothing
-says otherwise, which means an unconfigured `jumppad-gpu` wakes a discrete
-card to draw a text window. For an editor whose stated goals are low memory
-and low CPU, low is the right ask; `"high"` is there for anyone who disagrees
-and `"auto"` states no preference.
+`[gpu] power` picks the adapter and defaults to `"high"`, the same thing iced
+asks for unprompted. That looks wrong for an editor selling low memory and
+low CPU, and the reason it is not is transparency: **on Windows the adapter
+decides whether the window can be translucent at all.**
 
 It reaches iced through the environment, which looks indirect and is not
 avoidable: iced builds its wgpu compositor inside `run()` and accepts no
@@ -2511,12 +2509,50 @@ that variable, before any thread exists, and leaves an existing one alone.
 The adapter is chosen once at compositor build, so a reload only logs
 `restart_required`.
 
-Worth knowing if a GPU bug lands here: the setting also keeps JumpPad off
-whatever the discrete card is busy with. An NVIDIA driver was seen recursing
-to a stack overflow inside `vkCreateDevice` while a game held the GPU, on a
-machine whose integrated adapter started fine every time. Nothing in this
-repo can fix a driver recursing in its own call chain - `main` had 8MB of
-stack and it went anyway - so do not go looking for the bug here.
+`"low"` is the lever for a laptop, or for keeping clear of a discrete card
+that is busy - an NVIDIA driver was seen recursing to a stack overflow inside
+`vkCreateDevice` while a game held the GPU, where the integrated adapter
+started every time. Nothing in this repo can fix a driver recursing in its
+own call chain (`main` had 8MB of stack and it went anyway), so do not go
+looking for that bug here. Reaching for `"low"` costs what the table below
+says it costs.
+
+### Where transparency actually comes from
+
+Four different mechanisms, and only one of them consults the adapter. This
+is why the same `background.alpha` behaves differently per platform and
+binary:
+
+| Platform / binary | Alpha comes from | Translucent? |
+| --- | --- | --- |
+| macOS, software | softbuffer's CG backend, hardcoded `NoneSkipFirst` | **never** |
+| macOS, GPU | Metal, hardcoded `[Opaque, PostMultiplied]` | **always** |
+| Windows, software | GDI redirection surface, per-pixel alpha | yes |
+| Windows, GPU, Vulkan | **queried from the driver** | **adapter-dependent** |
+| Windows, GPU, DX12 | hardcoded `[Opaque]` for an HWND surface | never |
+| Linux | either binary | yes |
+
+The consequences worth holding on to:
+
+- **macOS inverts the Windows advice.** The software binary cannot be
+  translucent there at all - that is what `OPAQUE_WINDOW_REASON` in `lib.rs`
+  says out loud at startup - so a macOS user who wants a translucent window
+  has to run `jumppad-gpu`. `[gpu] power` cannot affect it either way, since
+  Metal's alpha modes are a constant rather than a query.
+- **Only Windows + Vulkan varies by adapter,** which is the whole reason the
+  default is `"high"`. One machine offered `PreMultiplied` on its NVIDIA
+  adapter and only `Opaque` on the AMD integrated one sitting beside it.
+- **DX12 can never do it** through an HWND surface, whatever the adapter, so
+  `WGPU_BACKEND=dx12` is a way to lose transparency by hand.
+
+`OPAQUE_WINDOW_REASON` currently covers only the macOS software case. The two
+Windows rows above fail the same way it exists to prevent - the window just
+comes up solid, which reads as a rendering bug - and are not warned about,
+because backend and adapter are not known until iced has built the
+compositor and iced does not hand either back. Detecting it would mean
+standing up a throwaway window and surface before iced runs, purely to query
+capabilities. Deliberately not done; this table is the substitute.
+
 
 ## Miscellaneous things worth knowing before you "fix" them
 

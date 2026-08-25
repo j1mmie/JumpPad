@@ -669,31 +669,40 @@ pub struct GpuConfig {
 
 /// How much GPU to ask for.
 ///
-/// Defaults to [`GpuPower::Low`], which is not the usual choice for a
-/// windowing library and is deliberate here. iced asks for
-/// `HighPerformance` when nothing says otherwise, so an unconfigured
-/// JumpPad wakes a discrete card to draw a text window - against every
-/// stated goal of this editor, and on a laptop it is the difference between
-/// running on battery and not.
+/// Defaults to [`GpuPower::High`], matching what iced asks for when nothing
+/// says otherwise. Not because a plaintext editor needs a discrete card - it
+/// does not, and asking for one costs battery - but because on Windows the
+/// adapter decides whether the window can be translucent at all, and the
+/// discrete one is likelier to say yes. Defaulting the other way traded a
+/// feature away for power this app never uses.
 ///
-/// It also stays clear of whatever the discrete card is already busy with.
-/// A driver under load is a different driver: an NVIDIA build was seen
+/// The asymmetry belongs to the Vulkan backend: it asks the driver which
+/// composite alpha modes a surface supports, and drivers disagree. An NVIDIA
+/// adapter offered `PreMultiplied`; the AMD integrated one beside it offered
+/// only `Opaque`, which silently costs `background.alpha` and every acrylic
+/// resting on it. Neither macOS nor the software binary is affected - wgpu's
+/// Metal backend reports its alpha modes as a constant, so any adapter there
+/// can be translucent, and the software renderer presents through GDI on
+/// Windows without consulting an adapter at all.
+///
+/// So `"low"` is the lever to reach for on a laptop, or to keep JumpPad off
+/// whatever a discrete card is already busy with - an NVIDIA driver was seen
 /// recursing to a stack overflow inside `vkCreateDevice` while a game held
-/// the GPU, on a machine where the integrated adapter started fine. That is
-/// a driver bug and not something this setting fixes - but the integrated
-/// GPU is the better ask regardless, and it is the one that works.
+/// the GPU, where the integrated adapter started every time. That is a
+/// driver bug rather than something this setting fixes; it is only the lever
+/// that avoids it, at the cost above.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
 )]
 #[serde(rename_all = "lowercase")]
 pub enum GpuPower {
-    /// `power = "low"`. The integrated adapter where the machine has one.
+    /// `power = "high"`. The discrete adapter where the machine has one.
     #[default]
-    Low,
-    /// `power = "high"`. The discrete adapter - worth asking for only if
-    /// something here is actually GPU-bound, which for a plaintext editor
-    /// it should not be.
     High,
+    /// `power = "low"`. The integrated adapter. Cheaper, and out of a busy
+    /// discrete card's way - but on Windows it is the choice that can leave
+    /// you with an opaque window, so check that transparency survived it.
+    Low,
     /// `power = "auto"`. State no preference and take whatever wgpu ranks
     /// first for the surface.
     Auto,
@@ -1183,13 +1192,14 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfigured_gpu_asks_for_the_integrated_one() {
-        // The default that matters: iced would ask for `HighPerformance`,
-        // and a plaintext editor has no business waking a discrete card.
-        assert_eq!(config("").gpu.power, GpuPower::Low);
+    fn an_unconfigured_gpu_asks_for_the_discrete_one() {
+        // On Windows the adapter decides whether the window can be
+        // translucent, so the default is the one likelier to allow it -
+        // the same thing iced would have asked for unprompted.
+        assert_eq!(config("").gpu.power, GpuPower::High);
         assert_eq!(
             config("").gpu.power.as_wgpu_power_pref(),
-            "low",
+            "high",
             "the value wgpu is handed, not just the enum"
         );
     }
@@ -1228,11 +1238,11 @@ mod tests {
     #[test]
     fn a_named_power_round_trips_through_the_written_file() {
         let mut config = Config::default();
-        config.gpu.power = GpuPower::High;
+        config.gpu.power = GpuPower::Low;
         let written = toml::to_string_pretty(&config).unwrap();
         assert!(written.contains("[gpu]"), "got:\n{written}");
         let read: Config = toml::from_str(&written).unwrap();
-        assert_eq!(read.gpu.power, GpuPower::High);
+        assert_eq!(read.gpu.power, GpuPower::Low);
     }
 
     #[test]
