@@ -38,3 +38,38 @@ build_fonts     = "run -p icon_font_builder"
 [env]
 CFLAGS_x86_64_pc_windows_msvc = "-DLIBWASM_STATIC"
 CFLAGS_aarch64_pc_windows_msvc = "-DLIBWASM_STATIC"
+
+# Windows gives the main thread far less stack than every thread the app
+# spawns, and the GPU binary is the one that notices.
+#
+# A spawned thread gets Rust's own 2MiB default. The main thread instead gets
+# whatever the linker wrote into the PE header - 1MB from MSVC's `link.exe`,
+# 2MB from mingw's `ld` - and nothing in a Rust build raises it. So the
+# thread doing the least stack-hungry work has the most room: grammar loading
+# runs Cranelift (`syntax_registry` spawns for exactly that), which is the
+# deepest recursion in the process, and it sits on 2MiB, while `main` runs
+# iced, wgpu and the graphics driver's in-process shader compiler on half of
+# that.
+#
+# It shows up as `STATUS_STACK_OVERFLOW` (0xC00000FD) at startup on
+# `jumppad-gpu`, and only under load - a game holding the GPU is enough,
+# because a busy driver takes a heavier path through its own user-mode DLL.
+# Load-dependence is also what says the recursion is bounded and merely close
+# to the edge: runaway recursion would not care what else the GPU is doing.
+#
+# 8MB is what Linux and macOS already hand the main thread, so this makes the
+# platforms agree rather than picking a number. It costs nothing at runtime:
+# a stack reserve is reserved address space, and pages are committed only as
+# they are touched.
+#
+# `RUSTFLAGS` in the environment replaces these rather than adding to them,
+# so a shell that sets it loses the flag (and the crash comes back).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+# Same size through mingw's linker, which spells it differently.
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]

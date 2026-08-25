@@ -2498,6 +2498,14 @@ about whether a logger gets installed.
 
 ## Miscellaneous things worth knowing before you "fix" them
 
+- `.cargo/config.toml` raises the Windows main-thread stack to 8MB via a
+  `/STACK:` link-arg. Not a superstition: Windows sizes the main thread from
+  the PE header (1MB out of MSVC, 2MB out of mingw) while every spawned
+  thread gets Rust's 2MiB, so `main` - running iced, wgpu and the graphics
+  driver's in-process shader compiler - had less room than the grammar
+  loader thread running Cranelift. It crashed `jumppad-gpu` at startup with
+  `STATUS_STACK_OVERFLOW` whenever something else was working the GPU. 8MB
+  is what Linux and macOS already give the main thread.
 - `.cargo/config.toml` sets `CFLAGS_*_pc_windows_msvc = "-DLIBWASM_STATIC"`.
   That is not a stray build tweak - it is the only place the define can go.
   `tree-sitter`'s build script compiles its C against wasmtime's headers and
