@@ -94,10 +94,11 @@ pub(crate) mod console {
     use std::fs::OpenOptions;
     use std::os::windows::io::IntoRawHandle;
 
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Console::{
         ATTACH_PARENT_PROCESS, AllocConsole, AttachConsole, GetConsoleWindow,
-        STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        SetStdHandle,
     };
 
     /// Gives this process a console, preferring the one it was launched
@@ -168,18 +169,49 @@ pub(crate) mod console {
         // Both output slots share one handle to the same screen buffer -
         // that is what interleaves `log`'s stderr records with anything
         // written to stdout in the order they actually happened.
-        if let Some(handle) = open_device("CONOUT$", true) {
-            install(STD_OUTPUT_HANDLE, handle);
-            install(STD_ERROR_HANDLE, handle);
+        let out = unset(STD_OUTPUT_HANDLE);
+        let err = unset(STD_ERROR_HANDLE);
+        if (out || err)
+            && let Some(handle) = open_device("CONOUT$", true)
+        {
+            if out {
+                install(STD_OUTPUT_HANDLE, handle);
+            }
+            if err {
+                install(STD_ERROR_HANDLE, handle);
+            }
         }
         // Nothing here reads stdin. It's bound anyway so the console is a
         // whole one: a null `STD_INPUT_HANDLE` is what makes `GetConsoleMode`
         // fail for any dependency that asks whether it's talking to a
         // terminal, and answering "no" on a real console invites a library
         // to strip the colour out of the output we opened this window for.
-        if let Some(handle) = open_device("CONIN$", false) {
+        if unset(STD_INPUT_HANDLE)
+            && let Some(handle) = open_device("CONIN$", false)
+        {
             install(STD_INPUT_HANDLE, handle);
         }
+    }
+
+    /// Whether Windows has nothing in that standard slot.
+    ///
+    /// The check that keeps this from trampling a redirect. A process
+    /// launched as `jumppad-gpu > log.txt`, or into a pipe, inherits those
+    /// handles whatever its subsystem - redirection is set up by the parent
+    /// before the child starts, and has nothing to do with owning a console.
+    /// Binding the console over the top of them sent the output to a window
+    /// while the file the user was watching stayed empty.
+    ///
+    /// So only an empty slot gets filled. `GetStdHandle` answers null for a
+    /// GUI process launched without one and `INVALID_HANDLE_VALUE` on error;
+    /// anything else is a handle somebody meant this process to write to.
+    /// `AllocConsole` sets all three itself, so its path lands here and
+    /// correctly does nothing.
+    fn unset(slot: u32) -> bool {
+        // SAFETY: takes a slot id by value and returns a handle or a
+        // sentinel; it borrows nothing and cannot fail in a way that matters.
+        let handle = unsafe { GetStdHandle(slot) };
+        handle == 0 || handle == INVALID_HANDLE_VALUE
     }
 
     /// Opens one of the console's pseudo-files and leaks the handle.

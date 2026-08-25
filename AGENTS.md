@@ -2483,6 +2483,14 @@ opens the console's own `CONOUT$`/`CONIN$` and installs those with
 already compiled into iced and wgpu because std looks `GetStdHandle` up on
 every write rather than caching it at first use.
 
+Only an empty slot gets filled. Redirection - `jumppad-gpu > log.txt`, or a
+pipe - is set up by the parent before the child starts and has nothing to do
+with owning a console, so those handles arrive whatever the subsystem.
+Binding the console over the top of them sends the output to a window while
+the file the user is watching stays empty, which is what an early version of
+this did. `AllocConsole` sets all three itself, so its path lands on the same
+check and correctly does nothing.
+
 `windows-sys` 0.52 spells `HANDLE` and `HWND` as bare `isize`, not as
 pointers - a null check is `!= 0`, and `RawHandle` from `std` needs an
 `as HANDLE` cast. (This changed in later `windows-sys` versions; the pin
