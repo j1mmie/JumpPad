@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(skip_serializing_if = "is_default")]
     pub window: WindowConfig,
     #[serde(skip_serializing_if = "is_default")]
+    pub gpu: GpuConfig,
+    #[serde(skip_serializing_if = "is_default")]
     pub scroll: ScrollConfig,
     #[serde(skip_serializing_if = "is_default")]
     pub history: HistoryConfig,
@@ -655,6 +657,63 @@ pub struct FilesConfig {
     pub save_conflict_resolution: SaveConflictResolution,
 }
 
+/// Which graphics adapter the hardware-rendered binary asks for. Read only
+/// by `jumppad-gpu`; the software binary has no adapter to choose.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(default)]
+pub struct GpuConfig {
+    pub power: GpuPower,
+}
+
+/// How much GPU to ask for.
+///
+/// Defaults to [`GpuPower::Low`], which is not the usual choice for a
+/// windowing library and is deliberate here. iced asks for
+/// `HighPerformance` when nothing says otherwise, so an unconfigured
+/// JumpPad wakes a discrete card to draw a text window - against every
+/// stated goal of this editor, and on a laptop it is the difference between
+/// running on battery and not.
+///
+/// It also stays clear of whatever the discrete card is already busy with.
+/// A driver under load is a different driver: an NVIDIA build was seen
+/// recursing to a stack overflow inside `vkCreateDevice` while a game held
+/// the GPU, on a machine where the integrated adapter started fine. That is
+/// a driver bug and not something this setting fixes - but the integrated
+/// GPU is the better ask regardless, and it is the one that works.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
+)]
+#[serde(rename_all = "lowercase")]
+pub enum GpuPower {
+    /// `power = "low"`. The integrated adapter where the machine has one.
+    #[default]
+    Low,
+    /// `power = "high"`. The discrete adapter - worth asking for only if
+    /// something here is actually GPU-bound, which for a plaintext editor
+    /// it should not be.
+    High,
+    /// `power = "auto"`. State no preference and take whatever wgpu ranks
+    /// first for the surface.
+    Auto,
+}
+
+impl GpuPower {
+    /// The spelling wgpu reads out of `WGPU_POWER_PREF`.
+    ///
+    /// That variable is how this setting reaches iced at all - see
+    /// `prefer_gpu` in `jumppad`'s `lib.rs`. `Auto` is wgpu's `"none"`,
+    /// meaning no preference rather than no GPU.
+    pub fn as_wgpu_power_pref(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::High => "high",
+            Self::Auto => "none",
+        }
+    }
+}
+
 /// What a save does when the file changed on disk since JumpPad last read
 /// it. Mirrors VS Code's `files.saveConflictResolution`.
 #[derive(
@@ -931,9 +990,12 @@ pub fn load() -> Config {
             continue;
         };
         log::debug!("found config at {}", path.display());
-        log::debug!("--- contents of {} ---", path.display());
-        log::debug!("{text}");
-        log::debug!("--- end contents ---");
+        // The whole file at `trace`, not `debug`: which file was picked up
+        // is the startup fact worth having every run, and a hundred lines
+        // of its contents is a thing you go looking for.
+        log::trace!("--- contents of {} ---", path.display());
+        log::trace!("{text}");
+        log::trace!("--- end contents ---");
         return match toml::from_str(&text) {
             Ok(config) => config,
             Err(err) => {
@@ -1118,6 +1180,59 @@ mod tests {
 
     fn config(toml: &str) -> Config {
         toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn an_unconfigured_gpu_asks_for_the_integrated_one() {
+        // The default that matters: iced would ask for `HighPerformance`,
+        // and a plaintext editor has no business waking a discrete card.
+        assert_eq!(config("").gpu.power, GpuPower::Low);
+        assert_eq!(
+            config("").gpu.power.as_wgpu_power_pref(),
+            "low",
+            "the value wgpu is handed, not just the enum"
+        );
+    }
+
+    #[test]
+    fn each_power_spelling_reaches_wgpu_as_its_own_answer() {
+        for (written, expected, pref) in [
+            ("low", GpuPower::Low, "low"),
+            ("high", GpuPower::High, "high"),
+            // wgpu spells "state no preference" as `none`, which is not the
+            // same as asking for no GPU - hence the rename rather than
+            // passing the config word straight through.
+            ("auto", GpuPower::Auto, "none"),
+        ] {
+            let power =
+                config(&format!("[gpu]\npower = \"{written}\"")).gpu.power;
+            assert_eq!(power, expected, "parsing {written:?}");
+            assert_eq!(power.as_wgpu_power_pref(), pref, "for {written:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_power_is_an_error_rather_than_a_silent_default() {
+        // `load()` falls back to built-in defaults on a parse error and says
+        // so; what it must not do is take "turbo" for "low" without a word.
+        assert!(toml::from_str::<Config>("[gpu]\npower = \"turbo\"").is_err());
+    }
+
+    #[test]
+    fn the_default_gpu_section_stays_out_of_the_written_file() {
+        // Same rule as every other section sitting on its default.
+        let written = toml::to_string_pretty(&Config::default()).unwrap();
+        assert!(!written.contains("[gpu]"), "got:\n{written}");
+    }
+
+    #[test]
+    fn a_named_power_round_trips_through_the_written_file() {
+        let mut config = Config::default();
+        config.gpu.power = GpuPower::High;
+        let written = toml::to_string_pretty(&config).unwrap();
+        assert!(written.contains("[gpu]"), "got:\n{written}");
+        let read: Config = toml::from_str(&written).unwrap();
+        assert_eq!(read.gpu.power, GpuPower::High);
     }
 
     #[test]

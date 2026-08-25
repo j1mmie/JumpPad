@@ -77,11 +77,10 @@ pub fn start() {
 /// `info`.
 ///
 /// Cranelift is the exception, and it has to be one. wasmtime compiles every
-/// `.wasm` grammar through it at startup, and at `debug` that is a few
-/// thousand lines of per-pass timing and per-function statistics for work
-/// that is going fine. It buried the twenty lines that actually mattered in
-/// a GPU-crash investigation, twice. `warn` keeps a real Cranelift failure
-/// visible and drops the commentary.
+/// `.wasm` grammar through it at startup, and at `debug` that is thousands
+/// of lines of per-pass timing and per-function statistics describing work
+/// that is going fine - enough to bury anything else the startup had to say.
+/// `warn` keeps a real Cranelift failure visible and drops the commentary.
 ///
 /// `RUST_LOG` still wins wherever it is set, so
 /// `RUST_LOG=cranelift_codegen=debug` brings it all back for anyone

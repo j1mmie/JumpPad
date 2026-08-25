@@ -2457,11 +2457,9 @@ shell's console first so the reply has somewhere to land.
 
 `#![windows_subsystem = "windows"]` sits on both binary crate roots in
 `crates/jumppad/src/bin/`, not in `lib.rs`. It is read off the crate root of
-the binary being linked and ignored on every other crate type, so the copy
-that used to sit in `lib.rs` never did anything - it was commented out for
-an in-progress Windows highlighting investigation that needed console
-output, and that investigation was being served by the *absence of a
-release build*, not by the comment.
+the binary being linked and ignored on every other crate type - so a copy in
+the library does nothing at all, which is worth knowing before anyone moves
+it back there.
 
 It is unconditional rather than `cfg_attr(not(debug_assertions), ...)`.
 Tying it to the profile would mean the console you get while developing
@@ -2496,24 +2494,32 @@ a Finder or `.desktop` launch has no console in the first place. The
 `console` module is a pair of no-ops there and `JUMPPAD_DEBUG` is purely
 about whether a logger gets installed.
 
+## Which GPU the hardware binary asks for
+
+`[gpu] power` picks the adapter, and it defaults to `"low"` - the integrated
+one. That is not iced's default: iced asks for `HighPerformance` when nothing
+says otherwise, which means an unconfigured `jumppad-gpu` wakes a discrete
+card to draw a text window. For an editor whose stated goals are low memory
+and low CPU, low is the right ask; `"high"` is there for anyone who disagrees
+and `"auto"` states no preference.
+
+It reaches iced through the environment, which looks indirect and is not
+avoidable: iced builds its wgpu compositor inside `run()` and accepts no
+adapter preference from the caller, but reads wgpu's own `WGPU_POWER_PREF` on
+the way (`iced_wgpu`'s `window::compositor`). `prefer_gpu` in `lib.rs` sets
+that variable, before any thread exists, and leaves an existing one alone.
+The adapter is chosen once at compositor build, so a reload only logs
+`restart_required`.
+
+Worth knowing if a GPU bug lands here: the setting also keeps JumpPad off
+whatever the discrete card is busy with. An NVIDIA driver was seen recursing
+to a stack overflow inside `vkCreateDevice` while a game held the GPU, on a
+machine whose integrated adapter started fine every time. Nothing in this
+repo can fix a driver recursing in its own call chain - `main` had 8MB of
+stack and it went anyway - so do not go looking for the bug here.
+
 ## Miscellaneous things worth knowing before you "fix" them
 
-- Two separate stacks needed raising on Windows, and they are raised in two
-  different places because nothing raises both. `syntax_registry` spawns its
-  grammar loader with an explicit `stack_size` (`LOAD_STACK_SIZE`) because
-  Cranelift compiles the `.wasm` there and overran the 2MiB a spawned thread
-  gets by default; `.cargo/config.toml`'s `/STACK:` link-arg covers `main`
-  only, since the PE header sizes nothing else. A `STATUS_STACK_OVERFLOW`
-  that survives one of these fixes is probably the other thread - the loader
-  thread is named `grammar-<name>` so the panic says which.
-- `.cargo/config.toml` raises the Windows main-thread stack to 8MB via a
-  `/STACK:` link-arg. Not a superstition: Windows sizes the main thread from
-  the PE header (1MB out of MSVC, 2MB out of mingw) while every spawned
-  thread gets Rust's 2MiB, so `main` - running iced, wgpu and the graphics
-  driver's in-process shader compiler - had less room than the grammar
-  loader thread running Cranelift. It crashed `jumppad-gpu` at startup with
-  `STATUS_STACK_OVERFLOW` whenever something else was working the GPU. 8MB
-  is what Linux and macOS already give the main thread.
 - `.cargo/config.toml` sets `CFLAGS_*_pc_windows_msvc = "-DLIBWASM_STATIC"`.
   That is not a stray build tweak - it is the only place the define can go.
   `tree-sitter`'s build script compiles its C against wasmtime's headers and

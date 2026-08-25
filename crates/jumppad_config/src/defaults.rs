@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 
 use crate::{
-    CommentSyntax, Config, FilesConfig, HistoryConfig, IndentationConfig,
-    LanguageConfig, ModeConfig, ScrollConfig, VisorConfig, WindowConfig,
-    WordsConfig,
+    CommentSyntax, Config, FilesConfig, GpuConfig, HistoryConfig,
+    IndentationConfig, LanguageConfig, ModeConfig, ScrollConfig, VisorConfig,
+    WindowConfig, WordsConfig,
 };
 
 fn lang(
@@ -85,6 +85,7 @@ pub(crate) fn config() -> Config {
         themes: BTreeMap::new(),
         visor: VisorConfig::default(),
         window: WindowConfig::default(),
+        gpu: GpuConfig::default(),
         scroll: ScrollConfig::default(),
         history: HistoryConfig::default(),
         files: FilesConfig::default(),

@@ -8,19 +8,6 @@ use tree_sitter::{Language, Query, wasmtime};
 use crate::grammar::Grammar;
 use crate::loader;
 
-/// Stack for a grammar-loading thread.
-///
-/// Cranelift compiles the grammar on this thread, and its egraph pass
-/// recurses over a function's whole value graph - deep enough on a large
-/// grammar to overrun the 2MiB a spawned thread gets by default. The release
-/// profile makes it worse: it builds this dependency at `opt-level = "z"`,
-/// trading away the inlining that would have flattened those frames.
-///
-/// Costs nothing at rest. A thread stack is reserved address space and
-/// commits by the page as it is touched, so this raises the ceiling without
-/// raising what the process actually holds.
-const LOAD_STACK_SIZE: usize = 16 * 1024 * 1024;
-
 enum Entry {
     Loading,
     Loaded(Arc<Grammar>),
@@ -117,10 +104,10 @@ impl SyntaxRegistry {
                 let registry = self.clone();
                 let owned_name = grammar_name.to_owned();
                 let spawned = std::thread::Builder::new()
-                    // Named so a crash in here says which thread died. The
-                    // one that cost an afternoon reported only `main`.
+                    // Named, so a panic or a crash anywhere in the load
+                    // path reports `grammar-<name>` rather than leaving the
+                    // reader to work out which of several threads it was.
                     .name(format!("grammar-{owned_name}"))
-                    .stack_size(LOAD_STACK_SIZE)
                     .spawn(move || registry.finish_load(&owned_name));
                 if let Err(err) = spawned {
                     // The entry is already `Loading` and nobody else will

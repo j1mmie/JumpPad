@@ -114,6 +114,7 @@ Environment:
     };
 
     let config = jumppad_config::load();
+    prefer_gpu(config.gpu.power);
     // The same description a `config.toml` reload builds to decide whether
     // the window on screen still matches the file - see `window::replace`.
     let window = window::settings(&config);
@@ -149,6 +150,32 @@ Environment:
     .theme(JumpPadApp::theme)
     .style(JumpPadApp::style)
     .run()
+}
+
+/// Points wgpu at the adapter `[gpu] power` asked for.
+///
+/// Through the environment because that is the only door iced leaves open:
+/// it builds its wgpu compositor deep inside `run()` and takes no adapter
+/// preference from the caller, but it does consult wgpu's own
+/// `WGPU_POWER_PREF` on the way (`iced_wgpu`'s `window::compositor`). So the
+/// config setting becomes that variable.
+///
+/// A `WGPU_POWER_PREF` already in the environment is left alone. It is the
+/// same variable meaning the same thing, and someone who exported it by hand
+/// is answering the question more locally than a config file can.
+///
+/// Inert in the `jumppad` binary, which has no wgpu to read it.
+fn prefer_gpu(power: jumppad_config::GpuPower) {
+    const VAR: &str = "WGPU_POWER_PREF";
+    if std::env::var_os(VAR).is_some() {
+        return;
+    }
+    // SAFETY: `set_var` is unsound with another thread reading the
+    // environment concurrently. Nothing in this process has spawned a thread
+    // yet - `debug::start` installs a logger and `load` reads files, both on
+    // this thread - and iced has not been handed control. That ordering is
+    // why the call sits up in `run` rather than next to the code that cares.
+    unsafe { std::env::set_var(VAR, power.as_wgpu_power_pref()) };
 }
 
 /// Answers `--help`/`--version` on the terminal that asked.
