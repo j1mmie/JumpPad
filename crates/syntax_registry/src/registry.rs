@@ -8,6 +8,19 @@ use tree_sitter::{Language, Query, wasmtime};
 use crate::grammar::Grammar;
 use crate::loader;
 
+/// Stack for a grammar-loading thread.
+///
+/// Cranelift compiles the grammar on this thread, and its egraph pass
+/// recurses over a function's whole value graph - deep enough on a large
+/// grammar to overrun the 2MiB a spawned thread gets by default. The release
+/// profile makes it worse: it builds this dependency at `opt-level = "z"`,
+/// trading away the inlining that would have flattened those frames.
+///
+/// Costs nothing at rest. A thread stack is reserved address space and
+/// commits by the page as it is touched, so this raises the ceiling without
+/// raising what the process actually holds.
+const LOAD_STACK_SIZE: usize = 16 * 1024 * 1024;
+
 enum Entry {
     Loading,
     Loaded(Arc<Grammar>),
@@ -102,8 +115,20 @@ impl SyntaxRegistry {
                 drop(state);
 
                 let registry = self.clone();
-                let grammar_name = grammar_name.to_owned();
-                std::thread::spawn(move || registry.finish_load(&grammar_name));
+                let owned_name = grammar_name.to_owned();
+                let spawned = std::thread::Builder::new()
+                    // Named so a crash in here says which thread died. The
+                    // one that cost an afternoon reported only `main`.
+                    .name(format!("grammar-{owned_name}"))
+                    .stack_size(LOAD_STACK_SIZE)
+                    .spawn(move || registry.finish_load(&owned_name));
+                if let Err(err) = spawned {
+                    // The entry is already `Loading` and nobody else will
+                    // resolve it, so say so here or every future `poll` for
+                    // this grammar waits on a thread that never started.
+                    log::warn!("{grammar_name}: couldn't start loader: {err}");
+                    self.resolve(grammar_name, Err(format!("{err}")));
+                }
             }
         }
 
@@ -127,6 +152,16 @@ impl SyntaxRegistry {
             Grammar::new(language, parser, injections, injected)
         });
 
+        self.resolve(grammar_name, result);
+    }
+
+    /// Installs a load's outcome and wakes whoever was waiting on it.
+    ///
+    /// Split out of `finish_load` because the loader thread is not the only
+    /// way a load ends: failing to spawn one at all has to land the same
+    /// way, or the `Loading` entry already in the map is never answered and
+    /// every later `poll` waits on a thread that does not exist.
+    fn resolve(&self, grammar_name: &str, result: Result<Grammar, String>) {
         {
             let mut state = self.state.lock().unwrap();
             let Some((entry, _)) = state.get_mut(grammar_name) else {

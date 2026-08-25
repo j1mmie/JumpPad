@@ -139,3 +139,16 @@ cosmic-text = { opt-level = 3 }
 swash = { opt-level = 3 }
 zeno = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
+
+# Cranelift is the other place "z" costs more than it saves. It compiles
+# every `.wasm` grammar at startup, so its speed is a startup cost, and its
+# egraph pass recurses over a function's whole value graph - built without
+# inlining, those frames are what pushed the loader thread off the end of its
+# stack (see `LOAD_STACK_SIZE` in `syntax_registry`). Shallower frames and a
+# faster load for the same reason.
+cranelift-codegen = { opt-level = 3 }
+cranelift-frontend = { opt-level = 3 }
+cranelift-bforest = { opt-level = 3 }
+cranelift-entity = { opt-level = 3 }
+cranelift-bitset = { opt-level = 3 }
+regalloc2 = { opt-level = 3 }

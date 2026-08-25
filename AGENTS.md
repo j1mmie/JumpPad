@@ -2498,6 +2498,14 @@ about whether a logger gets installed.
 
 ## Miscellaneous things worth knowing before you "fix" them
 
+- Two separate stacks needed raising on Windows, and they are raised in two
+  different places because nothing raises both. `syntax_registry` spawns its
+  grammar loader with an explicit `stack_size` (`LOAD_STACK_SIZE`) because
+  Cranelift compiles the `.wasm` there and overran the 2MiB a spawned thread
+  gets by default; `.cargo/config.toml`'s `/STACK:` link-arg covers `main`
+  only, since the PE header sizes nothing else. A `STATUS_STACK_OVERFLOW`
+  that survives one of these fixes is probably the other thread - the loader
+  thread is named `grammar-<name>` so the panic says which.
 - `.cargo/config.toml` raises the Windows main-thread stack to 8MB via a
   `/STACK:` link-arg. Not a superstition: Windows sizes the main thread from
   the PE header (1MB out of MSVC, 2MB out of mingw) while every spawned
