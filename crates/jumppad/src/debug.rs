@@ -62,17 +62,32 @@ pub fn start() {
     }
     console::attach();
 
-    // `debug` rather than the `info` this used to default to: the whole
-    // point of the switch is the chatter, and the grammar-loading and
-    // window-backend lines worth having when chasing a rendering bug sit
-    // below `info`. `RUST_LOG` still wins where it's set, which is what
-    // keeps `RUST_LOG=jumppad=trace,wgpu_core=warn` style filtering - and
-    // `iced_wgpu`'s own adapter/format/alpha-mode logging - available.
     let _ = env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("debug"),
+        env_logger::Env::default().default_filter_or(DEFAULT_FILTER),
     )
     .try_init();
 }
+
+/// What `JUMPPAD_DEBUG` turns on when `RUST_LOG` doesn't say otherwise.
+///
+/// `debug` globally rather than the `info` this used to default to: the whole
+/// point of the switch is the chatter, and the grammar-loading and
+/// window-backend lines worth having when chasing a rendering bug - iced and
+/// wgpu's adapter, format and alpha-mode reporting among them - sit below
+/// `info`.
+///
+/// Cranelift is the exception, and it has to be one. wasmtime compiles every
+/// `.wasm` grammar through it at startup, and at `debug` that is a few
+/// thousand lines of per-pass timing and per-function statistics for work
+/// that is going fine. It buried the twenty lines that actually mattered in
+/// a GPU-crash investigation, twice. `warn` keeps a real Cranelift failure
+/// visible and drops the commentary.
+///
+/// `RUST_LOG` still wins wherever it is set, so
+/// `RUST_LOG=cranelift_codegen=debug` brings it all back for anyone
+/// debugging the grammar pipeline itself.
+const DEFAULT_FILTER: &str = "debug,cranelift_codegen=warn,wasmtime_internal_cranelift=warn,\
+     regalloc2=warn";
 
 /// Getting a readable stdout in front of a GUI-subsystem process.
 #[cfg(target_os = "windows")]
