@@ -1350,10 +1350,14 @@ this paragraph.
 `etagere`, `guillotiere` and `glam` are in the list now, plus `naga` for
 startup - it compiles iced's shaders once, when the compositor is built.
 
-Raising it costs binary size - ~320KB for the software list, more for the wgpu
-one, which is a much larger stack. Only `jumppad-gpu` links any of the second
-list, so `jumppad`'s size is unchanged. If a crate ever shows up hot on either
-draw path, add it. `-C target-cpu=x86-64-v3` would help further on Intel
+Raising it costs binary size: ~320KB for the software list, and **~820KB for
+the wgpu one** - 18.2MB to 19.1MB, measured on `x86_64-unknown-linux-gnu` by
+building `jumppad-gpu` twice with the second list at `"z"` and at `3`. Less
+than the stack's size suggests, because `-Oz` and `-O3` differ mostly on
+inlining and most of wgpu is not on the hot path. Only `jumppad-gpu` links any
+of the second list, so `jumppad`'s size is unchanged. If a crate ever shows up
+hot on either draw path, add it. `-C target-cpu=x86-64-v3` would help further
+on Intel
 (tiny-skia's `f32x8` only uses AVX under `target_feature = "avx"`), but keep it
 out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
 crash on older CPUs, and moot on Apple Silicon where NEON is baseline.

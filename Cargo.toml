@@ -158,10 +158,10 @@ iced_tiny_skia = { opt-level = 3 }
 # `naga` is here for startup rather than per-frame: it compiles iced's shaders
 # once, when the compositor is built.
 #
-# This costs binary size, and more of it than the software list does - the
-# wgpu stack is much larger than tiny-skia. It buys back the reason the GPU
-# binary exists, and only `jumppad-gpu` links any of it, so `jumppad` is
-# unchanged.
+# This costs ~820KB of binary (18.2MB -> 19.1MB on x86_64 Linux, measured by
+# building `jumppad-gpu` twice), against ~320KB for the software list above.
+# It buys back the reason the GPU binary exists, and only `jumppad-gpu` links
+# any of it, so `jumppad` is unchanged.
 wgpu = { opt-level = 3 }
 wgpu-core = { opt-level = 3 }
 wgpu-hal = { opt-level = 3 }
