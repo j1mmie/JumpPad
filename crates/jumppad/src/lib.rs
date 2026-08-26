@@ -167,7 +167,8 @@ Environment:
 /// Inert in the `jumppad` binary, which has no wgpu to read it.
 fn prefer_gpu(power: jumppad_config::GpuPower) {
     const VAR: &str = "WGPU_POWER_PREF";
-    if std::env::var_os(VAR).is_some() {
+    if let Some(existing) = std::env::var_os(VAR) {
+        log::debug!("{VAR}={existing:?} in the environment, leaving it");
         return;
     }
     // SAFETY: `set_var` is unsound with another thread reading the
@@ -176,6 +177,12 @@ fn prefer_gpu(power: jumppad_config::GpuPower) {
     // this thread - and iced has not been handed control. That ordering is
     // why the call sits up in `run` rather than next to the code that cares.
     unsafe { std::env::set_var(VAR, power.as_wgpu_power_pref()) };
+    // Said out loud because the answer is assembled from three places - a
+    // config file, this default, and an environment that silently outranks
+    // both - and iced reports only which adapter it ended up with. Without
+    // this line, working out why the adapter was not the expected one means
+    // checking all three by hand.
+    log::debug!("asking wgpu for {power:?} power ({VAR} was unset)");
 }
 
 /// Answers `--help`/`--version` on the terminal that asked.
