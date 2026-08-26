@@ -6,6 +6,7 @@ mod app;
 mod debug;
 mod docwatch;
 mod find;
+mod grammar_paths;
 mod hotkey;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
