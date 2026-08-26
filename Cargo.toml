@@ -127,51 +127,19 @@ lto = true
 codegen-units = 1 # Slower, but better planned builds
 opt-level = "z" # "z" for binary size, "s" to favor runtime speed
 
-# "z" makes the build smaller, but it makes a renderer slow. So we don't apply
-# it to the crates that draw every frame - on *either* backend. See AGENTS.md.
+# "z" makes the build smaller, but it makes the software renderer slow. So we
+# don't apply it to the crates that draw every frame. See AGENTS.md - including
+# why the wgpu stack is deliberately *not* on this list, having been tried.
 [profile.release.package]
-# Shared by both binaries: text shaping and iced's own geometry.
+tiny-skia = { opt-level = 3 }
+tiny-skia-path = { opt-level = 3 }
 bytemuck = { opt-level = 3 }
+iced_tiny_skia = { opt-level = 3 }
 iced_graphics = { opt-level = 3 }
 cosmic-text = { opt-level = 3 }
 swash = { opt-level = 3 }
 zeno = { opt-level = 3 }
 ttf-parser = { opt-level = 3 }
-
-# `jumppad`'s software rasterizer.
-tiny-skia = { opt-level = 3 }
-tiny-skia-path = { opt-level = 3 }
-iced_tiny_skia = { opt-level = 3 }
-
-# `jumppad-gpu`'s. These were missed when the list above was written, and the
-# omission reads as "the hardware binary is slower than the software one",
-# which is not a sentence anyone expects to be true. A GPU renderer still
-# spends CPU per frame, and wgpu spends a lot of it: `wgpu-core`'s resource
-# tracker and validation walk every buffer, bind group and draw call on the
-# way to the driver, and `cryoglyph` re-packs the glyph atlas as text scrolls.
-# All of it is small generic functions calling small generic functions -
-# exactly the shape `-Oz` declines to inline - so this half of the app paid
-# the whole per-frame cost with none of the optimization the software half
-# had been given, against a `tiny-skia` that had been measured at 3.4x on
-# this same setting.
-#
-# `naga` is here for startup rather than per-frame: it compiles iced's shaders
-# once, when the compositor is built.
-#
-# This costs ~820KB of binary (18.2MB -> 19.1MB on x86_64 Linux, measured by
-# building `jumppad-gpu` twice), against ~320KB for the software list above.
-# It buys back the reason the GPU binary exists, and only `jumppad-gpu` links
-# any of it, so `jumppad` is unchanged.
-wgpu = { opt-level = 3 }
-wgpu-core = { opt-level = 3 }
-wgpu-hal = { opt-level = 3 }
-wgpu-types = { opt-level = 3 }
-iced_wgpu = { opt-level = 3 }
-cryoglyph = { opt-level = 3 }
-etagere = { opt-level = 3 }
-guillotiere = { opt-level = 3 }
-glam = { opt-level = 3 }
-naga = { opt-level = 3 }
 
 # Cranelift is the other place "z" costs more than it saves. It compiles
 # every `.wasm` grammar at startup, so its speed is a startup cost, and its

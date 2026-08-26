@@ -1252,16 +1252,18 @@ dead, read only by `Dx12SwapchainKind::from_env`, which nothing in `wgpu`,
 Reported from Windows: on `jumppad-gpu` a selection dragged with the mouse
 trails the pointer by two or three frames and scrolling arrives late, while
 `jumppad` is immediate. The hardware binary being the sluggish one reads as
-nonsense, and it is not - it is the presentation path, and possibly a second
-cause on top of it. Both are things the software binary was never exposed to.
+nonsense, and it is not - it is the presentation path, start to finish, and
+it is something the software binary was never exposed to.
 
-**Cause one, confirmed on the reporting machine: the two binaries reach the
+**The cause, confirmed on the reporting machine: the two binaries reach the
 screen by different routes, and only one of them ever queued a frame.**
 Established by A/B on real Windows hardware rather than by reading the
-sources alone - one `jumppad-gpu` build, `[gpu] vsync` toggled between runs,
-and the lag comes back with `vsync = true`. So this is the cause, not a
-plausible one. This is the same sentence the transparency
-sections above keep arriving at, for a third reason. `jumppad` presents
+sources alone - `[gpu] vsync` toggled between runs, the lag back with
+`vsync = true` and gone with `false`, on two separately built binaries (see
+the dead end below). Nothing else that was tried moved it.
+
+This is the same sentence the transparency sections above keep arriving at,
+for a third reason. `jumppad` presents
 through `softbuffer` - a GDI blit into the window's redirection bitmap on
 Windows, a layer-contents swap on macOS. Neither blocks: the frame is handed
 to the compositor and `present` returns. `jumppad-gpu` presents through a
@@ -1298,18 +1300,30 @@ alike. It is not the reckless setting it sounds like:
 - **`iced_tiny_skia` never reads the field**, so `jumppad` is unaffected
   either way.
 
-**Cause two, still unmeasured: the whole wgpu stack was compiled at
-`opt-level = "z"`.** See the next section - the per-frame override list had
-been written for the software renderer and stopped there. It has no number
-against it: the 43.6ms-vs-12.7ms figure below was measured on `tiny-skia`,
-and nobody has profiled a frame of `jumppad-gpu` at either setting. The
-`vsync` A/B above cannot speak to it either, since both of its runs were the
-same `opt-level = 3` binary. It is in the tree because the mechanism is the
-same one and the crates were plainly missed, not because it was caught in the
-act - and cause one turning out to be sufficient means **it may have fixed
-nothing at all.** The test that would settle it is a `jumppad-gpu` built with
-that second list back at `"z"`, `vsync` held at `false`, against this one. If
-it feels identical, the entry is carrying ~820KB for nothing and should go.
+**Dead end, tried and reverted: raising the wgpu stack to `opt-level = 3`.**
+The per-frame override list in `[profile.release.package]` had been written
+for `tiny-skia` and stopped there, leaving `wgpu`, `wgpu-core`, `wgpu-hal`,
+`iced_wgpu`, `cryoglyph` and `glam` at `"z"`. The reasoning was sound and the
+result was nothing: `wgpu-core` really does validate every buffer, bind group
+and draw call on the CPU, and `-Oz` really does decline to inline it, but
+`vsync = false` is fast on a `"z"` build and `vsync = true` is slow on a `3`
+build. All four cells were tested on the reporting machine:
+
+| `vsync` | wgpu at | result |
+| --- | --- | --- |
+| `true` | `3` | slow |
+| `true` | `"z"` | slow |
+| `false` | `3` | fast |
+| `false` | `"z"` | fast |
+
+So `vsync` accounts for the whole difference and the profile entries account
+for none of it. They cost ~820KB of binary (18.2MB to 19.1MB on x86_64
+Linux), which is why they are gone rather than kept as insurance. **Do not
+re-add them on the strength of the mechanism** - the mechanism is real and
+the effect is not measurable here, which is exactly the trap this entry
+exists to stop. If a frame of `jumppad-gpu` is ever actually profiled and the
+CPU time shows up in `wgpu-core`, that is different evidence and this note
+does not stand against it.
 
 Two things ruled out along the way, so they are not re-derived:
 
@@ -1332,7 +1346,7 @@ exists is real, so this is a trade, not a fix); then `ICED_PRESENT_MODE`
 presentation path wholesale - a diagnostic rather than a setting, since DX12
 through an HWND surface cannot be translucent (see the red herring above).
 
-## Why neither renderer is compiled at `opt-level = "z"`
+## Why the software renderer isn't compiled at `opt-level = "z"`
 
 `[profile.release]` uses `opt-level = "z"` for binary size, but
 `[profile.release.package]` pulls the per-frame drawing crates back up to `3`.
@@ -1340,33 +1354,21 @@ Measured on a 1800x1200 surface (a default window at 2x), clearing plus 40 rows
 of translucent quads: **43.6ms/frame at "z", 12.7ms at 3** - 23fps vs 79fps, for
 one repaint. tiny-skia says why in `src/wide/u16x16_t.rs`: its blend pipeline is
 plain `[u16; 16]` arrays that rely on autovectorization, which `-Oz` turns off,
-and `#[inline]` hints it calls mandatory, which `-Oz` declines.
+and `#[inline]` hints it calls mandatory, which `-Oz` declines. `jumppad-gpu`
+never runs any of it, which is why the two binaries felt so different.
 
-**That list was written for `tiny-skia` and stopped there, which is half of
-why `jumppad-gpu` felt slow** (the other half is the section above). "It runs
-on the GPU" is not the same as "it costs no CPU": `wgpu-core`'s resource
-tracker and validation walk every buffer, bind group and draw call on the way
-to the driver, and `cryoglyph` re-packs the glyph atlas as text scrolls. That
-code is small generic functions calling small generic functions, the shape
-`-Oz` declines to inline, so the hardware binary was paying a full per-frame
-CPU cost with none of the optimization the software binary had been given.
-**Not measured on this stack** - the numbers above are `tiny-skia`'s, and the
-Windows A/B that settled the vsync half held this list at `3` for both runs,
-so it says nothing here. If this ever needs defending, profile a frame at both
-settings rather than citing this paragraph.
-`wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types`, `iced_wgpu`, `cryoglyph`,
-`etagere`, `guillotiere` and `glam` are in the list now, plus `naga` for
-startup - it compiles iced's shaders once, when the compositor is built.
+**The wgpu stack is deliberately not on this list, and that was tested rather
+than assumed.** The argument for adding it is good - `wgpu-core` validates
+every buffer, bind group and draw call on the CPU, in small generic functions
+`-Oz` will not inline - and the measured effect on the one machine that could
+try it was zero, against ~820KB of binary. See the "Why `jumppad-gpu` felt
+slower" section above for the four-cell table and why the mechanism alone is
+not enough to re-add it.
 
-Raising it costs binary size: ~320KB for the software list, and **~820KB for
-the wgpu one** - 18.2MB to 19.1MB, measured on `x86_64-unknown-linux-gnu` by
-building `jumppad-gpu` twice with the second list at `"z"` and at `3`. Less
-than the stack's size suggests, because `-Oz` and `-O3` differ mostly on
-inlining and most of wgpu is not on the hot path. Only `jumppad-gpu` links any
-of the second list, so `jumppad`'s size is unchanged. If a crate ever shows up
-hot on either draw path, add it. `-C target-cpu=x86-64-v3` would help further
-on Intel
-(tiny-skia's `f32x8` only uses AVX under `target_feature = "avx"`), but keep it
+Raising it costs ~320KB of binary. If a crate ever shows up hot on the draw
+path, add it - hot meaning *profiled*, on the evidence of that dead end.
+`-C target-cpu=x86-64-v3` would help further on Intel (tiny-skia's `f32x8`
+only uses AVX under `target_feature = "avx"`), but keep it
 out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
 crash on older CPUs, and moot on Apple Silicon where NEON is baseline.
 
