@@ -1,0 +1,362 @@
+use super::*;
+use std::collections::HashMap;
+
+fn press(
+    key: Key,
+    code: key::Code,
+    modifiers: Modifiers,
+) -> Option<Action> {
+    action_for(
+        &key,
+        key::Physical::Code(code),
+        modifiers,
+        Context::EditorFocused,
+    )
+}
+
+fn character(c: &str) -> Key {
+    Key::Character(c.to_string().into())
+}
+
+/// The platform's accelerator, as `Mods::COMMAND` resolves it.
+fn command() -> Modifiers {
+    Mods::COMMAND.mask()
+}
+
+#[test]
+fn no_two_actions_share_a_chord_in_one_context() {
+    // `keybinds.sample.toml` admits collisions are
+    // "undefined-which-wins - not a supported configuration, just not
+    // guarded against". For defaults, this guards against it.
+    let mut seen: HashMap<(Modifiers, Trigger, Context), Action> =
+        HashMap::new();
+    for (action, chords) in DEFAULT_KEYS {
+        for chord in *chords {
+            let at = (chord.mods.mask(), chord.trigger, action.context());
+            if let Some(other) = seen.insert(at, *action) {
+                panic!("{action} and {other} share a chord: {chord:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn every_action_with_a_default_appears_once() {
+    let mut seen = std::collections::HashSet::new();
+    for (action, chords) in DEFAULT_KEYS {
+        assert!(seen.insert(*action), "{action} listed twice");
+        assert!(!chords.is_empty(), "{action} has an empty chord list");
+    }
+}
+
+#[test]
+fn the_line_commands_keep_their_chords() {
+    let alt = Modifiers::ALT;
+    // Cmd+Opt on macOS, Ctrl+Alt elsewhere.
+    let copy = Mods::COMMAND_ALT.mask();
+    let up = Key::Named(key::Named::ArrowUp);
+    let down = Key::Named(key::Named::ArrowDown);
+
+    assert_eq!(
+        press(up.clone(), key::Code::ArrowUp, alt),
+        Some(Action::MoveLineUp)
+    );
+    assert_eq!(
+        press(down.clone(), key::Code::ArrowDown, alt),
+        Some(Action::MoveLineDown)
+    );
+    assert_eq!(
+        press(up, key::Code::ArrowUp, copy),
+        Some(Action::CopyLineUp)
+    );
+    assert_eq!(
+        press(down, key::Code::ArrowDown, copy),
+        Some(Action::CopyLineDown)
+    );
+}
+
+#[test]
+fn redo_answers_to_both_of_its_chords() {
+    assert_eq!(
+        press(character("z"), key::Code::KeyZ, command()),
+        Some(Action::Undo)
+    );
+    assert_eq!(
+        press(
+            character("z"),
+            key::Code::KeyZ,
+            command() | Modifiers::SHIFT
+        ),
+        Some(Action::Redo)
+    );
+    assert_eq!(
+        press(character("y"), key::Code::KeyY, command()),
+        Some(Action::Redo)
+    );
+}
+
+#[test]
+fn shifted_and_unshifted_chords_do_not_collide() {
+    // The old chain needed `Character("s") if shift` written above plain
+    // `Character("s")`; exact matching makes the order irrelevant.
+    assert_eq!(
+        press(character("s"), key::Code::KeyS, command()),
+        Some(Action::SaveFile)
+    );
+    assert_eq!(
+        press(
+            character("s"),
+            key::Code::KeyS,
+            command() | Modifiers::SHIFT
+        ),
+        Some(Action::SaveFileAs)
+    );
+}
+
+#[test]
+fn an_extra_modifier_no_longer_counts_as_the_chord() {
+    // Deliberate tightening: `modifiers.command()` used to be true with
+    // Alt also held, so Cmd+Alt+N opened a tab.
+    assert_eq!(
+        press(character("n"), key::Code::KeyN, command()),
+        Some(Action::NewTab)
+    );
+    assert_eq!(
+        press(character("n"), key::Code::KeyN, command() | Modifiers::ALT),
+        None
+    );
+}
+
+#[test]
+fn a_latin_chord_survives_a_cyrillic_layout() {
+    // `to_latin` falls back to the physical key for letters, so Cmd+Z is
+    // still undo when the layout produces "я".
+    assert_eq!(
+        press(character("я"), key::Code::KeyZ, command()),
+        Some(Action::Undo)
+    );
+}
+
+#[test]
+fn an_editor_action_does_not_fire_with_the_editor_unfocused() {
+    let alt = Modifiers::ALT;
+    let up = Key::Named(key::Named::ArrowUp);
+    assert_eq!(
+        action_for(
+            &up,
+            key::Physical::Code(key::Code::ArrowUp),
+            alt,
+            Context::Always
+        ),
+        None
+    );
+    assert_eq!(
+        action_for(
+            &up,
+            key::Physical::Code(key::Code::ArrowUp),
+            alt,
+            Context::EditorFocused
+        ),
+        Some(Action::MoveLineUp)
+    );
+}
+
+#[test]
+fn every_editor_chord_that_used_to_be_hardcoded_still_resolves() {
+    // These assertions used to live in `jumppad_textarea`'s
+    // `key_binding` tests, against the `if` chains this table replaced.
+    // They belong here now that the chords do.
+    let cmd = command();
+    let jump = Mods::JUMP.mask();
+    for (key, code, modifiers, expected) in [
+        (character("d"), key::Code::KeyD, cmd, Action::DeleteLine),
+        (character("/"), key::Code::Slash, cmd, Action::ToggleComment),
+        (
+            Key::Named(key::Named::ArrowUp),
+            key::Code::ArrowUp,
+            cmd,
+            Action::DocumentStart,
+        ),
+        (
+            Key::Named(key::Named::ArrowDown),
+            key::Code::ArrowDown,
+            cmd,
+            Action::DocumentEnd,
+        ),
+        (
+            Key::Named(key::Named::ArrowUp),
+            key::Code::ArrowUp,
+            cmd | Modifiers::SHIFT,
+            Action::SelectDocumentStart,
+        ),
+        (
+            Key::Named(key::Named::ArrowDown),
+            key::Code::ArrowDown,
+            cmd | Modifiers::SHIFT,
+            Action::SelectDocumentEnd,
+        ),
+        (
+            Key::Named(key::Named::Backspace),
+            key::Code::Backspace,
+            jump,
+            Action::WordDeleteBackward,
+        ),
+        (
+            Key::Named(key::Named::Delete),
+            key::Code::Delete,
+            jump,
+            Action::WordDeleteForward,
+        ),
+    ] {
+        assert_eq!(
+            press(key, code, modifiers),
+            Some(expected),
+            "{expected} lost its chord"
+        );
+    }
+}
+
+#[test]
+fn every_app_chord_that_used_to_be_hardcoded_still_resolves() {
+    let cmd = command();
+    let shift = cmd | Modifiers::SHIFT;
+    for (c, code, modifiers, expected) in [
+        ('n', key::Code::KeyN, cmd, Action::NewTab),
+        ('o', key::Code::KeyO, cmd, Action::OpenFile),
+        ('s', key::Code::KeyS, cmd, Action::SaveFile),
+        ('s', key::Code::KeyS, shift, Action::SaveFileAs),
+        ('w', key::Code::KeyW, cmd, Action::CloseActiveTab),
+        ('f', key::Code::KeyF, cmd, Action::Find),
+        ('g', key::Code::KeyG, cmd, Action::FindNext),
+        ('g', key::Code::KeyG, shift, Action::FindPrevious),
+        (
+            '[',
+            key::Code::BracketLeft,
+            shift,
+            Action::SelectPreviousTab,
+        ),
+        (']', key::Code::BracketRight, shift, Action::SelectNextTab),
+    ] {
+        assert_eq!(
+            action_for(
+                &character(&c.to_string()),
+                key::Physical::Code(code),
+                modifiers,
+                Context::Always
+            ),
+            Some(expected),
+            "{expected} lost its chord"
+        );
+    }
+}
+
+#[test]
+fn a_bare_alt_arrow_and_a_copy_arrow_stay_apart() {
+    // Move and duplicate differ only by the accelerator, so exact
+    // modifier matching is the whole of what keeps them apart.
+    assert_eq!(
+        press(
+            Key::Named(key::Named::ArrowUp),
+            key::Code::ArrowUp,
+            Modifiers::ALT
+        ),
+        Some(Action::MoveLineUp)
+    );
+    assert_eq!(
+        press(
+            Key::Named(key::Named::ArrowUp),
+            key::Code::ArrowUp,
+            Mods::COMMAND_ALT.mask()
+        ),
+        Some(Action::CopyLineUp)
+    );
+    // And the old chord is now unbound rather than quietly still working.
+    assert_eq!(
+        press(
+            Key::Named(key::Named::ArrowUp),
+            key::Code::ArrowUp,
+            Modifiers::ALT | Modifiers::SHIFT
+        ),
+        None
+    );
+}
+
+#[test]
+fn ctrl_tab_is_literal_ctrl_on_every_platform() {
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::CTRL,
+            Context::Always
+        ),
+        Some(Action::SelectPreviousActiveTab)
+    );
+}
+
+#[test]
+fn plain_tab_indents_without_disturbing_ctrl_tab() {
+    // The two share a key and are told apart by modifiers alone, which
+    // only holds while `Mods::matches` stays exact.
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::empty(),
+            Context::EditorFocused
+        ),
+        Some(Action::Indent)
+    );
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::CTRL,
+            Context::EditorFocused
+        ),
+        Some(Action::SelectPreviousActiveTab)
+    );
+}
+
+#[test]
+fn tab_does_not_indent_with_the_editor_unfocused() {
+    // So Tab stays free for whatever the chrome wants it for - a dialog
+    // already cycles its buttons with it.
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::empty(),
+            Context::Always
+        ),
+        None
+    );
+}
+
+#[test]
+fn shift_tab_outdents_rather_than_falling_through_to_plain_tab() {
+    // Which it can only do while `Mods::matches` stays exact.
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::SHIFT,
+            Context::EditorFocused
+        ),
+        Some(Action::Outdent)
+    );
+}
+
+#[test]
+fn shift_tab_does_not_outdent_with_the_editor_unfocused() {
+    // Same reason plain Tab doesn't: Shift+Tab cycles a dialog backwards.
+    assert_eq!(
+        action_for(
+            &Key::Named(key::Named::Tab),
+            key::Physical::Code(key::Code::Tab),
+            Modifiers::SHIFT,
+            Context::Always
+        ),
+        None
+    );
+}
