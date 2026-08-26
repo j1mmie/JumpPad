@@ -1252,11 +1252,15 @@ dead, read only by `Dx12SwapchainKind::from_env`, which nothing in `wgpu`,
 Reported from Windows: on `jumppad-gpu` a selection dragged with the mouse
 trails the pointer by two or three frames and scrolling arrives late, while
 `jumppad` is immediate. The hardware binary being the sluggish one reads as
-nonsense, and it is not - it is two separate causes stacking, and both are
-things the software binary was never exposed to.
+nonsense, and it is not - it is the presentation path, and possibly a second
+cause on top of it. Both are things the software binary was never exposed to.
 
-**Cause one: the two binaries reach the screen by different routes, and only
-one of them ever queued a frame.** This is the same sentence the transparency
+**Cause one, confirmed on the reporting machine: the two binaries reach the
+screen by different routes, and only one of them ever queued a frame.**
+Established by A/B on real Windows hardware rather than by reading the
+sources alone - one `jumppad-gpu` build, `[gpu] vsync` toggled between runs,
+and the lag comes back with `vsync = true`. So this is the cause, not a
+plausible one. This is the same sentence the transparency
 sections above keep arriving at, for a third reason. `jumppad` presents
 through `softbuffer` - a GDI blit into the window's redirection bitmap on
 Windows, a layer-contents swap on macOS. Neither blocks: the frame is handed
@@ -1294,15 +1298,18 @@ alike. It is not the reckless setting it sounds like:
 - **`iced_tiny_skia` never reads the field**, so `jumppad` is unaffected
   either way.
 
-**Cause two, reasoned rather than measured: the whole wgpu stack was compiled
-at `opt-level = "z"`.** See the next section - the per-frame override list had
-been written for the software renderer and stopped there. Unlike cause one,
-which is read straight out of `iced_wgpu` and `wgpu-hal`, this one has no
-number against it: the 43.6ms-vs-12.7ms figure below was measured on
-`tiny-skia`, and nobody has profiled a frame of `jumppad-gpu` at either
-setting. It is here because the mechanism is the same one and the crates were
-plainly missed, not because it was caught in the act. **If the lag survives
-`vsync = false`, measure this before assuming it.**
+**Cause two, still unmeasured: the whole wgpu stack was compiled at
+`opt-level = "z"`.** See the next section - the per-frame override list had
+been written for the software renderer and stopped there. It has no number
+against it: the 43.6ms-vs-12.7ms figure below was measured on `tiny-skia`,
+and nobody has profiled a frame of `jumppad-gpu` at either setting. The
+`vsync` A/B above cannot speak to it either, since both of its runs were the
+same `opt-level = 3` binary. It is in the tree because the mechanism is the
+same one and the crates were plainly missed, not because it was caught in the
+act - and cause one turning out to be sufficient means **it may have fixed
+nothing at all.** The test that would settle it is a `jumppad-gpu` built with
+that second list back at `"z"`, `vsync` held at `false`, against this one. If
+it feels identical, the entry is carrying ~820KB for nothing and should go.
 
 Two things ruled out along the way, so they are not re-derived:
 
@@ -1343,9 +1350,10 @@ to the driver, and `cryoglyph` re-packs the glyph atlas as text scrolls. That
 code is small generic functions calling small generic functions, the shape
 `-Oz` declines to inline, so the hardware binary was paying a full per-frame
 CPU cost with none of the optimization the software binary had been given.
-**Not measured on this stack** - the numbers above are `tiny-skia`'s - so if
-this ever needs defending, profile a frame at both settings rather than citing
-this paragraph.
+**Not measured on this stack** - the numbers above are `tiny-skia`'s, and the
+Windows A/B that settled the vsync half held this list at `3` for both runs,
+so it says nothing here. If this ever needs defending, profile a frame at both
+settings rather than citing this paragraph.
 `wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types`, `iced_wgpu`, `cryoglyph`,
 `etagere`, `guillotiere` and `glam` are in the list now, plus `naga` for
 startup - it compiles iced's shaders once, when the compositor is built.
