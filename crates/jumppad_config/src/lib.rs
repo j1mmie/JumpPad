@@ -657,14 +657,49 @@ pub struct FilesConfig {
     pub save_conflict_resolution: SaveConflictResolution,
 }
 
-/// Which graphics adapter the hardware-rendered binary asks for. Read only
-/// by `jumppad-gpu`; the software binary has no adapter to choose.
+/// How the hardware-rendered binary talks to the graphics stack: which
+/// adapter it asks for, and whether it waits for the display before showing
+/// a frame. Read only by `jumppad-gpu` - the software binary has no adapter
+/// to choose and no swapchain to wait on.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize,
 )]
 #[serde(default)]
 pub struct GpuConfig {
     pub power: GpuPower,
+
+    /// `vsync = true` makes a frame wait for the display before it is shown.
+    /// **Defaults to `false`**, which is the unusual answer and is the one
+    /// that makes `jumppad-gpu` feel like `jumppad`.
+    ///
+    /// The two binaries reach the screen by completely different routes, and
+    /// only one of them ever queued a frame. `jumppad` presents through
+    /// `softbuffer`, which on Windows is a GDI blit into the window's
+    /// redirection bitmap and on macOS is a layer-contents swap: neither
+    /// blocks, so a frame drawn from the pointer's current position is on
+    /// its way to the compositor before the function returns. `jumppad-gpu`
+    /// presents through a swapchain, and with vsync on that swapchain holds
+    /// the frame until the next refresh, then the desktop compositor spends
+    /// another one showing it. Two refreshes at 60Hz is 33ms between moving
+    /// the mouse and seeing the selection follow it, and that is the lag
+    /// reported from Windows: a highlight two or three frames behind the
+    /// pointer, and scrolling that arrives late.
+    ///
+    /// Turning it off costs nothing here that it would cost a game. Tearing
+    /// is what vsync buys, and a torn frame needs the scanout to change
+    /// mid-scan - which a window composited by DWM or by the macOS window
+    /// server cannot do, because the compositor is what reaches the display,
+    /// not this app's swapchain. There is no busy loop either: JumpPad draws
+    /// when something asks it to and idles at zero frames otherwise, so
+    /// "unsynchronized" here means "shown as soon as it is drawn", not
+    /// "drawn as fast as the GPU can".
+    ///
+    /// It stays configurable because Linux can put this app's frames on the
+    /// scanout directly, which is the one arrangement that can tear: an X11
+    /// session running without a compositor, or a Wayland compositor giving
+    /// a fullscreen window its own plane. Turn it back on if a frame ever
+    /// shows up torn in half.
+    pub vsync: bool,
 }
 
 /// How much GPU to ask for.
@@ -1243,6 +1278,44 @@ mod tests {
         assert!(written.contains("[gpu]"), "got:\n{written}");
         let read: Config = toml::from_str(&written).unwrap();
         assert_eq!(read.gpu.power, GpuPower::Low);
+    }
+
+    #[test]
+    fn an_unconfigured_gpu_does_not_wait_for_the_display() {
+        // The one default here that differs from what iced would do
+        // unprompted, and the reason `jumppad-gpu` no longer trails the
+        // pointer by a couple of frames on Windows. See `GpuConfig::vsync`.
+        assert!(!config("").gpu.vsync);
+    }
+
+    #[test]
+    fn vsync_can_be_asked_for_again() {
+        assert!(config("[gpu]\nvsync = true").gpu.vsync);
+        assert!(!config("[gpu]\nvsync = false").gpu.vsync);
+    }
+
+    #[test]
+    fn asking_for_vsync_round_trips_through_the_written_file() {
+        let mut config = Config::default();
+        config.gpu.vsync = true;
+        let written = toml::to_string_pretty(&config).unwrap();
+        assert!(written.contains("[gpu]"), "got:\n{written}");
+        let read: Config = toml::from_str(&written).unwrap();
+        assert!(read.gpu.vsync);
+    }
+
+    #[test]
+    fn the_two_gpu_settings_are_independent() {
+        // Each section is `#[serde(default)]`, so naming one setting must
+        // leave the other at its own default rather than at whatever the
+        // struct's `Default` would give a half-written section.
+        let named_power = config("[gpu]\npower = \"low\"");
+        assert_eq!(named_power.gpu.power, GpuPower::Low);
+        assert!(!named_power.gpu.vsync);
+
+        let named_vsync = config("[gpu]\nvsync = true");
+        assert_eq!(named_vsync.gpu.power, GpuPower::High);
+        assert!(named_vsync.gpu.vsync);
     }
 
     #[test]

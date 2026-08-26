@@ -1247,7 +1247,85 @@ unreachable from app code - `iced_wgpu` builds its `InstanceDescriptor` with
 dead, read only by `Dx12SwapchainKind::from_env`, which nothing in `wgpu`,
 `wgpu-core`, or `wgpu-hal` calls. That is all true and all irrelevant.)
 
-## Why the software renderer isn't compiled at `opt-level = "z"`
+## Why `jumppad-gpu` felt slower than `jumppad`
+
+Reported from Windows: on `jumppad-gpu` a selection dragged with the mouse
+trails the pointer by two or three frames and scrolling arrives late, while
+`jumppad` is immediate. The hardware binary being the sluggish one reads as
+nonsense, and it is not - it is two separate causes stacking, and both are
+things the software binary was never exposed to.
+
+**Cause one: the two binaries reach the screen by different routes, and only
+one of them ever queued a frame.** This is the same sentence the transparency
+sections above keep arriving at, for a third reason. `jumppad` presents
+through `softbuffer` - a GDI blit into the window's redirection bitmap on
+Windows, a layer-contents swap on macOS. Neither blocks: the frame is handed
+to the compositor and `present` returns. `jumppad-gpu` presents through a
+swapchain, and `iced_wgpu` configures it `AutoVsync`, which resolves to
+`FifoRelaxed` or `Fifo`. That holds the frame until the display's next
+refresh, and only then does DWM (or the macOS window server) spend a refresh
+of its own compositing it. Two refreshes at 60Hz is 33ms of pointer-to-pixel
+latency the software binary never paid, and 33ms is exactly what "two or
+three frames behind" describes.
+
+Worth knowing about the blocking half: `iced_wgpu::window::compositor::present`
+calls `surface.get_current_texture()` *after* the frame is already drawn, so
+the wait happens inside the redraw handler with the window's message pump
+stopped. The frame that eventually appears was laid out before the wait
+started, which is what makes the lag read as a fixed offset rather than as
+stutter.
+
+**The fix is `[gpu] vsync`, defaulting to `false`** (`GpuConfig::vsync`,
+reaching iced as `iced::Settings::vsync` in `lib.rs`'s builder). Off means
+`AutoNoVsync`, which wgpu resolves to `Immediate`, then `Mailbox`, then
+`Fifo` - so it is safe to ask for on every backend, and on Metal and DX12
+alike. It is not the reckless setting it sounds like:
+
+- **It cannot tear on Windows or macOS.** Tearing needs the scanout to change
+  mid-scan, and this app's swapchain is not what reaches the display there -
+  DWM and the macOS window server are, and they composite on their own clock.
+  The setting is kept configurable for the arrangement that *can* tear, which
+  is a Linux one: an X11 session with no compositor, or a Wayland compositor
+  giving a fullscreen window its own plane.
+- **It is not a busy loop.** JumpPad draws when something asks it to and
+  idles at zero frames, so "unsynchronized" means "shown as soon as it is
+  drawn", not "drawn as fast as the GPU can". The idle-cost rule the rest of
+  this file defends is untouched.
+- **`iced_tiny_skia` never reads the field**, so `jumppad` is unaffected
+  either way.
+
+**Cause two, reasoned rather than measured: the whole wgpu stack was compiled
+at `opt-level = "z"`.** See the next section - the per-frame override list had
+been written for the software renderer and stopped there. Unlike cause one,
+which is read straight out of `iced_wgpu` and `wgpu-hal`, this one has no
+number against it: the 43.6ms-vs-12.7ms figure below was measured on
+`tiny-skia`, and nobody has profiled a frame of `jumppad-gpu` at either
+setting. It is here because the mechanism is the same one and the crates were
+plainly missed, not because it was caught in the act. **If the lag survives
+`vsync = false`, measure this before assuming it.**
+
+Two things ruled out along the way, so they are not re-derived:
+
+- **`desired_maximum_frame_latency` is not the knob.** `iced_wgpu` already
+  passes `1`, the minimum, which is a two-buffer swapchain and
+  `SetMaximumFrameLatency(1)` on DX12. There is nothing left to shave there.
+- **The `frames()` subscriptions are not it.** `shadow_refresh_frames` and
+  `surface_reset_frames` gate `iced::window::frames()`, but that subscription
+  only *listens* for `RedrawRequested` - it never asks for a frame - and both
+  counters are three-frame one-shots armed at startup and resize.
+
+If lag is reported again after this, in order: check `[gpu] power` on a
+laptop, because `"high"` picks the discrete card while the display is wired
+to the integrated one, and every presented frame is then copied across the
+bus before the compositor can use it (the transparency reason that default
+exists is real, so this is a trade, not a fix); then `ICED_PRESENT_MODE`
+(`vsync`/`no_vsync`/`immediate`/`fifo`/`fifo_relaxed`/`mailbox`), which
+`iced_wgpu` reads straight out of the environment and which outranks
+`[gpu] vsync`; then `WGPU_BACKEND=dx12` versus `vulkan`, which changes the
+presentation path wholesale - a diagnostic rather than a setting, since DX12
+through an HWND surface cannot be translucent (see the red herring above).
+
+## Why neither renderer is compiled at `opt-level = "z"`
 
 `[profile.release]` uses `opt-level = "z"` for binary size, but
 `[profile.release.package]` pulls the per-frame drawing crates back up to `3`.
@@ -1255,11 +1333,27 @@ Measured on a 1800x1200 surface (a default window at 2x), clearing plus 40 rows
 of translucent quads: **43.6ms/frame at "z", 12.7ms at 3** - 23fps vs 79fps, for
 one repaint. tiny-skia says why in `src/wide/u16x16_t.rs`: its blend pipeline is
 plain `[u16; 16]` arrays that rely on autovectorization, which `-Oz` turns off,
-and `#[inline]` hints it calls mandatory, which `-Oz` declines. `jumppad-gpu`
-never runs any of it, which is why the two binaries felt so different.
+and `#[inline]` hints it calls mandatory, which `-Oz` declines.
 
-Raising it costs ~320KB of binary. If a crate ever shows up hot on the draw
-path, add it to that list. `-C target-cpu=x86-64-v3` would help further on Intel
+**That list was written for `tiny-skia` and stopped there, which is half of
+why `jumppad-gpu` felt slow** (the other half is the section above). "It runs
+on the GPU" is not the same as "it costs no CPU": `wgpu-core`'s resource
+tracker and validation walk every buffer, bind group and draw call on the way
+to the driver, and `cryoglyph` re-packs the glyph atlas as text scrolls. That
+code is small generic functions calling small generic functions, the shape
+`-Oz` declines to inline, so the hardware binary was paying a full per-frame
+CPU cost with none of the optimization the software binary had been given.
+**Not measured on this stack** - the numbers above are `tiny-skia`'s - so if
+this ever needs defending, profile a frame at both settings rather than citing
+this paragraph.
+`wgpu`, `wgpu-core`, `wgpu-hal`, `wgpu-types`, `iced_wgpu`, `cryoglyph`,
+`etagere`, `guillotiere` and `glam` are in the list now, plus `naga` for
+startup - it compiles iced's shaders once, when the compositor is built.
+
+Raising it costs binary size - ~320KB for the software list, more for the wgpu
+one, which is a much larger stack. Only `jumppad-gpu` links any of the second
+list, so `jumppad`'s size is unchanged. If a crate ever shows up hot on either
+draw path, add it. `-C target-cpu=x86-64-v3` would help further on Intel
 (tiny-skia's `f32x8` only uses AVX under `target_feature = "avx"`), but keep it
 out of `.cargo/config.toml` and `build-release.sh` - it produces binaries that
 crash on older CPUs, and moot on Apple Silicon where NEON is baseline.

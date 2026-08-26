@@ -62,6 +62,20 @@ detection = "auto"
 [window]
 decorations = true
 
+# Read only by `jumppad-gpu`. The software binary has no adapter to choose
+# and no swapchain to wait on, and ignores both of these.
+[gpu]
+# "high" is the discrete card, "low" the integrated one, "auto" states no
+# preference. On Windows the adapter is what decides whether the window can
+# be translucent at all, so if you set "low", check that `background.alpha`
+# still does something before keeping it.
+power = "high"
+# Whether a frame waits for the display before it is shown. Off, because
+# waiting costs about two refreshes between moving the mouse and seeing the
+# selection follow it, and a window your desktop compositor draws cannot
+# tear without it. Turn it on if you ever see a frame torn in half.
+vsync = false
+
 [visor]
 enabled = false
 

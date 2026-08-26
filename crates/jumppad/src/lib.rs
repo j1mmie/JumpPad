@@ -115,6 +115,8 @@ Environment:
 
     let config = jumppad_config::load();
     prefer_gpu(config.gpu.power);
+    // Read out before `config` is moved into the boot closure below.
+    let vsync = config.gpu.vsync;
     // The same description a `config.toml` reload builds to decide whether
     // the window on screen still matches the file - see `window::replace`.
     let window = window::settings(&config);
@@ -137,15 +139,29 @@ Environment:
     )
     .title("JumpPad")
     .window(window)
-    // The icon glyphs the tab bar draws with. iced loads faces by bytes at
-    // startup and then finds them by family, which is what `ICON_FONT` in
-    // `app.rs` names.
-    .font(app::ICON_FONT_BYTES)
-    // iced defaults this on, but its MSAA only ever applies to triangle
-    // primitives - meshes, canvases, gradient quads - and this app draws
-    // none. Quads and text are always `count: 1` regardless. So it buys
-    // nothing visually and costs pipelines plus a 4x-sampled render target.
-    .antialiasing(false)
+    // One struct rather than the `.font()`/`.antialiasing()` builders that
+    // used to stand here: `.settings` replaces the whole `Settings`, so
+    // either of those called after it would have been silently thrown away.
+    // Naming every field we care about in one place is what keeps that from
+    // being an ordering rule nobody knows about.
+    .settings(iced::Settings {
+        // The icon glyphs the tab bar draws with. iced loads faces by bytes
+        // at startup and then finds them by family, which is what
+        // `ICON_FONT` in `app.rs` names.
+        fonts: vec![app::ICON_FONT_BYTES.into()],
+        // iced defaults this on, but its MSAA only ever applies to triangle
+        // primitives - meshes, canvases, gradient quads - and this app draws
+        // none. Quads and text are always `count: 1` regardless. So it buys
+        // nothing visually and costs pipelines plus a 4x-sampled render
+        // target.
+        antialiasing: false,
+        // `[gpu] vsync`, and off by default - see `GpuConfig::vsync` for why
+        // waiting on the display is what made `jumppad-gpu` feel slower than
+        // the software binary rather than faster. Inert in `jumppad`:
+        // `iced_tiny_skia` never reads this field.
+        vsync,
+        ..iced::Settings::default()
+    })
     .subscription(JumpPadApp::subscription)
     .theme(JumpPadApp::theme)
     .style(JumpPadApp::style)

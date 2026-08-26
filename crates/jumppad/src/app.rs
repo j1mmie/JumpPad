@@ -1348,9 +1348,11 @@ impl JumpPadApp {
         if new.extension_to_grammar() != current.extension_to_grammar() {
             restart_required("[[languages]] extension-to-syntax mappings");
         }
-        // The adapter is chosen once, when iced builds its compositor.
+        // Both of these are settled once, when iced builds its compositor:
+        // the adapter it picks, and the present mode it configures the
+        // surface with. Nothing reaches either afterwards.
         if new.gpu != current.gpu {
-            restart_required("[gpu] power");
+            restart_required("[gpu]");
         }
 
         self.config = new;
