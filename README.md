@@ -99,10 +99,24 @@ Syntax Highlighting:
 ```
 ./syntaxes/build-grammars.sh
 ```
-This clones each grammar's upstream source and compiles it to WASM into
-`syntaxes/output`. The contents of this folder should be placed in a `syntaxes`
-folder, sibling to a JumpPad binary, so that it can detect the grammars.
-Requires `git` and `npm`.
+Each language lives in its own bundle under `syntaxes/`:
+
+```
+syntaxes/markdown/config.toml   the extensions, comment style and fence aliases
+syntaxes/markdown/syntax.wasm   the grammar that highlights them
+syntaxes/markdown/injections.scm  the other grammars it embeds, if any
+```
+
+The `config.toml` files are committed; this script clones each grammar's
+upstream source and compiles the `syntax.wasm` beside them. Copy the whole
+`syntaxes` folder next to a JumpPad binary and it will find them. Requires
+`git` and `npm`.
+
+A bundle with no `syntax.wasm` is still a language - it just isn't
+highlighted, which is how `.rs` and `.py` files get comment toggling without
+a grammar shipped for them. To override anything a bundle ships, add a
+`[[languages]]` entry naming it in your own `config.toml`; it changes only
+the settings it names. See `config/config.sample.toml`.
 
 
 ### Build JumpPad:

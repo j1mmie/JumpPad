@@ -8,6 +8,23 @@ use tree_sitter::{Language, Query, wasmtime};
 use crate::grammar::Grammar;
 use crate::loader;
 
+/// Which grammar to load for what, as the configured languages describe it.
+///
+/// Kept together rather than passed as three maps because they are three
+/// views of one answer, and every one of them is keyed by the same grammar
+/// names the bundle directories under `syntaxes/` are called.
+#[derive(Debug, Clone, Default)]
+pub struct GrammarLookup {
+    /// File extension (lowercased) -> grammar name.
+    pub by_extension: HashMap<String, String>,
+    /// A code fence's info string (lowercased) -> grammar name. Also the
+    /// set of fence languages worth loading at all.
+    pub by_fence_language: HashMap<String, String>,
+    /// Grammar name -> its `.wasm` export symbol, for the grammars that
+    /// don't export their own name.
+    pub symbols: HashMap<String, String>,
+}
+
 enum Entry {
     Loading,
     Loaded(Arc<Grammar>),
@@ -29,7 +46,7 @@ pub enum PollResult {
 pub struct SyntaxRegistry {
     engine: wasmtime::Engine,
     search_dirs: Vec<PathBuf>,
-    extension_to_grammar: HashMap<String, String>,
+    lookup: GrammarLookup,
     // Called whenever any grammar load resolves - one shared callback is
     // enough since there's only one UI to wake up.
     on_ready: Box<dyn Fn() + Send + Sync>,
@@ -50,13 +67,13 @@ pub struct SyntaxRegistry {
 impl SyntaxRegistry {
     pub fn new(
         search_dirs: Vec<PathBuf>,
-        extension_to_grammar: HashMap<String, String>,
+        lookup: GrammarLookup,
         on_ready: impl Fn() + Send + Sync + 'static,
     ) -> Arc<Self> {
         Arc::new(Self {
             engine: wasmtime::Engine::default(),
             search_dirs,
-            extension_to_grammar,
+            lookup,
             on_ready: Box::new(on_ready),
             state: Mutex::new(HashMap::new()),
             compile_lock: Mutex::new(()),
@@ -72,8 +89,12 @@ impl SyntaxRegistry {
     /// Registers interest in the grammar configured for `extension`. If none
     /// is configured, the returned `Handle` just reports `Unavailable`
     /// forever. Drop the `Handle` to release the reservation.
+    ///
+    /// Matched without regard to case, so `NOTES.MD` highlights the same as
+    /// `notes.md`.
     pub fn acquire(self: &Arc<Self>, extension: &str) -> Handle {
-        let Some(grammar) = self.extension_to_grammar.get(extension).cloned()
+        let extension = extension.to_lowercase();
+        let Some(grammar) = self.lookup.by_extension.get(&extension).cloned()
         else {
             return Handle {
                 registry: self.clone(),
@@ -83,9 +104,24 @@ impl SyntaxRegistry {
         self.acquire_grammar(&grammar)
     }
 
+    /// Registers interest in the grammar a code fence's info string names.
+    ///
+    /// `None` for a name no language claims, rather than a `Handle` that
+    /// could only resolve to `Unavailable`: a document full of fences in
+    /// languages JumpPad has never heard of should cost nothing, not one
+    /// loader thread and one cache entry per name.
+    pub(crate) fn acquire_fence_language(
+        self: &Arc<Self>,
+        info_string: &str,
+    ) -> Option<Handle> {
+        let grammar = self.lookup.by_fence_language.get(info_string)?.clone();
+        Some(self.acquire_grammar(&grammar))
+    }
+
     /// Core acquire logic, keyed directly by grammar name - used by
-    /// `acquire` and by `load_injections` (an injection target is already a
-    /// resolved grammar name, not a file extension).
+    /// `acquire`, by `acquire_fence_language`, and by `load_injections` (an
+    /// injection target is already a resolved grammar name, not a file
+    /// extension).
     fn acquire_grammar(self: &Arc<Self>, grammar_name: &str) -> Handle {
         let mut state = self.state.lock().unwrap();
         match state.get_mut(grammar_name) {
@@ -126,17 +162,28 @@ impl SyntaxRegistry {
     }
 
     fn finish_load(self: Arc<Self>, grammar_name: &str) {
+        let symbol = self
+            .lookup
+            .symbols
+            .get(grammar_name)
+            .map_or(grammar_name, String::as_str);
         let result = loader::find_wasm(&self.search_dirs, grammar_name)
-            .ok_or_else(|| "no matching .wasm file found".to_string())
+            .ok_or_else(|| "no syntax.wasm in a bundle of this name".to_string())
             .and_then(|path| {
                 let _compile_guard = self.compile_lock.lock().unwrap();
-                loader::load(&self.engine, &path, grammar_name)
+                loader::load(&self.engine, &path, symbol)
             });
 
         let result = result.map(|(language, parser)| {
             let (injections, injected) =
                 self.load_injections(grammar_name, &language);
-            Grammar::new(language, parser, injections, injected)
+            Grammar::new(
+                language,
+                parser,
+                injections,
+                injected,
+                Arc::downgrade(&self),
+            )
         });
 
         self.resolve(grammar_name, result);

@@ -5,4 +5,4 @@ mod registry;
 
 pub use grammar::Grammar;
 pub use highlight::{HighlightCategory, HighlightSpan};
-pub use registry::{Handle, PollResult, SyntaxRegistry};
+pub use registry::{GrammarLookup, Handle, PollResult, SyntaxRegistry};

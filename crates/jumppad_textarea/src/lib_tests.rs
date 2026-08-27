@@ -1,4 +1,5 @@
 use iced::keyboard::{self, key};
+use syntax_registry::GrammarLookup;
 
 use super::*;
 
@@ -28,7 +29,7 @@ fn press_with_text(
 
 /// An editor with no highlighting and default alpha, for cursor/selection tests.
 fn plain_editor(text: &str) -> TextArea {
-    let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+    let registry = SyntaxRegistry::new(Vec::new(), GrammarLookup::default(), || {});
     TextArea::new(
         text,
         &registry,
@@ -395,7 +396,7 @@ fn a_comment_toggle_undoes_byte_exactly() {
 
 #[test]
 fn the_undo_depth_follows_the_shared_setting() {
-    let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+    let registry = SyntaxRegistry::new(Vec::new(), GrammarLookup::default(), || {});
     let settings =
         SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
     settings.set_undo_depth(1);
@@ -526,7 +527,7 @@ fn editor_with_style(
     extension: &str,
     style: CommentStyle,
 ) -> TextArea {
-    let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+    let registry = SyntaxRegistry::new(Vec::new(), GrammarLookup::default(), || {});
     let settings =
         SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
     settings.set_comment_styles([(extension.to_string(), style)].into());
@@ -556,7 +557,7 @@ fn indented_editor(
     style: IndentationStyle,
     width: u16,
 ) -> TextArea {
-    let registry = SyntaxRegistry::new(Vec::new(), HashMap::new(), || {});
+    let registry = SyntaxRegistry::new(Vec::new(), GrammarLookup::default(), || {});
     let settings =
         SharedEditorConfig::new(1.0, Arc::new(|_: &KeyPress| None));
     settings.set_indentation(Indentation::new(style, width));

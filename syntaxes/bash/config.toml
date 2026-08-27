@@ -1,0 +1,4 @@
+name = "Shell"
+extensions = ["sh", "bash", "zsh"]
+aliases = ["shell", "console"]
+comment.single = "# "

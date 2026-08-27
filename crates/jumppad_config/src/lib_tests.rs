@@ -87,8 +87,7 @@ fn each_power_spelling_reaches_wgpu_as_its_own_answer() {
         // passing the config word straight through.
         ("auto", GpuPower::Auto, "none"),
     ] {
-        let power =
-            config(&format!("[gpu]\npower = \"{written}\"")).gpu.power;
+        let power = config(&format!("[gpu]\npower = \"{written}\"")).gpu.power;
         assert_eq!(power, expected, "parsing {written:?}");
         assert_eq!(power.as_wgpu_power_pref(), pref, "for {written:?}");
     }
@@ -248,8 +247,7 @@ fn a_theme_named_after_a_palette_wins_its_own_name() {
 #[test]
 fn a_slot_naming_no_theme_is_read_as_a_palette() {
     let config: Config =
-        toml::from_str("[mode]\ntheme.dark = \"Tokyo Night Storm\"")
-            .unwrap();
+        toml::from_str("[mode]\ntheme.dark = \"Tokyo Night Storm\"").unwrap();
     let theme = config.theme_for(Appearance::Dark);
     assert_eq!(theme.palette, "Tokyo Night Storm");
     assert_eq!(theme.background_alpha, DEFAULT_ALPHA);
@@ -518,14 +516,8 @@ fn a_theme_can_ask_for_a_frosted_desktop() {
 
 #[test]
 fn each_acrylic_name_is_its_own_answer() {
-    assert_eq!(
-        blur_of(r#"background.blur = "acrylic10""#),
-        Blur::Acrylic10
-    );
-    assert_eq!(
-        blur_of(r#"background.blur = "acrylic11""#),
-        Blur::Acrylic11
-    );
+    assert_eq!(blur_of(r#"background.blur = "acrylic10""#), Blur::Acrylic10);
+    assert_eq!(blur_of(r#"background.blur = "acrylic11""#), Blur::Acrylic11);
 }
 
 /// Which forms mean anything is the platform's to decide, so this crate
@@ -567,10 +559,9 @@ fn blur_inherits_from_the_base_theme_and_a_theme_can_turn_it_off() {
 /// than rounding it into a setting nobody asked for.
 #[test]
 fn a_negative_blur_fails_the_file_and_says_why() {
-    let err =
-        toml::from_str::<Config>("[themes.dark]\nbackground.blur = -1")
-            .unwrap_err()
-            .to_string();
+    let err = toml::from_str::<Config>("[themes.dark]\nbackground.blur = -1")
+        .unwrap_err()
+        .to_string();
     assert!(err.contains("negative"), "unhelpful error: {err}");
 }
 
@@ -606,8 +597,7 @@ fn each_blur_form_round_trips() {
 
 #[test]
 fn pinned_detection_ignores_what_the_os_reports() {
-    let pinned: ModeConfig =
-        toml::from_str(r#"detection = "dark""#).unwrap();
+    let pinned: ModeConfig = toml::from_str(r#"detection = "dark""#).unwrap();
     assert_eq!(pinned.showing(Some(Appearance::Light)), Appearance::Dark);
     assert_eq!(pinned.showing(None), Appearance::Dark);
 }
@@ -645,8 +635,7 @@ fn transparency_is_wanted_if_any_theme_at_all_asks_for_it() {
 #[test]
 fn a_translucent_base_theme_wants_transparency() {
     assert!(
-        config("[themes.base]\nbackground.alpha = 0.9")
-            .wants_transparency()
+        config("[themes.base]\nbackground.alpha = 0.9").wants_transparency()
     );
 }
 
@@ -674,8 +663,8 @@ fn a_base_theme_every_other_theme_overrides_still_wants_transparency() {
 #[test]
 fn the_written_default_file_carries_only_the_languages() {
     let written = toml::to_string_pretty(&Config::default()).unwrap();
-    assert!(written.contains("[[languages]]"));
     for defaulted in [
+        "[[languages]]",
         "[mode]",
         "[themes]",
         "[visor]",
@@ -705,8 +694,8 @@ struct TempFile(PathBuf);
 
 impl TempFile {
     fn with_contents(name: &str, contents: &str) -> Self {
-        let path = std::env::temp_dir()
-            .join(format!("jumppad_config_test_{name}"));
+        let path =
+            std::env::temp_dir().join(format!("jumppad_config_test_{name}"));
         std::fs::write(&path, contents).unwrap();
         Self(path)
     }
@@ -740,10 +729,8 @@ fn try_parse_with_no_existing_candidate_is_missing() {
 /// caller can react to, not a silent reset to defaults.
 #[test]
 fn try_parse_surfaces_a_parse_error_instead_of_defaulting() {
-    let file =
-        TempFile::with_contents("broken.toml", "[mode]\ndetection = ");
-    let result: Result<Config, _> =
-        try_parse(std::slice::from_ref(&file.0));
+    let file = TempFile::with_contents("broken.toml", "[mode]\ndetection = ");
+    let result: Result<Config, _> = try_parse(std::slice::from_ref(&file.0));
     assert!(matches!(result, Err(ReloadError::Parse(_))));
 }
 
@@ -793,53 +780,6 @@ fn config_toml_can_turn_decorations_off() {
 }
 
 #[test]
-fn config_toml_with_no_languages_keeps_the_builtin_defaults() {
-    let config: Config = toml::from_str("").unwrap();
-    let styles = config.comment_styles_by_extension();
-    assert_eq!(
-        styles.get("yaml"),
-        Some(&CommentSyntax::Single("# ".to_string()))
-    );
-    assert_eq!(
-        styles.get("yml"),
-        Some(&CommentSyntax::Single("# ".to_string()))
-    );
-    assert_eq!(
-        styles.get("html"),
-        Some(&CommentSyntax::Multi {
-            left: "<!--".to_string(),
-            right: "-->".to_string()
-        })
-    );
-    assert_eq!(
-        config.extension_to_grammar().get("yml").map(String::as_str),
-        Some("yaml")
-    );
-}
-
-#[test]
-fn a_languages_section_replaces_the_defaults_wholesale() {
-    let config: Config = toml::from_str(
-        r#"
-
-        [[languages]]
-        name = "TOML"
-        syntax = "toml"
-        extensions = ["toml"]
-        comment.single = "// "
-        "#,
-    )
-    .unwrap();
-    let styles = config.comment_styles_by_extension();
-    assert_eq!(
-        styles.get("toml"),
-        Some(&CommentSyntax::Single("// ".to_string()))
-    );
-    assert_eq!(styles.get("yaml"), None, "built-in defaults are gone");
-    assert_eq!(config.extension_to_grammar().len(), 1);
-}
-
-#[test]
 fn comment_single_and_multi_together_fail_the_parse() {
     let result: Result<Config, _> = toml::from_str(
         r#"
@@ -881,7 +821,10 @@ fn a_language_without_a_comment_key_parses_as_none() {
     .unwrap();
     assert_eq!(config.languages[0].comment, None);
     assert_eq!(config.languages[0].syntax, None);
-    assert!(config.comment_styles_by_extension().is_empty());
+    assert_eq!(
+        config.languages[0].extensions.as_deref(),
+        Some(["txt".to_string()].as_slice())
+    );
 }
 
 #[test]
@@ -907,44 +850,9 @@ fn comment_multi_parses_the_dotted_key_form() {
 }
 
 #[test]
-fn the_flatteners_lowercase_and_let_a_later_entry_win() {
-    let config = Config {
-        languages: vec![
-            LanguageConfig {
-                name: "C++".to_string(),
-                syntax: Some("cpp".to_string()),
-                extensions: vec!["cpp".to_string(), "HPP".to_string()],
-                comment: Some(CommentSyntax::Single("// ".to_string())),
-            },
-            LanguageConfig {
-                name: "Rewrap".to_string(),
-                syntax: None,
-                extensions: vec!["cpp".to_string()],
-                comment: Some(CommentSyntax::Single("# ".to_string())),
-            },
-        ],
-        ..Default::default()
-    };
-    let styles = config.comment_styles_by_extension();
-    assert_eq!(
-        styles.get("cpp"),
-        Some(&CommentSyntax::Single("# ".to_string()))
-    );
-    assert_eq!(
-        styles.get("hpp"),
-        Some(&CommentSyntax::Single("// ".to_string()))
-    );
-    // The grammar map keeps configured casing and skips syntax-less entries.
-    let grammars = config.extension_to_grammar();
-    assert_eq!(grammars.get("cpp").map(String::as_str), Some("cpp"));
-    assert_eq!(grammars.get("HPP").map(String::as_str), Some("cpp"));
-    assert_eq!(grammars.len(), 2);
-}
-
-#[test]
 fn an_old_config_with_syntaxes_and_comment_styles_still_parses() {
     // Pre-[[languages]] sections are ignored unknowns: the file loads,
-    // and those customizations fall back to the built-in defaults.
+    // and those customizations fall back to whatever the bundles ship.
     let config: Config = toml::from_str(
         r#"
 
@@ -957,9 +865,9 @@ fn an_old_config_with_syntaxes_and_comment_styles_still_parses() {
         "#,
     )
     .unwrap();
-    assert_eq!(
-        config.comment_styles_by_extension().get("toml"),
-        Some(&CommentSyntax::Single("# ".to_string()))
+    assert!(
+        config.languages.is_empty(),
+        "neither old section contributes a language"
     );
 }
 
@@ -1003,10 +911,9 @@ fn the_sample_files_parse() {
     // taken out of it.
     assert!(!config.words.separators.contains('-'));
     assert!(config.words.separators.contains('.'));
-    let _: KeybindsConfig = toml::from_str(include_str!(
-        "../../../config/keybinds.sample.toml"
-    ))
-    .unwrap();
+    let _: KeybindsConfig =
+        toml::from_str(include_str!("../../../config/keybinds.sample.toml"))
+            .unwrap();
 }
 
 #[test]

@@ -1,0 +1,7 @@
+# Injected by markdown_inline for math blocks. build-grammars.sh doesn't
+# build a grammar for it yet, so this ships the comment style alone.
+
+name = "LaTeX"
+extensions = ["tex"]
+aliases = ["math"]
+comment.single = "% "

@@ -1,0 +1,3 @@
+name = "TOML"
+extensions = ["toml", "tml"]
+comment.single = "# "

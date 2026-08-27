@@ -108,52 +108,39 @@ separators = "`~!@#$%^&*()=+[{]}\\|;:'\",.<>/?"
 style = "spaces"
 width = 2
 
-[[languages]]
-name = "Markdown"
-syntax = "markdown"
-extensions = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]
+# Languages ship as bundles: `syntaxes/<grammar>/config.toml` names a
+# language's extensions, comment style and code-fence aliases, and the
+# `syntax.wasm` beside it highlights them. Nothing below is needed to get
+# highlighting - these are only here to show what overriding one looks like.
+#
+# An entry is matched to a bundle by `name`, ignoring case, and changes only
+# the settings it names. Everything it leaves out stays as the bundle shipped
+# it, so this adds two extensions to YAML without disturbing its comment
+# style or its grammar.
 
 [[languages]]
 name = "YAML"
-syntax = "yaml"
-extensions = ["yaml", "yml"]
-comment.single = "# "
+extensions = ["yaml", "yml", "sls", "eyaml"]
+
+# A list replaces the bundle's rather than adding to it, so naming
+# `extensions` here means these are now the only Markdown extensions.
 
 [[languages]]
-name = "TOML"
-syntax = "toml"
-extensions = ["toml", "tml"]
-comment.single = "# "
+name = "Markdown"
+extensions = ["md", "markdown"]
+
+# `aliases` are the names a Markdown code fence can call a language by, on
+# top of its grammar name and its extensions - ```rs and ```py already work.
 
 [[languages]]
-name = "JSON"
-syntax = "json"
-extensions = ["json"]
+name = "Python"
+aliases = ["python3", "sage"]
+
+# A name no bundle claims is a language of its own. It needs `extensions` to
+# be worth anything, and a `syntax` naming a bundle if it wants highlighting -
+# without one it still gets comment toggling.
 
 [[languages]]
-name = "JSONC"
-syntax = "json"
-extensions = [ "jsonc" ]
-comment.multi.left = "/*"
-comment.multi.right = "*/"
-
-[[languages]]
-name = "XML"
-syntax = "xml"
-extensions = ["xml", "xsl", "xsd", "svg"]
-comment.multi.left = "<!--"
-comment.multi.right = "-->"
-
-[[languages]]
-name = "HTML"
-syntax = "html"
-extensions = ["htm", "html", "xhtml"]
-comment.multi.left = "<!--"
-comment.multi.right = "-->"
-
-[[languages]]
-name = "DTD"
-syntax = "dtd"
-extensions = ["dtd"]
-comment.multi.left = "<!--"
-comment.multi.right = "-->"
+name = "INI"
+extensions = ["ini", "cfg"]
+comment.single = "; "

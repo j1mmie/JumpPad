@@ -1,0 +1,4 @@
+name = "Go"
+extensions = ["go"]
+aliases = ["golang"]
+comment.single = "// "

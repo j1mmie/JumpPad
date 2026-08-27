@@ -1,10 +1,13 @@
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
-use tree_sitter::{Language, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{
+    Language, Parser, Query, QueryCursor, QueryMatch, StreamingIterator,
+};
 
 use crate::highlight::{self, HighlightSpan};
-use crate::{Handle, PollResult};
+use crate::{Handle, PollResult, SyntaxRegistry};
 
 /// A loaded, ready-to-use tree-sitter grammar - a `Parser` with its wasm
 /// module attached, an optional compiled injection query, handles to any
@@ -17,6 +20,14 @@ pub struct Grammar {
     language: Language,
     injections: Option<Query>,
     injected: HashMap<String, Handle>,
+    /// The grammars named by a code fence rather than by the query, found
+    /// only once there is a document to read them out of. Holds only the
+    /// names that resolved - see `fence_language`.
+    fence_injected: Mutex<HashMap<String, Handle>>,
+    /// How the fence grammars above get acquired. Weak because the registry
+    /// owns every loaded `Grammar`, and an owning handle back would be a
+    /// cycle it could never break.
+    registry: Weak<SyntaxRegistry>,
     inner: Mutex<GrammarInner>,
 }
 
@@ -36,11 +47,14 @@ impl Grammar {
         parser: Parser,
         injections: Option<Query>,
         injected: HashMap<String, Handle>,
+        registry: Weak<SyntaxRegistry>,
     ) -> Self {
         Self {
             language,
             injections,
             injected,
+            fence_injected: Mutex::new(HashMap::new()),
+            registry,
             inner: Mutex::new(GrammarInner {
                 parser,
                 last_source: String::new(),
@@ -56,16 +70,19 @@ impl Grammar {
     /// of the first highlight, so a caller polling on it can't slip through
     /// the gap between the grammar becoming ready and its first parse.
     pub fn injections_unresolved(&self) -> bool {
+        let loading =
+            |handle: &Handle| matches!(handle.poll(), PollResult::Loading);
         self.inner.lock().unwrap().injections_pending
-            || self
-                .injected
-                .values()
-                .any(|handle| matches!(handle.poll(), PollResult::Loading))
+            || self.injected.values().any(loading)
+            || self.fence_injected.lock().unwrap().values().any(loading)
     }
 
     /// Returns highlight spans for `source`, reparsing only if `source`
     /// changed or a pending injection might have resolved since.
     pub fn highlight(&self, source: &str) -> Arc<Vec<HighlightSpan>> {
+        // Taken before the parser lock and released after it, so a grammar
+        // that ends up injecting itself is recognized rather than waited on.
+        let _highlighting = Highlighting::entered(self);
         let mut inner = self.inner.lock().unwrap();
         if inner.last_source == source && !inner.injections_pending {
             return inner.last_spans.clone();
@@ -83,10 +100,9 @@ impl Grammar {
         let mut injections_pending = false;
 
         if let Some(query) = &self.injections {
-            let content_capture_index = query
-                .capture_names()
-                .iter()
-                .position(|&name| name == "injection.content");
+            let content_capture_index = capture_index(query, "injection.content");
+            let language_capture_index =
+                capture_index(query, "injection.language");
 
             // Collected rather than spliced in per-match, since `QueryCursor::matches`
             // isn't guaranteed to yield matches in byte order.
@@ -95,31 +111,32 @@ impl Grammar {
             let mut cursor = QueryCursor::new();
             let mut matches =
                 cursor.matches(query, tree.root_node(), source.as_bytes());
-            while let Some(m) = matches.next() {
-                let language_name = query
-                    .property_settings(m.pattern_index)
-                    .iter()
-                    .find(|property| &*property.key == "injection.language")
-                    .and_then(|property| property.value.as_deref());
-                let Some(language_name) = language_name else {
-                    continue; // dynamic pattern (language read from a capture) - not supported yet
-                };
-                let Some(handle) = self.injected.get(language_name) else {
-                    continue;
-                };
-                let inner_grammar = match handle.poll() {
-                    PollResult::Ready(grammar) => grammar,
-                    PollResult::Loading => {
+            while let Some(matched) = matches.next() {
+                let target = self.injection_target(
+                    query,
+                    matched,
+                    source,
+                    language_capture_index,
+                );
+                let inner_grammar = match target {
+                    Some(PollResult::Ready(grammar)) => grammar,
+                    Some(PollResult::Loading) => {
                         injections_pending = true;
                         continue;
                     }
-                    PollResult::Unavailable => continue,
+                    Some(PollResult::Unavailable) | None => continue,
                 };
+                // A ```markdown fence inside a Markdown file asks this
+                // grammar to highlight itself, part-way through its own
+                // parse. That fence goes uncolored rather than deadlocking.
+                if already_highlighting(&inner_grammar) {
+                    continue;
+                }
                 let Some(content_capture_index) = content_capture_index else {
                     continue;
                 };
 
-                for capture in m.captures {
+                for capture in matched.captures {
                     if capture.index as usize != content_capture_index {
                         continue;
                     }
@@ -185,6 +202,137 @@ impl Grammar {
         inner.injections_pending = injections_pending;
         spans
     }
+
+    /// The grammar one query match wants its content highlighted with.
+    ///
+    /// Two kinds of pattern reach here. Most name their language outright
+    /// (`(#set! injection.language "yaml")`) and were acquired when this
+    /// grammar loaded. A code fence instead captures the name out of the
+    /// document (` ```rust `), which can only be read now.
+    ///
+    /// `None` means the match named no language this registry has.
+    fn injection_target(
+        &self,
+        query: &Query,
+        matched: &QueryMatch,
+        source: &str,
+        language_capture_index: Option<usize>,
+    ) -> Option<PollResult> {
+        if let Some(named) = static_language(query, matched.pattern_index) {
+            return Some(self.injected.get(named)?.poll());
+        }
+        let captured =
+            capture_text(matched, language_capture_index?, source)?;
+        Some(self.fence_language(captured))
+    }
+
+    /// The grammar a fence's info string names, acquired the first time this
+    /// grammar sees that name and remembered afterwards - a document with a
+    /// hundred `json` fences asks the registry once.
+    ///
+    /// A name nothing claims is deliberately *not* remembered: the lookup
+    /// that missed was already cheap, and a document naming a thousand
+    /// languages JumpPad has never heard of would otherwise keep a row for
+    /// every one of them.
+    fn fence_language(&self, info_string: &str) -> PollResult {
+        // ```rust,no_run and ```js {highlight=2} both name their language
+        // first; the rest of the info string is the fence's own business.
+        let name = info_string
+            .split(|character: char| {
+                character.is_whitespace() || character == ','
+            })
+            .next()
+            .unwrap_or_default()
+            .to_lowercase();
+        if name.is_empty() {
+            return PollResult::Unavailable;
+        }
+
+        let mut fence_injected = self.fence_injected.lock().unwrap();
+        if let Some(handle) = fence_injected.get(&name) {
+            return handle.poll();
+        }
+        let acquired = self
+            .registry
+            .upgrade()
+            .and_then(|registry| registry.acquire_fence_language(&name));
+        let Some(handle) = acquired else {
+            return PollResult::Unavailable;
+        };
+        fence_injected.entry(name).or_insert(handle).poll()
+    }
+}
+
+fn capture_index(query: &Query, name: &str) -> Option<usize> {
+    query
+        .capture_names()
+        .iter()
+        .position(|&capture| capture == name)
+}
+
+/// The language a pattern names outright, if it names one at all.
+fn static_language(query: &Query, pattern_index: usize) -> Option<&str> {
+    query
+        .property_settings(pattern_index)
+        .iter()
+        .find(|property| &*property.key == "injection.language")
+        .and_then(|property| property.value.as_deref())
+}
+
+/// The source text one of a match's captures covers.
+fn capture_text<'a>(
+    matched: &QueryMatch,
+    capture_index: usize,
+    source: &'a str,
+) -> Option<&'a str> {
+    matched
+        .captures
+        .iter()
+        .find(|capture| capture.index as usize == capture_index)
+        .and_then(|capture| {
+            source.get(capture.node.start_byte()..capture.node.end_byte())
+        })
+}
+
+thread_local! {
+    /// The grammars part-way through a `highlight` call on this thread, by
+    /// address.
+    ///
+    /// A grammar reached through an injection is normally a different one,
+    /// but nothing stops a document from naming the grammar reading it - a
+    /// ```markdown fence inside Markdown is the ordinary case, and a longer
+    /// cycle between two grammars' injections is possible in principle.
+    /// Recursing would re-enter a parser this thread already holds.
+    static HIGHLIGHTING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Marks a grammar as being highlighted for as long as it is held.
+struct Highlighting(usize);
+
+impl Highlighting {
+    fn entered(grammar: &Grammar) -> Self {
+        let address = std::ptr::from_ref(grammar) as usize;
+        HIGHLIGHTING.with(|active| active.borrow_mut().push(address));
+        Self(address)
+    }
+}
+
+impl Drop for Highlighting {
+    fn drop(&mut self) {
+        HIGHLIGHTING.with(|active| {
+            let mut active = active.borrow_mut();
+            if let Some(index) =
+                active.iter().rposition(|&address| address == self.0)
+            {
+                active.remove(index);
+            }
+        });
+    }
+}
+
+fn already_highlighting(grammar: &Arc<Grammar>) -> bool {
+    let address = Arc::as_ptr(grammar) as usize;
+    HIGHLIGHTING.with(|active| active.borrow().contains(&address))
 }
 
 /// Removes the `[remove.0, remove.1)` byte range from `piece`, returning

@@ -1,0 +1,4 @@
+name = "Python"
+extensions = ["py"]
+aliases = ["python3"]
+comment.single = "# "

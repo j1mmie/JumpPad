@@ -186,6 +186,8 @@ fn test_app(tab_count: u64) -> JumpPadApp {
         .collect();
     JumpPadApp {
         tabs,
+        languages: jumppad_config::Languages::default(),
+        grammar_search_dirs: Vec::new(),
         active: 0,
         next_id: tab_count,
         error: None,
@@ -237,7 +239,7 @@ fn each_tab_keeps_its_own_selection_through_switches() {
     let factory: EditorFactory = Box::new(|text, _extension| {
         let registry = syntax_registry::SyntaxRegistry::new(
             Vec::new(),
-            HashMap::new(),
+            syntax_registry::GrammarLookup::default(),
             || {},
         );
         Box::new(jumppad_textarea::TextArea::new(
@@ -318,7 +320,7 @@ fn mouse_made_selections_stay_independent_per_tab() {
     let factory: EditorFactory = Box::new(|text, _extension| {
         let registry = syntax_registry::SyntaxRegistry::new(
             Vec::new(),
-            HashMap::new(),
+            syntax_registry::GrammarLookup::default(),
             || {},
         );
         Box::new(jumppad_textarea::TextArea::new(
@@ -372,7 +374,7 @@ fn app_with_text(texts: &[&str]) -> JumpPadApp {
     let factory: EditorFactory = Box::new(|text, _extension| {
         let registry = syntax_registry::SyntaxRegistry::new(
             Vec::new(),
-            HashMap::new(),
+            syntax_registry::GrammarLookup::default(),
             || {},
         );
         Box::new(jumppad_textarea::TextArea::new(
@@ -1676,8 +1678,11 @@ fn language(
     jumppad_config::LanguageConfig {
         name: name.to_string(),
         syntax: syntax.map(str::to_string),
-        extensions: extensions.iter().map(|ext| ext.to_string()).collect(),
+        extensions: Some(
+            extensions.iter().map(|ext| ext.to_string()).collect(),
+        ),
         comment,
+        ..Default::default()
     }
 }
 
@@ -1807,9 +1812,19 @@ fn apply_config_reaches_the_shared_word_separators() {
 
 #[test]
 fn a_name_only_change_applies_nothing() {
+    // A language has to be in effect before renaming it can prove anything -
+    // the defaults name none, since the bundles under `syntaxes/` do.
     let mut app = test_app(1);
-    let before = app.editor_config.comment_styles();
     let mut config = jumppad_config::Config::default();
+    config.languages.push(language(
+        "Zig",
+        Some("zig"),
+        &["zig"],
+        Some(jumppad_config::CommentSyntax::Single("// ".to_string())),
+    ));
+    let _ = app.apply_config(config.clone());
+
+    let before = app.editor_config.comment_styles();
     config.languages[0].name = "Renamed".to_string();
 
     let _ = app.apply_config(config);

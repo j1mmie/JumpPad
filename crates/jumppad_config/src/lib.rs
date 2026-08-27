@@ -1,3 +1,4 @@
+mod bundle;
 mod defaults;
 mod editor;
 mod font;
@@ -6,11 +7,12 @@ mod indentation;
 mod keybind_overrides;
 mod keybinds;
 mod language;
+mod languages;
 mod loader;
 mod theme;
 mod window;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +26,11 @@ pub use indentation::{
     IndentationConfig, IndentationStyle, WordsConfig,
     DEFAULT_WORD_SEPARATORS,
 };
+pub use bundle::{discover as discover_bundles, SyntaxBundle};
 pub use keybind_overrides::ResolvedKeybind;
 pub use keybinds::KeybindsConfig;
 pub use language::{CommentSyntax, LanguageConfig};
+pub use languages::{Languages, ResolvedLanguage};
 pub use loader::{
     candidate_dirs, config_file, keybinds_file, load, load_keybinds,
     try_load, try_load_keybinds, ReloadError,
@@ -83,8 +87,11 @@ pub struct Config {
     pub indentation: IndentationConfig,
     #[serde(skip_serializing_if = "is_default")]
     pub words: WordsConfig,
-    /// `[[languages]]` entries; last so the array-of-tables lands at the
-    /// end of the written default file.
+    /// `[[languages]]` entries, each one a patch over the bundle of the
+    /// same name under `syntaxes/` - see [`Languages::resolve`]. Last so
+    /// the array-of-tables lands at the end of a written file, and
+    /// skipped when empty because the bundles are the defaults now.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub languages: Vec<LanguageConfig>,
 }
 
@@ -95,21 +102,6 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 }
 
 impl Config {
-    /// Extension -> grammar name, for the syntax registry. An entry without
-    /// a `syntax` contributes nothing; a later entry wins an extension.
-    pub fn extension_to_grammar(&self) -> HashMap<String, String> {
-        let mut map = HashMap::new();
-        for language in &self.languages {
-            let Some(syntax) = &language.syntax else {
-                continue;
-            };
-            for extension in &language.extensions {
-                map.insert(extension.clone(), syntax.clone());
-            }
-        }
-        map
-    }
-
     /// The theme to draw with in the given appearance: the slot's theme, over
     /// `[themes.base]`, over JumpPad's own defaults.
     pub fn theme_for(&self, showing: Appearance) -> ResolvedTheme {
@@ -154,23 +146,6 @@ impl Config {
         self.themes.values().any(|theme| {
             theme.background.alpha.is_some_and(|alpha| alpha < 1.0)
         })
-    }
-
-    /// Extension (lowercased) -> comment style, for toggle-comment; a later
-    /// entry wins an extension.
-    pub fn comment_styles_by_extension(
-        &self,
-    ) -> HashMap<String, CommentSyntax> {
-        let mut map = HashMap::new();
-        for language in &self.languages {
-            let Some(comment) = &language.comment else {
-                continue;
-            };
-            for extension in &language.extensions {
-                map.insert(extension.to_lowercase(), comment.clone());
-            }
-        }
-        map
     }
 }
 

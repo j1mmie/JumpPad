@@ -1,23 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Rebuilds every tree-sitter grammar `.wasm` file (plus injection queries)
-# into syntaxes/ at the repo root, from the upstream sources listed below.
+# Builds every tree-sitter grammar into the bundle directory that already
+# describes it - `syntaxes/<grammar>/syntax.wasm`, beside the `config.toml`
+# committed there, plus the `injections.scm` for the grammars that embed
+# others.
+#
+# The bundle directories are the committed half and this script fills in the
+# half that isn't: what it writes is gitignored, and `syntaxes/` is the whole
+# folder to ship next to a JumpPad binary once this has run.
 #
 # Requires `git` and a way to run the tree-sitter CLI - this uses
-# `npx tree-sitter-cli`, which npm downloads into its own cache on first
-# use.
-#
-# These are the actual sources used for what's already committed in
-# syntaxes/,
+# `npx tree-sitter-cli`, which npm downloads into its own cache on first use.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="output"
-work="tmp"
+out="$root/syntaxes"
+work="$out/tmp"
 
-echo "Building in $work"
+echo "building into $out"
 
 trap 'rm -rf "$work"' EXIT
+mkdir -p "$work"
 
 ts() {
     npx --yes tree-sitter-cli "$@";
@@ -31,14 +34,33 @@ clone() {
     fi
 }
 
-build() {
-    local src="$1" name="$2"
-    echo "building $name.wasm"
-    ts build --wasm -o "$out/$name.wasm" "$src"
+# Refuses to write into a directory with no config.toml: the bundle's config
+# is what names the grammar's extensions and comment style, and a `.wasm`
+# without one is a language JumpPad would never look up.
+bundle() {
+    local grammar="$1"
+    if [ ! -f "$out/$grammar/config.toml" ]; then
+        echo "no syntaxes/$grammar/config.toml - add one before building it" >&2
+        exit 1
+    fi
+    echo "$out/$grammar"
 }
 
+build() {
+    local src="$1" grammar="$2"
+    echo "building $grammar/syntax.wasm"
+    ts build --wasm -o "$(bundle "$grammar")/syntax.wasm" "$src"
+}
+
+# An injection query names the other grammars a grammar embeds, by the same
+# directory names used here - `injection.language "yaml"` finds syntaxes/yaml.
+injections() {
+    local src="$1" grammar="$2"
+    cp "$src/queries/injections.scm" "$(bundle "$grammar")/injections.scm"
+}
+
+cd "$out"
 npm install
-mkdir -p "$out"
 
 clone "ikatyang/tree-sitter-toml" toml
 build "$work/toml" toml
@@ -71,13 +93,15 @@ build "$work/csv/csv" csv
 build "$work/csv/psv" psv
 build "$work/csv/tsv" tsv
 
-# Likewise markdown/markdown-inline - plus each has an injections.scm
-# (used by syntax_registry to embed one grammar's content inside another,
-# e.g. a YAML frontmatter block inside Markdown) worth keeping in sync.
+# Markdown is split in two, and needs both halves: the block grammar leaves
+# every link and every bold run to markdown_inline, so a markdown bundle on
+# its own colors headings and nothing else. Their injection queries reach
+# further still - into yaml, toml and html above, and into whatever language
+# a fenced code block names.
 clone "tree-sitter-grammars/tree-sitter-markdown" markdown
 build "$work/markdown/tree-sitter-markdown" markdown
 build "$work/markdown/tree-sitter-markdown-inline" markdown_inline
-cp "$work/markdown/tree-sitter-markdown/queries/injections.scm" "$out/markdown.injections.scm"
-cp "$work/markdown/tree-sitter-markdown-inline/queries/injections.scm" "$out/markdown_inline.injections.scm"
+injections "$work/markdown/tree-sitter-markdown" markdown
+injections "$work/markdown/tree-sitter-markdown-inline" markdown_inline
 
-echo "done: $(ls "$out"/*.wasm | wc -l) grammars in $out"
+echo "done: $(ls -d "$out"/*/syntax.wasm | wc -l) grammars built"

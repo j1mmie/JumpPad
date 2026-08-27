@@ -140,7 +140,15 @@ impl JumpPadApp {
         &mut self,
         new: jumppad_config::Config,
     ) -> Task<Message> {
+        // Re-read from disk alongside the config: a bundle can be added or
+        // edited between reloads, and the languages are the two of them
+        // combined rather than either alone.
+        let languages = jumppad_config::Languages::resolve(
+            &new.languages,
+            &self.grammar_search_dirs,
+        );
         let current = &self.config;
+        let current_languages = &self.languages;
         let appearance_changed =
             new.themes != current.themes || new.mode != current.mode;
 
@@ -163,11 +171,11 @@ impl JumpPadApp {
         // One [[languages]] edit can feed two consumers, so diff the derived
         // views: comment styles apply live (no repaint - nothing on screen
         // changes until the next toggle), grammar mappings can't.
-        if new.comment_styles_by_extension()
-            != current.comment_styles_by_extension()
+        if languages.comment_styles_by_extension()
+            != current_languages.comment_styles_by_extension()
         {
             self.editor_config
-                .set_comment_styles(build_comment_styles(&new));
+                .set_comment_styles(build_comment_styles(&languages));
         }
 
         // Unlike the two above this one does change what is on screen - the
@@ -200,7 +208,9 @@ impl JumpPadApp {
                 self.hotkey = Hotkey::register(self.keybinds.toggle);
             }
         }
-        if new.extension_to_grammar() != current.extension_to_grammar() {
+        if languages.extension_to_grammar()
+            != current_languages.extension_to_grammar()
+        {
             restart_required("[[languages]] extension-to-syntax mappings");
         }
         // Both of these are settled once, when iced builds its compositor:
@@ -211,6 +221,7 @@ impl JumpPadApp {
         }
 
         self.config = new;
+        self.languages = languages;
 
         // Last, and through the same path an OS change takes: `theme_for`
         // reads the config that was just stored.
