@@ -1,23 +1,34 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Builds every tree-sitter grammar into the bundle directory that already
-# describes it - `syntaxes/<grammar>/syntax.wasm`, beside the `config.toml`
-# committed there, plus the `injections.scm` for the grammars that embed
-# others.
+# Builds every tree-sitter grammar, then assembles the folder to ship.
 #
-# The bundle directories are the committed half and this script fills in the
-# half that isn't: what it writes is gitignored, and `syntaxes/` is the whole
-# folder to ship next to a JumpPad binary once this has run.
+# A language is a directory: `<grammar>/config.toml` names its extensions,
+# comment style and code-fence aliases, `syntax.wasm` highlights them, and
+# `injections.scm` names the other grammars it embeds. The config files are
+# committed; this script produces the other two.
+#
+# It writes to two places, and both are gitignored:
+#
+#   syntaxes/<grammar>/syntax.wasm   built in place, so a checkout highlights
+#                                    under `cargo run` with nothing to copy
+#   syntaxes/output/                 every bundle assembled together - the
+#                                    whole folder to ship, config files
+#                                    included. Rename it `syntaxes` next to
+#                                    a JumpPad binary and it is found.
+#
+# `output/` carries the grammar-less bundles too. Rust and Python ship a
+# config and no `.wasm`: no highlighting, but their comment styles are how
+# toggle-comment knows what a `.rs` comment looks like, so leaving them out
+# would quietly drop a feature.
 #
 # Requires `git` and a way to run the tree-sitter CLI - this uses
 # `npx tree-sitter-cli`, which npm downloads into its own cache on first use.
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-out="$root/syntaxes"
-work="$out/tmp"
-
-echo "building into $out"
+syntaxes="$root/syntaxes"
+out="$syntaxes/output"
+work="$syntaxes/tmp"
 
 trap 'rm -rf "$work"' EXIT
 mkdir -p "$work"
@@ -39,11 +50,11 @@ clone() {
 # without one is a language JumpPad would never look up.
 bundle() {
     local grammar="$1"
-    if [ ! -f "$out/$grammar/config.toml" ]; then
+    if [ ! -f "$syntaxes/$grammar/config.toml" ]; then
         echo "no syntaxes/$grammar/config.toml - add one before building it" >&2
         exit 1
     fi
-    echo "$out/$grammar"
+    echo "$syntaxes/$grammar"
 }
 
 build() {
@@ -59,7 +70,38 @@ injections() {
     cp "$src/queries/injections.scm" "$(bundle "$grammar")/injections.scm"
 }
 
-cd "$out"
+# Copies every bundle into `output/`, whether or not a grammar was built for
+# it. Rebuilt from scratch each run so a language that has been renamed or
+# dropped doesn't linger in a folder someone is about to ship.
+assemble() {
+    rm -rf "$out"
+    mkdir -p "$out"
+    local grammars=0 configs_only=0
+    for dir in "$syntaxes"/*/; do
+        local grammar
+        grammar="$(basename "$dir")"
+        # Skips output/, tmp/ and node_modules/ without naming them: a
+        # directory is a bundle if and only if it has a config.
+        [ -f "$dir/config.toml" ] || continue
+        mkdir -p "$out/$grammar"
+        cp "$dir/config.toml" "$out/$grammar/config.toml"
+        if [ -f "$dir/syntax.wasm" ]; then
+            cp "$dir/syntax.wasm" "$out/$grammar/syntax.wasm"
+            grammars=$((grammars + 1))
+        else
+            configs_only=$((configs_only + 1))
+        fi
+        if [ -f "$dir/injections.scm" ]; then
+            cp "$dir/injections.scm" "$out/$grammar/injections.scm"
+        fi
+    done
+    echo
+    echo "assembled $out"
+    echo "  $grammars language(s) with a grammar"
+    echo "  $configs_only without one (comment styles only)"
+}
+
+cd "$syntaxes"
 npm install
 
 clone "ikatyang/tree-sitter-toml" toml
@@ -104,4 +146,4 @@ build "$work/markdown/tree-sitter-markdown-inline" markdown_inline
 injections "$work/markdown/tree-sitter-markdown" markdown
 injections "$work/markdown/tree-sitter-markdown-inline" markdown_inline
 
-echo "done: $(ls -d "$out"/*/syntax.wasm | wc -l) grammars built"
+assemble

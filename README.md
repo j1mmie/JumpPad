@@ -108,15 +108,22 @@ syntaxes/markdown/injections.scm  the other grammars it embeds, if any
 ```
 
 The `config.toml` files are committed; this script clones each grammar's
-upstream source and compiles the `syntax.wasm` beside them. Copy the whole
-`syntaxes` folder next to a JumpPad binary and it will find them. Requires
-`git` and `npm`.
+upstream source and compiles the rest. Requires `git` and `npm`.
+
+It writes to two places. The `syntax.wasm` files land beside the configs
+they belong to, so a checkout highlights under `cargo run` with nothing to
+copy. It then assembles `syntaxes/output/` - every bundle together, config
+files included - which is the folder to ship: rename it `syntaxes` next to a
+JumpPad binary and it will be found.
 
 A bundle with no `syntax.wasm` is still a language - it just isn't
 highlighted, which is how `.rs` and `.py` files get comment toggling without
-a grammar shipped for them. To override anything a bundle ships, add a
-`[[languages]]` entry naming it in your own `config.toml`; it changes only
-the settings it names. See `config/config.sample.toml`.
+a grammar shipped for them. Those bundles are copied into `output/` too, so
+leaving them out of a release would quietly drop that.
+
+To override anything a bundle ships, add a `[[languages]]` entry naming it in
+your own `config.toml`; it changes only the settings it names. See
+`config/config.sample.toml`.
 
 
 ### Build JumpPad:
