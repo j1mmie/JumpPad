@@ -6,6 +6,9 @@ run_debug_gpu   = "run           -p jumppad --bin jumppad-gpu --no-default-featu
 # Builds `assets/fonts/jumppad-icons.ttf` from the drawings in
 # `assets/icons`. Only needed after changing an icon - the font is committed.
 build_fonts     = "run -p icon_font_builder"
+# Builds the tree-sitter grammars into `syntaxes/<grammar>/syntax.wasm`, then
+# assembles `syntaxes/output` - the folder to ship. Needs `git` and Node.
+build_grammars  = "run -p grammar_builder"
 
 # Silences ~50 `LNK4217` warnings from the MSVC linker, each naming a
 # `wasm_*`/`wasmtime_*` symbol that `libtree_sitter`'s C code "imports" but

@@ -999,8 +999,9 @@ two `[[bin]]` entries). This produces two binaries from the same
 Each `[[bin]]` has `required-features` set to the matching Cargo feature,
 so plain `cargo build`/`cargo run` (default features) only ever touches
 `jumppad`; building `jumppad-gpu` requires
-`--no-default-features --features wgpu` explicitly (see
-`scripts/build-release.sh`/`.ps1`). Since only one backend is ever
+`--no-default-features --features wgpu` explicitly (see the build commands
+in `README.md`, or the `run_*_gpu` aliases in `.cargo/config.toml`). Since
+only one backend is ever
 compiled into a given binary, there's no `ICED_BACKEND` env var or other
 runtime selection to worry about - `iced_renderer` picks its `Renderer`
 type solely from which feature(s) are active (both features enabled at
@@ -2465,17 +2466,20 @@ the compositor compares, and `a_theme_change_repaints_the_editor` in
 executable first, then `./syntaxes` for `cargo run` convenience -
 mirroring `config_paths()`'s search order in `jumppad_config`.
 
-`syntaxes/` is gitignored, not committed - these are compiled binaries
-built from *other projects'* tree-sitter grammar sources, not something
-derived from code in this repo. Run `./scripts/build-grammars.sh` (needs
-`git` and `npx`) to populate it: it clones each upstream grammar repo
-listed in the script and compiles it with `tree-sitter build --wasm`. If
-a grammar ever needs updating (new file type, upstream fix), edit that
-script rather than hand-placing a `.wasm` file.
+Each `syntaxes/<grammar>/config.toml` is committed; the `syntax.wasm` and
+`injections.scm` beside it are gitignored, because those are compiled from
+*other projects'* tree-sitter grammar sources rather than derived from code
+in this repo. Run `cargo build_grammars` (needs `git` and Node) to produce
+them: `crates/grammar_builder` clones each upstream repo in its `GRAMMARS`
+table, compiles it with `tree-sitter build --wasm`, and assembles
+`syntaxes/output` - every bundle together, the folder to ship. If a grammar
+ever needs updating (new file type, upstream fix), edit that table rather
+than hand-placing a `.wasm` file; a new language needs a `config.toml`
+first, which the builder refuses to build without.
 
 The app still starts and runs fine with `syntaxes/` empty or missing
-entirely (see `log_wasm_files_found` in `app.rs`) - it just opens files
-unhighlighted, consistent with "highlighters are optional" in
+entirely (see `log_bundles_found` in `grammar_paths.rs`) - it just opens
+files unhighlighted, consistent with "highlighters are optional" in
 `README.md`. Don't mistake that startup diagnostic for a real error;
 only chase it if highlighting is actually expected to be working.
 

@@ -10,14 +10,16 @@ members = [
     "crates/jumppad_keybinds",
     "crates/jumppad_icons",
     "crates/icon_font_builder",
+    "crates/grammar_builder",
 ]
 
-# `icon_font_builder` is left out so a plain `cargo build`, `cargo test` or
-# `cargo clippy` never compiles it. It is a build tool run by hand through
-# `cargo build_fonts`, its output is committed, and its dependencies -
-# an SVG parser, a curve library, a font writer - have no business being
-# built as part of the app. `cargo build -p icon_font_builder` still works
-# when someone wants exactly that.
+# The two builders are left out so a plain `cargo build`, `cargo test` or
+# `cargo clippy` never compiles them. Both are tools run by hand -
+# `cargo build_fonts` and `cargo build_grammars` - whose output is committed
+# or gitignored rather than linked into the app, and `icon_font_builder`'s
+# dependencies (an SVG parser, a curve library, a font writer) have no
+# business being built as part of it. `cargo build -p icon_font_builder`
+# still works when someone wants exactly that.
 default-members = [
     "crates/editor_core",
     "crates/jumppad_textarea",

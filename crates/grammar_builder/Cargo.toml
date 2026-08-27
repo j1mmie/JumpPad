@@ -1,0 +1,11 @@
+[package]
+name = "grammar_builder"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+# No dependencies at all: this drives `git` and npm's `tree-sitter` and
+# copies the results around, which the standard library covers on its own.
+# `default-members` in the workspace root keeps a plain `cargo build` from
+# compiling it.
+[dependencies]

@@ -97,7 +97,7 @@ Syntax Highlighting:
 
 ### Build syntax highlighter grammars:
 ```
-./syntaxes/build-grammars.sh
+cargo build_grammars
 ```
 Each language lives in its own bundle under `syntaxes/`:
 
@@ -107,13 +107,15 @@ syntaxes/markdown/syntax.wasm   the grammar that highlights them
 syntaxes/markdown/injections.scm  the other grammars it embeds, if any
 ```
 
-The `config.toml` files are committed; this script clones each grammar's
-upstream source and compiles the rest. Requires `git` and `npm`.
+The `config.toml` files are committed; this clones each grammar's upstream
+source and compiles the rest. Needs `git` and Node on your `PATH` - nothing
+else, on any platform: the tree-sitter CLI fetches its own toolchain on first
+use. Works the same in PowerShell, Git Bash and a Linux shell.
 
-It writes to two places. The `syntax.wasm` files land beside the configs
-they belong to, so a checkout highlights under `cargo run` with nothing to
-copy. It then assembles `syntaxes/output/` - every bundle together, config
-files included - which is the folder to ship: rename it `syntaxes` next to a
+It writes to two places. The `syntax.wasm` files land beside the configs they
+belong to, so a checkout highlights under `cargo run` with nothing to copy.
+It then assembles `syntaxes/output/` - every bundle together, config files
+included - which is the folder to ship: rename it `syntaxes` next to a
 JumpPad binary and it will be found.
 
 A bundle with no `syntax.wasm` is still a language - it just isn't
@@ -131,17 +133,12 @@ your own `config.toml`; it changes only the settings it names. See
 JumpPad has two binary targets, one for software rendering and one for
 GPU-powered rendering. Note: the GPU rendering binary occupies much more memory
 
-To build both release binaries at once, for your host platform:
-```
-./scripts/build-release.sh       # Linux/macOS/WSL
-./scripts/build-release.ps1      # Windows (produces jumppad.exe, jumppad-gpu.exe)
-```
-
-Or the equivalent commands by hand:
+To build both release binaries, for your host platform:
 ```
 cargo build --release -p jumppad --bin jumppad
 cargo build --release -p jumppad --bin jumppad-gpu --no-default-features --features wgpu
 ```
+On Windows these produce `jumppad.exe` and `jumppad-gpu.exe`.
 
 #### Cross-compiling Windows binaries from Linux/WSL
 
@@ -153,7 +150,8 @@ sudo apt install gcc-mingw-w64-x86-64   # Debian/Ubuntu; package name varies by 
 
 Then build both Windows binaries with:
 ```
-./scripts/build-release.sh x86_64-pc-windows-gnu
+cargo build --release --target x86_64-pc-windows-gnu -p jumppad --bin jumppad
+cargo build --release --target x86_64-pc-windows-gnu -p jumppad --bin jumppad-gpu --no-default-features --features wgpu
 ```
 
 Produces:

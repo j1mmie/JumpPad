@@ -1,7 +1,7 @@
 .DS_Store
 /target
-# Built by syntaxes/build-grammars.sh: the grammars beside the committed
-# bundle configs, and the assembled copy of the whole folder to ship.
+# Built by `cargo build_grammars`: the grammars beside the committed bundle
+# configs, and the assembled copy of the whole folder to ship.
 /syntaxes/*/syntax.wasm
 /syntaxes/*/injections.scm
 /syntaxes/output
