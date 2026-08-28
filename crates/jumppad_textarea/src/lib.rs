@@ -20,6 +20,7 @@ mod word;
 pub use comment::CommentStyle;
 pub use indent::{Indentation, IndentationStyle};
 pub use keybindings::{KeyResolver, binding_for};
+pub use line_numbers::Sizing as LineNumberSizing;
 pub use shared_config::SharedEditorConfig;
 pub use style::scrollbar_thumb_style;
 pub use text_area::TextArea;

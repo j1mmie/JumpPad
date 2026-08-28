@@ -8,7 +8,7 @@ use crate::comment::CommentStyle;
 use crate::indent::Indentation;
 use crate::keybindings::KeyResolver;
 use crate::word::WordSeparators;
-use crate::{font, history, text_editor};
+use crate::{font, history, line_numbers, text_editor};
 
 /// Editor settings the app can change after construction: a config reload
 /// writes here, and every open [`crate::TextArea`] reads through a shared
@@ -36,6 +36,12 @@ pub struct SharedEditorConfig {
     /// `f32` bits, as above. How far back from the document's text the line
     /// numbers are drawn.
     line_numbers_alpha: AtomicU32,
+    /// `f32` bits, as above. The narrowest the line numbers are drawn, in
+    /// ems. Clamped by [`line_numbers::Sizing`], not here.
+    line_numbers_min_width: AtomicU32,
+    /// `f32` bits, as above. The blank between the line numbers and the
+    /// text, in ems. Clamped in the same place.
+    line_numbers_gap: AtomicU32,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole resolver. Swappable because a `keybinds.toml` reload
     /// has to reach tabs that already exist.
@@ -68,6 +74,12 @@ impl SharedEditorConfig {
             line_numbers: AtomicBool::new(false),
             line_numbers_alpha: AtomicU32::new(
                 text_editor::DEFAULT_LINE_NUMBER_ALPHA.to_bits(),
+            ),
+            line_numbers_min_width: AtomicU32::new(
+                line_numbers::DEFAULT_MINIMUM.to_bits(),
+            ),
+            line_numbers_gap: AtomicU32::new(
+                line_numbers::DEFAULT_GAP.to_bits(),
             ),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
@@ -161,6 +173,31 @@ impl SharedEditorConfig {
     pub fn set_line_numbers_alpha(&self, alpha: f32) {
         self.line_numbers_alpha
             .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
+    }
+
+    /// How much room the line numbers take beside the text - the narrowest
+    /// the numbers themselves are drawn, and the blank after them, both in
+    /// ems. `None` while the document isn't numbered, which is the same
+    /// answer the widget's own builder takes.
+    pub fn line_numbers_sizing(&self) -> Option<line_numbers::Sizing> {
+        self.line_numbers().then(|| {
+            line_numbers::Sizing::new(
+                f32::from_bits(
+                    self.line_numbers_min_width.load(Ordering::Relaxed),
+                ),
+                f32::from_bits(self.line_numbers_gap.load(Ordering::Relaxed)),
+            )
+        })
+    }
+
+    pub fn set_line_numbers_min_width(&self, ems: f32) {
+        self.line_numbers_min_width
+            .store(ems.to_bits(), Ordering::Relaxed);
+    }
+
+    pub fn set_line_numbers_gap(&self, ems: f32) {
+        self.line_numbers_gap
+            .store(ems.to_bits(), Ordering::Relaxed);
     }
 
     /// Routed through here so settings have one mutation API, but stored in

@@ -357,6 +357,23 @@ fn a_document_is_unnumbered_until_a_theme_asks_for_numbers() {
 
     assert!(!numbers.enabled);
     assert_eq!(numbers.alpha, DEFAULT_LINE_NUMBERS_ALPHA);
+    assert_eq!(numbers.min_width, DEFAULT_LINE_NUMBERS_MIN_WIDTH);
+    assert_eq!(numbers.gap, DEFAULT_LINE_NUMBERS_GAP);
+}
+
+#[test]
+fn a_theme_can_say_how_much_room_the_line_numbers_take() {
+    let config = config(
+        r#"
+        [themes.light]
+        editor.line_numbers.min_width = 3.5
+        editor.line_numbers.gap = 1.25
+        "#,
+    );
+
+    let numbers = config.theme_for(Appearance::Light).line_numbers;
+    assert_eq!(numbers.min_width, 3.5);
+    assert_eq!(numbers.gap, 1.25);
 }
 
 /// Each leaf on its own, the way `editor.font` merges: a theme that only
@@ -371,15 +388,21 @@ fn a_theme_takes_the_line_numbers_it_does_not_name_from_the_base() {
         [themes.base]
         editor.line_numbers.enabled = true
         editor.line_numbers.alpha = 0.3
+        editor.line_numbers.min_width = 4.0
+        editor.line_numbers.gap = 2.0
 
         [themes.mine]
         editor.line_numbers.enabled = false
+        editor.line_numbers.gap = 0.25
         "#,
     );
 
     let numbers = config.theme_for(Appearance::Dark).line_numbers;
     assert!(!numbers.enabled);
     assert_eq!(numbers.alpha, 0.3);
+    assert_eq!(numbers.min_width, 4.0);
+    // Named by the theme itself, so the base theme's 2.0 doesn't stand.
+    assert_eq!(numbers.gap, 0.25);
 }
 
 /// The reason every leaf is an `Option`: a theme naming the value that
@@ -967,6 +990,8 @@ fn the_sample_files_parse() {
     let numbers = config.theme_for(Appearance::Dark).line_numbers;
     assert!(numbers.enabled);
     assert_eq!(numbers.alpha, 0.45);
+    assert_eq!(numbers.min_width, 1.8);
+    assert_eq!(numbers.gap, 0.6);
     let _: KeybindsConfig =
         toml::from_str(include_str!("../../../config/keybinds.sample.toml"))
             .unwrap();

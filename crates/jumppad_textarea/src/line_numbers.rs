@@ -11,11 +11,6 @@
 
 use iced::advanced::graphics::text::cosmic_text::Buffer;
 
-/// The fewest digits the column is ever drawn at. Without a floor the column
-/// would widen the first time a document reached ten lines, shifting every
-/// line of text sideways as the file was typed into.
-pub const MIN_DIGIT_COUNT: u32 = 3;
-
 /// How much text the column has to leave beside it, in characters. A window
 /// narrow enough to fail this would spend most of its width on numbers and
 /// wrap the document to a few characters a row, so the numbers go instead.
@@ -77,38 +72,110 @@ pub fn rows(buffer: &Buffer) -> impl Iterator<Item = Row> + '_ {
     })
 }
 
+/// How much room the numbers take beside the text, in **ems** - multiples of
+/// the document's own text size.
+///
+/// Ems rather than pixels so a setting keeps its proportions at any text
+/// size, and rather than digits so it means the same thing in any typeface.
+/// Both are read from the theme; both are clamped here, since this is on the
+/// path from a hand-edited `config.toml` and a bad number should look wrong
+/// rather than break the layout.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Sizing {
+    /// The narrowest the numbers themselves are drawn. Without a floor the
+    /// column would widen the first time a document reached ten lines,
+    /// shifting every line of text sideways as the file was typed into. The
+    /// default is what three digits of a typical monospace face measure.
+    minimum: f32,
+    /// The blank between the numbers and the first character of every line.
+    /// Added on top of [`Self::minimum`], so widening it never eats into the
+    /// numbers.
+    gap: f32,
+}
+
+/// The narrowest the numbers are drawn when no theme names a width: three
+/// digits of a typical monospace face, which is what JumpPad drew before the
+/// setting existed.
+pub const DEFAULT_MINIMUM: f32 = 1.8;
+
+/// The blank between the numbers and the text when no theme names one: one
+/// digit of that same face, again what JumpPad drew before.
+pub const DEFAULT_GAP: f32 = 0.6;
+
+/// The range both settings are held to. The ceiling is only there to keep a
+/// typo'd config from spending the whole window on numbers; zero is a real
+/// answer at the floor - a column exactly as wide as its digits, hard against
+/// the text.
+const SIZING_RANGE: std::ops::RangeInclusive<f32> = 0.0..=16.0;
+
+impl Sizing {
+    /// A non-finite value falls back to its default rather than clamping -
+    /// `NaN` has no meaningful end of the range. The same reasoning as
+    /// `geometry::clamp_scroll_multiplier`.
+    pub fn new(minimum: f32, gap: f32) -> Self {
+        Self {
+            minimum: clamp(minimum, DEFAULT_MINIMUM),
+            gap: clamp(gap, DEFAULT_GAP),
+        }
+    }
+}
+
+impl Default for Sizing {
+    fn default() -> Self {
+        Self::new(DEFAULT_MINIMUM, DEFAULT_GAP)
+    }
+}
+
+fn clamp(ems: f32, default: f32) -> f32 {
+    if ems.is_finite() {
+        ems.clamp(*SIZING_RANGE.start(), *SIZING_RANGE.end())
+    } else {
+        default
+    }
+}
+
 /// How wide the numbers are drawn, and how much room they take from the text.
 ///
-/// Built from a measurement rather than the font size: a digit's width is the
-/// typeface's business, and the column has to fit the numbers whatever face
-/// the document is set in.
+/// All pixels by the time it gets here. The numbers' own width is a
+/// measurement rather than arithmetic on the font size - a digit's width is
+/// the typeface's business, and the column has to fit the numbers whatever
+/// face the document is set in - while the floor under it and the gap beside
+/// it come from the theme, in ems.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Column {
-    digits: u32,
+    digit_width: f32,
     numbers_width: f32,
+    gap: f32,
 }
 
 impl Column {
-    /// A column `digits` wide, where that many digits measure `numbers_width`
-    /// in the document's own font.
-    pub fn new(digits: u32, numbers_width: f32) -> Self {
+    /// A column for `digits` digits, which measure `digits_width` together in
+    /// the document's own font, sized against a text `text_size` pixels tall.
+    pub fn new(
+        digits: u32,
+        digits_width: f32,
+        sizing: Sizing,
+        text_size: f32,
+    ) -> Self {
+        let digits_width = digits_width.max(0.0);
+        let text_size = text_size.max(0.0);
+
         Self {
-            digits: digits.max(1),
-            numbers_width: numbers_width.max(0.0),
+            digit_width: digits_width / digits.max(1) as f32,
+            numbers_width: digits_width.max(sizing.minimum * text_size),
+            gap: sizing.gap * text_size,
         }
     }
 
-    /// The digits the widest number in the document needs, floored at
-    /// [`MIN_DIGIT_COUNT`].
+    /// The digits the widest number in the document needs.
     pub fn digits_for(line_count: usize) -> u32 {
-        (line_count.max(1).ilog10() + 1).max(MIN_DIGIT_COUNT)
+        line_count.max(1).ilog10() + 1
     }
 
-    /// What the column takes from the text: the numbers, plus one blank digit
-    /// between them and the first character of every line. A gap measured in
-    /// digits rather than pixels keeps its proportions at any text size.
+    /// What the column takes from the text: the numbers, and the gap between
+    /// them and the first character of every line.
     pub fn width(&self) -> f32 {
-        self.numbers_width + self.digit_width()
+        self.numbers_width + self.gap
     }
 
     /// What is left for the text of a strip `width` wide once this column
@@ -126,19 +193,13 @@ impl Column {
     /// rectangle to the *right* of it: a region it never paints, while the
     /// numbers themselves are never repainted.
     pub fn number_left_edge(&self, digits: u32, left: f32) -> f32 {
-        left + self.numbers_width - digits as f32 * self.digit_width()
+        left + self.numbers_width - digits as f32 * self.digit_width
     }
 
     /// Whether a text area this wide can spare the column. See
     /// [`MIN_TEXT_CHARACTERS`].
     pub fn leaves_room_in(&self, text_width: f32) -> bool {
-        text_width - self.width() >= MIN_TEXT_CHARACTERS * self.digit_width()
-    }
-
-    /// One digit's width, which is also the width of the blank column
-    /// between the numbers and the text.
-    fn digit_width(&self) -> f32 {
-        self.numbers_width / self.digits as f32
+        text_width - self.width() >= MIN_TEXT_CHARACTERS * self.digit_width
     }
 }
 

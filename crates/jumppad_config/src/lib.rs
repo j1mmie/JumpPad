@@ -22,6 +22,7 @@ pub use editor::{
 };
 pub use font::{
     FontConfig, DEFAULT_ALPHA, DEFAULT_FONT_SIZE, DEFAULT_LINE_NUMBERS_ALPHA,
+    DEFAULT_LINE_NUMBERS_GAP, DEFAULT_LINE_NUMBERS_MIN_WIDTH,
     DEFAULT_LINE_NUMBERS_SHOWN,
 };
 pub use gpu::{GpuConfig, GpuPower};

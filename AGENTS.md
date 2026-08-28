@@ -683,10 +683,25 @@ padding and the numbers together, and everything that has to agree about
 where the text is goes through it: the width the text wraps at, the origin
 it draws from, a pointer's position in it, the scrollbar's track. Splitting
 those apart is how the text ends up drawing somewhere other than where
-clicking it lands. Its width comes from measuring a row of zeros in the
-document's own face, cached on the widget's `State` against the digit count,
-the font and the text size - it is asked for three times a frame and
-shaping it each time is not free.
+clicking it lands.
+
+**How wide it is, is a measurement held against two settings.** The
+measurement is a row of zeros shaped in the document's own face - a digit's
+width is the typeface's business - cached on the widget's `State` against the
+digit count, the font and the text size, since it is asked for three times a
+frame and shaping it each time is not free. `line_numbers::Sizing` is the
+other half: `editor.line_numbers.min_width` floors the numbers' own width and
+`editor.line_numbers.gap` is added beside them, both in **ems**, so a setting
+keeps its proportions at any text size and means the same thing in any face.
+The floor is what keeps a file being typed into from shifting sideways the
+moment it passes nine lines; the defaults are three digits and one digit of a
+typical monospace face, which is what the column was hard-coded to before
+either was a setting.
+
+**The cache holds the measurement, not the finished `Column`.** Holding the
+column instead would mean a `config.toml` reload of `min_width` or `gap` going
+unnoticed until the font or the digit count happened to move. Rebuilding the
+column per call is two multiplies and a `max`.
 
 **Two things about drawing them that look arbitrary and are not:**
 

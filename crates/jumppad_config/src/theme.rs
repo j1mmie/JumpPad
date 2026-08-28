@@ -201,12 +201,15 @@ pub struct ResolvedTheme {
     pub ui_font: ResolvedFont,
 }
 
-/// Whether a document shows line numbers, and how far back from its text
-/// they are drawn. Settled, like the rest of a [`ResolvedTheme`].
+/// Whether a document shows line numbers, how far back from its text they
+/// are drawn, and how much room they take. Settled, like the rest of a
+/// [`ResolvedTheme`]; `min_width` and `gap` are in ems.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ResolvedLineNumbers {
     pub enabled: bool,
     pub alpha: f32,
+    pub min_width: f32,
+    pub gap: f32,
 }
 
 impl Default for ResolvedLineNumbers {
@@ -214,6 +217,8 @@ impl Default for ResolvedLineNumbers {
         Self {
             enabled: crate::font::DEFAULT_LINE_NUMBERS_SHOWN,
             alpha: crate::font::DEFAULT_LINE_NUMBERS_ALPHA,
+            min_width: crate::font::DEFAULT_LINE_NUMBERS_MIN_WIDTH,
+            gap: crate::font::DEFAULT_LINE_NUMBERS_GAP,
         }
     }
 }

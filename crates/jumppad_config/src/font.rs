@@ -62,3 +62,12 @@ pub const DEFAULT_LINE_NUMBERS_SHOWN: bool = false;
 /// no theme names an alpha: enough to read, far enough back that the eye
 /// goes to the text first.
 pub const DEFAULT_LINE_NUMBERS_ALPHA: f32 = 0.45;
+
+/// The narrowest the line numbers are drawn when no theme names a width, in
+/// ems: three digits of a typical monospace face, so a file being typed into
+/// doesn't shift sideways the moment it passes nine lines.
+pub const DEFAULT_LINE_NUMBERS_MIN_WIDTH: f32 = 1.8;
+
+/// The blank between the line numbers and the text when no theme names one,
+/// in ems: one digit of that same face.
+pub const DEFAULT_LINE_NUMBERS_GAP: f32 = 0.6;

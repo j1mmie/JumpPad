@@ -15,6 +15,7 @@ use iced_core::{
 use iced_tiny_skia::Renderer;
 use iced_tiny_skia::graphics::{Viewport, damage};
 
+use jumppad_textarea::LineNumberSizing;
 use jumppad_textarea::text_editor::{Content, TextEditor, text_editor};
 
 const WINDOW: Size<u32> = Size::new(500, 400);
@@ -280,7 +281,7 @@ fn editor(
         .line_height(LineHeight::Absolute(Pixels(LINE_HEIGHT)))
         .padding(PADDING)
         .height(SIZE.height)
-        .line_numbers(line_numbers)
+        .line_numbers(line_numbers.then(LineNumberSizing::default))
 }
 
 /// The editor draws the rows the top and bottom edges cut through *whole* -

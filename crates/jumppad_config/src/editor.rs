@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::font::{
-    DEFAULT_LINE_NUMBERS_ALPHA, DEFAULT_LINE_NUMBERS_SHOWN, FontConfig,
+    DEFAULT_LINE_NUMBERS_ALPHA, DEFAULT_LINE_NUMBERS_GAP,
+    DEFAULT_LINE_NUMBERS_MIN_WIDTH, DEFAULT_LINE_NUMBERS_SHOWN, FontConfig,
 };
 use crate::theme::ResolvedLineNumbers;
 
@@ -21,7 +22,14 @@ pub struct EditorConfig {
 /// `alpha` scales the theme's own text color rather than naming a color of
 /// its own, so the numbers read as a step back from the document in every
 /// palette - and stay in step with a theme the user swaps underneath them.
-/// Both properties are matched and clamped where applied, not here, so this
+///
+/// `min_width` and `gap` are in **ems** - multiples of the document's text
+/// size - so they keep their proportions at any size and mean the same thing
+/// in any typeface. `min_width` is the narrowest the numbers themselves are
+/// drawn, and `gap` is added on top of it, so widening the gap never eats
+/// into the numbers.
+///
+/// Every property is matched and clamped where applied, not here, so this
 /// crate doesn't need an `iced` dependency.
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -30,6 +38,10 @@ pub struct LineNumbersConfig {
     pub enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alpha: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gap: Option<f32>,
 }
 
 impl LineNumbersConfig {
@@ -43,6 +55,8 @@ impl LineNumbersConfig {
         LineNumbersConfig {
             enabled: self.enabled.or(base.enabled),
             alpha: self.alpha.or(base.alpha),
+            min_width: self.min_width.or(base.min_width),
+            gap: self.gap.or(base.gap),
         }
     }
 
@@ -50,6 +64,8 @@ impl LineNumbersConfig {
         ResolvedLineNumbers {
             enabled: self.enabled.unwrap_or(DEFAULT_LINE_NUMBERS_SHOWN),
             alpha: self.alpha.unwrap_or(DEFAULT_LINE_NUMBERS_ALPHA),
+            min_width: self.min_width.unwrap_or(DEFAULT_LINE_NUMBERS_MIN_WIDTH),
+            gap: self.gap.unwrap_or(DEFAULT_LINE_NUMBERS_GAP),
         }
     }
 }

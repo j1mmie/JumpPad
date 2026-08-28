@@ -4,6 +4,8 @@ use iced_core::{
     InputMethod, Length, Padding, Pixels, Point, Rectangle, input_method, text,
 };
 
+use crate::line_numbers;
+
 use super::binding::{Binding, KeyPress};
 use super::content::Content;
 use super::geometry::clamp_scroll_multiplier;
@@ -55,9 +57,10 @@ pub struct TextEditor<
     /// Columns between tab stops, for drawing - see
     /// [`TextEditor::tab_width`].
     pub(super) tab_width: u16,
-    /// Whether a column of line numbers is drawn down the left - see
+    /// The column of line numbers down the left, and how much room it takes -
+    /// `None` for a document that isn't numbered. See
     /// [`TextEditor::line_numbers`].
-    pub(super) line_numbers: bool,
+    pub(super) line_numbers: Option<line_numbers::Sizing>,
     pub(super) class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     pub(super) key_binding:
@@ -100,7 +103,7 @@ where
             scroll_sensitivity: 1.0,
             drag_speed: 1.0,
             tab_width: crate::indent::DEFAULT_WIDTH,
-            line_numbers: false,
+            line_numbers: None,
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
@@ -255,12 +258,18 @@ where
         self
     }
 
-    /// Sets whether each line is numbered down the left of the document.
+    /// Numbers each line down the left of the document, in a column sized by
+    /// the given [`Sizing`]. `None` leaves it unnumbered.
     ///
     /// The numbers count the document, not the screen: a line long enough to
     /// wrap is numbered once, on the row it begins on. They take their room
     /// from the text, so turning them on rewraps whatever is open.
-    pub fn line_numbers(mut self, line_numbers: bool) -> Self {
+    ///
+    /// [`Sizing`]: line_numbers::Sizing
+    pub fn line_numbers(
+        mut self,
+        line_numbers: Option<line_numbers::Sizing>,
+    ) -> Self {
         self.line_numbers = line_numbers;
         self
     }

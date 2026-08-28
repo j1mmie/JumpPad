@@ -1308,6 +1308,26 @@ fn apply_config_reaches_the_shared_line_numbers() {
     assert_eq!(app.editor_config.line_numbers_alpha(), 0.2);
 }
 
+/// How much room the numbers take is a theme property like the rest of them,
+/// and the widget reads it as one value - `None` while the document isn't
+/// numbered at all.
+#[test]
+fn apply_config_reaches_the_shared_line_number_sizing() {
+    let mut app = test_app(1);
+    assert_eq!(app.editor_config.line_numbers_sizing(), None);
+
+    let _ = app.apply_config(config_with_theme(
+        "editor.line_numbers.enabled = true\n\
+         editor.line_numbers.min_width = 3.5\n\
+         editor.line_numbers.gap = 1.25",
+    ));
+
+    assert_eq!(
+        app.editor_config.line_numbers_sizing(),
+        Some(jumppad_textarea::LineNumberSizing::new(3.5, 1.25))
+    );
+}
+
 /// A theme that turns the numbers back off has to reach the open tabs too -
 /// a setter called only on the way up would leave them numbered for the rest
 /// of the session.

@@ -801,7 +801,7 @@ impl TextEditorWidget for TextArea {
             .scroll_sensitivity(self.settings.scroll_sensitivity())
             .drag_speed(self.settings.drag_speed())
             .tab_width(self.settings.indentation().width())
-            .line_numbers(self.settings.line_numbers())
+            .line_numbers(self.settings.line_numbers_sizing())
             .style(move |theme, status| {
                 editor_style(
                     theme,

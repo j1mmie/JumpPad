@@ -36,7 +36,7 @@ use crate::{drag_scroll, line_numbers};
 use binding::{Ime, Update};
 use geometry::{TextInset, scrollbar_layout, text_clip};
 use scroll_restore::shape_and_reveal;
-use state::{Focus, MeasuredColumn};
+use state::{Focus, MeasuredDigits};
 
 pub use binding::{Binding, KeyPress};
 pub use builder::{TextEditor, text_editor};
@@ -73,11 +73,13 @@ where
     /// document isn't numbered - or when the text area is too narrow to spare
     /// the room the numbers would take.
     ///
-    /// Answered from the state's own cache. The width is asked for at least
-    /// three times a frame - to wrap the text, to place a pointer in it, and
-    /// to draw it - and answering it means shaping a row of digits, which is
-    /// only worth doing again when the document has grown a digit or the face
-    /// it is drawn in has changed.
+    /// The digits are measured through the state's own cache. Their width is
+    /// asked for at least three times a frame - to wrap the text, to place a
+    /// pointer in it, and to draw it - and answering it means shaping a row
+    /// of digits, which is only worth doing again when the document has grown
+    /// a digit or the face it is drawn in has changed. Holding that width
+    /// against the theme's minimum and gap is arithmetic, and happens every
+    /// time, so a reload of either lands on the next frame.
     fn line_number_column(
         &self,
         state: &State<Highlighter>,
@@ -85,36 +87,34 @@ where
         line_count: usize,
         text_area_width: f32,
     ) -> Option<line_numbers::Column> {
-        if !self.line_numbers {
-            return None;
-        }
+        let sizing = self.line_numbers?;
 
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         let text_size =
             self.text_size.unwrap_or_else(|| renderer.default_size());
         let digits = line_numbers::Column::digits_for(line_count);
 
-        let column = match state.line_numbers.get() {
+        let width = match state.line_numbers.get() {
             Some(measured)
                 if measured.still_stands_for(digits, font, text_size.0) =>
             {
-                measured.column
+                measured.width
             }
             _ => {
-                let column = line_numbers::Column::new(
-                    digits,
-                    self.measure_digits(digits, font, text_size),
-                );
-                state.line_numbers.set(Some(MeasuredColumn {
+                let width = self.measure_digits(digits, font, text_size);
+                state.line_numbers.set(Some(MeasuredDigits {
                     digits,
                     font,
                     text_size: text_size.0,
-                    column,
+                    width,
                 }));
 
-                column
+                width
             }
         };
+
+        let column =
+            line_numbers::Column::new(digits, width, sizing, text_size.0);
 
         column.leaves_room_in(text_area_width).then_some(column)
     }
