@@ -6,6 +6,7 @@ mod history;
 mod indent;
 mod keybindings;
 mod line_edit;
+mod line_numbers;
 mod lines;
 mod safe_area;
 mod scrollbar;

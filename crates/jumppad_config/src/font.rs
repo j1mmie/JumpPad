@@ -52,3 +52,13 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 /// theme names one: fully solid, exactly what JumpPad drew before the setting
 /// existed.
 pub const DEFAULT_ALPHA: f32 = 1.0;
+
+/// Whether a theme that says nothing about line numbers shows them. Off, so
+/// a document looks exactly the way it did before the setting existed - and
+/// because the numbers are a code editor's habit, not a notepad's.
+pub const DEFAULT_LINE_NUMBERS_SHOWN: bool = false;
+
+/// How much of the document's text color the line numbers are drawn at when
+/// no theme names an alpha: enough to read, far enough back that the eye
+/// goes to the text first.
+pub const DEFAULT_LINE_NUMBERS_ALPHA: f32 = 0.45;

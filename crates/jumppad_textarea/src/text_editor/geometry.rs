@@ -1,7 +1,76 @@
 use iced::advanced::graphics;
 use iced_core::{Padding, Point, Rectangle, Vector, mouse};
 
-use crate::scrollbar;
+use crate::{line_numbers, scrollbar};
+
+/// How much of the widget sits above and to the left of its text: the
+/// padding, and the line numbers the padding's left edge is followed by.
+///
+/// Both together are the inset every coordinate in the text is measured
+/// against - the wrap width, the draw origin, a pointer's position, the
+/// scrollbar's track. They have to agree, or the text draws somewhere other
+/// than where clicking it lands.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct TextInset {
+    padding: Padding,
+    line_numbers: Option<line_numbers::Column>,
+}
+
+impl TextInset {
+    pub(super) fn new(
+        padding: Padding,
+        line_numbers: Option<line_numbers::Column>,
+    ) -> Self {
+        Self {
+            padding,
+            line_numbers,
+        }
+    }
+
+    /// The widget's padding with the numbers' room folded into its left
+    /// edge, which is what a position in the text is measured from.
+    pub(super) fn padding(&self) -> Padding {
+        Padding {
+            left: self.padding.left + self.line_numbers_width(),
+            ..self.padding
+        }
+    }
+
+    /// Everything inside the widget's own padding: the text, and the line
+    /// numbers beside it.
+    pub(super) fn inside(&self, bounds: Rectangle) -> Rectangle {
+        bounds.shrink(self.padding)
+    }
+
+    /// The rectangle the document's text alone is laid out and drawn in.
+    pub(super) fn text_bounds(&self, bounds: Rectangle) -> Rectangle {
+        let inside = self.inside(bounds);
+        let taken = self.line_numbers_width();
+
+        Rectangle {
+            x: inside.x + taken,
+            width: (inside.width - taken).max(0.0),
+            ..inside
+        }
+    }
+
+    /// Whether a position already measured from the text's own origin landed
+    /// on a line number rather than on a character. Only the numbers are to
+    /// the left of that origin at a negative offset this small - the padding
+    /// beyond them is further out still.
+    pub(super) fn is_on_line_numbers(&self, position: Point) -> bool {
+        (-self.line_numbers_width()..0.0).contains(&position.x)
+    }
+
+    /// The line numbers themselves, if the document is numbered.
+    pub(super) fn line_numbers(&self) -> Option<line_numbers::Column> {
+        self.line_numbers
+    }
+
+    pub(super) fn line_numbers_width(&self) -> f32 {
+        self.line_numbers.map_or(0.0, |column| column.width())
+    }
+}
 
 /// The scrollbar's geometry for wherever the document currently sits, or
 /// `None` if it has no line height to measure against yet. Read through the

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
 use iced::Font;
@@ -8,7 +8,7 @@ use crate::comment::CommentStyle;
 use crate::indent::Indentation;
 use crate::keybindings::KeyResolver;
 use crate::word::WordSeparators;
-use crate::{font, history};
+use crate::{font, history, text_editor};
 
 /// Editor settings the app can change after construction: a config reload
 /// writes here, and every open [`crate::TextArea`] reads through a shared
@@ -31,6 +31,11 @@ pub struct SharedEditorConfig {
     font: RwLock<Font>,
     /// `f32` bits, as above. Clamped by [`font::clamp_size`] on the way in.
     font_size: AtomicU32,
+    /// Whether documents are numbered down the left.
+    line_numbers: AtomicBool,
+    /// `f32` bits, as above. How far back from the document's text the line
+    /// numbers are drawn.
+    line_numbers_alpha: AtomicU32,
     /// `Arc` inside the lock so `view` clones a refcount out per redraw,
     /// not the whole resolver. Swappable because a `keybinds.toml` reload
     /// has to reach tabs that already exist.
@@ -60,6 +65,10 @@ impl SharedEditorConfig {
             undo_depth: AtomicUsize::new(history::DEFAULT_DEPTH),
             font: RwLock::new(Font::MONOSPACE),
             font_size: AtomicU32::new(font::DEFAULT_SIZE.to_bits()),
+            line_numbers: AtomicBool::new(false),
+            line_numbers_alpha: AtomicU32::new(
+                text_editor::DEFAULT_LINE_NUMBER_ALPHA.to_bits(),
+            ),
             resolver: RwLock::new(resolver),
             comment_styles: RwLock::new(Arc::new(HashMap::new())),
             indentation: RwLock::new(Indentation::default()),
@@ -130,6 +139,28 @@ impl SharedEditorConfig {
     pub fn set_font_size(&self, size: f32) {
         self.font_size
             .store(font::clamp_size(size).to_bits(), Ordering::Relaxed);
+    }
+
+    /// Whether each line is numbered down the left of the document. Off
+    /// until a theme asks for it.
+    pub fn line_numbers(&self) -> bool {
+        self.line_numbers.load(Ordering::Relaxed)
+    }
+
+    pub fn set_line_numbers(&self, line_numbers: bool) {
+        self.line_numbers.store(line_numbers, Ordering::Relaxed);
+    }
+
+    /// How much of the document's text color the line numbers are drawn at.
+    /// `1.0` would put them level with the text, which is the one thing a
+    /// gutter must not do.
+    pub fn line_numbers_alpha(&self) -> f32 {
+        f32::from_bits(self.line_numbers_alpha.load(Ordering::Relaxed))
+    }
+
+    pub fn set_line_numbers_alpha(&self, alpha: f32) {
+        self.line_numbers_alpha
+            .store(alpha.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
     /// Routed through here so settings have one mutation API, but stored in

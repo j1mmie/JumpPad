@@ -17,10 +17,13 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 pub use editor::{
-    EditorConfig, FilesConfig, HistoryConfig, SaveConflictResolution,
-    ScrollConfig, UiConfig,
+    EditorConfig, FilesConfig, HistoryConfig, LineNumbersConfig,
+    SaveConflictResolution, ScrollConfig, UiConfig,
 };
-pub use font::{FontConfig, DEFAULT_ALPHA, DEFAULT_FONT_SIZE};
+pub use font::{
+    FontConfig, DEFAULT_ALPHA, DEFAULT_FONT_SIZE, DEFAULT_LINE_NUMBERS_ALPHA,
+    DEFAULT_LINE_NUMBERS_SHOWN,
+};
 pub use gpu::{GpuConfig, GpuPower};
 pub use indentation::{
     IndentationConfig, IndentationStyle, WordsConfig,
@@ -36,8 +39,8 @@ pub use loader::{
     try_load, try_load_keybinds, ReloadError,
 };
 pub use theme::{
-    Appearance, Detection, ModeConfig, ResolvedFont, ResolvedTheme,
-    ThemeConfig, ThemeSlots,
+    Appearance, Detection, ModeConfig, ResolvedFont, ResolvedLineNumbers,
+    ResolvedTheme, ThemeConfig, ThemeSlots,
 };
 pub use window::{
     BackgroundConfig, Blur, ForegroundConfig, VisorConfig, WindowConfig,

@@ -43,6 +43,14 @@ foreground.alpha = 1.0
 background.blur = "none"
 editor.font.family = "Consolas"
 editor.font.size = 16.0
+# Numbers each line down the left of the document. Off unless a theme asks
+# for it. A line long enough to wrap is numbered once, on the row it starts
+# on - the numbers count the document, not the screen.
+editor.line_numbers.enabled = true
+# How much of the document's text color the numbers are drawn at, so they
+# read as a step back from it. The line the caret is on ignores this and
+# draws at full strength.
+editor.line_numbers.alpha = 0.45
 ui.font.family = "Comic Sans MS"
 
 # The two slots show `light` and `dark` unless `[mode]` names something else,

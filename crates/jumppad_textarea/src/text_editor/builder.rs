@@ -55,6 +55,9 @@ pub struct TextEditor<
     /// Columns between tab stops, for drawing - see
     /// [`TextEditor::tab_width`].
     pub(super) tab_width: u16,
+    /// Whether a column of line numbers is drawn down the left - see
+    /// [`TextEditor::line_numbers`].
+    pub(super) line_numbers: bool,
     pub(super) class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     pub(super) key_binding:
@@ -97,6 +100,7 @@ where
             scroll_sensitivity: 1.0,
             drag_speed: 1.0,
             tab_width: crate::indent::DEFAULT_WIDTH,
+            line_numbers: false,
             class: <Theme as Catalog>::default(),
             key_binding: None,
             on_edit: None,
@@ -251,6 +255,16 @@ where
         self
     }
 
+    /// Sets whether each line is numbered down the left of the document.
+    ///
+    /// The numbers count the document, not the screen: a line long enough to
+    /// wrap is numbered once, on the row it begins on. They take their room
+    /// from the text, so turning them on rewraps whatever is open.
+    pub fn line_numbers(mut self, line_numbers: bool) -> Self {
+        self.line_numbers = line_numbers;
+        self
+    }
+
     /// Highlights the [`TextEditor`] with the given [`Highlighter`] and
     /// a strategy to turn its highlights into some text format.
     pub fn highlight_with<H: text::Highlighter>(
@@ -277,6 +291,7 @@ where
             scroll_sensitivity: self.scroll_sensitivity,
             drag_speed: self.drag_speed,
             tab_width: self.tab_width,
+            line_numbers: self.line_numbers,
             class: self.class,
             key_binding: self.key_binding,
             on_edit: self.on_edit,
@@ -315,11 +330,13 @@ where
         self
     }
 
+    /// Takes the text's own rectangle rather than the widget's layout: it is
+    /// the caller that knows how much of the widget the line numbers took.
     pub(super) fn input_method<'b>(
         &self,
         state: &'b State<Highlighter>,
         renderer: &Renderer,
-        layout: iced_core::layout::Layout<'_>,
+        text_bounds: Rectangle,
     ) -> InputMethod<&'b str> {
         let Some(Focus {
             is_window_focused: true,
@@ -329,10 +346,8 @@ where
             return InputMethod::Disabled;
         };
 
-        let bounds = layout.bounds();
         let internal = self.content.0.borrow_mut();
 
-        let text_bounds = bounds.shrink(self.padding);
         let translation = text_bounds.position() - Point::ORIGIN;
 
         let cursor = match internal.editor.selection() {

@@ -31,7 +31,16 @@ pub struct Style {
     pub selection: Color,
     /// The fill of the auto-hiding scrollbar's thumb, at full opacity.
     pub scrollbar_thumb: Color,
+    /// The [`Color`] of the line numbers down the left, on every line but the
+    /// one the caret is on - that one is drawn in [`Self::value`], so the
+    /// caret's place in the document reads at a glance.
+    pub line_number: Color,
 }
+
+/// How much of the document's text color the line numbers are drawn at by
+/// default: enough to read, far enough back that the eye goes to the text
+/// first.
+pub const DEFAULT_LINE_NUMBER_ALPHA: f32 = 0.45;
 
 /// The theme catalog of a [`super::TextEditor`].
 pub trait Catalog: theme::Base {
@@ -75,6 +84,11 @@ pub fn default(theme: &Theme, status: Status) -> Style {
         value: palette.background.base.text,
         selection: palette.primary.weak.color,
         scrollbar_thumb: palette.background.strong.color,
+        line_number: palette
+            .background
+            .base
+            .text
+            .scale_alpha(DEFAULT_LINE_NUMBER_ALPHA),
     };
 
     match status {

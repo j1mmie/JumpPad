@@ -204,6 +204,7 @@ fn a_slot_naming_nothing_of_its_own_is_the_plain_palette_for_it() {
             background_blur: DEFAULT_BLUR,
             foreground_alpha: DEFAULT_ALPHA,
             editor_font: ResolvedFont::default(),
+            line_numbers: ResolvedLineNumbers::default(),
             ui_font: ResolvedFont::default(),
         }
     );
@@ -319,6 +320,7 @@ fn a_theme_takes_every_property_the_base_theme_names() {
                 family: Some("JetBrains Mono".to_string()),
                 size: 18.0,
             },
+            line_numbers: ResolvedLineNumbers::default(),
             ui_font: ResolvedFont {
                 family: Some("Inter".to_string()),
                 size: 13.0,
@@ -347,6 +349,55 @@ fn a_themes_own_property_beats_the_base_themes() {
     let theme = config.theme_for(Appearance::Dark);
     assert_eq!(theme.palette, "Dracula");
     assert_eq!(theme.editor_font.size, 21.0);
+}
+
+#[test]
+fn a_document_is_unnumbered_until_a_theme_asks_for_numbers() {
+    let numbers = Config::default().theme_for(Appearance::Dark).line_numbers;
+
+    assert!(!numbers.enabled);
+    assert_eq!(numbers.alpha, DEFAULT_LINE_NUMBERS_ALPHA);
+}
+
+/// Each leaf on its own, the way `editor.font` merges: a theme that only
+/// turns the numbers off has no business losing the base theme's alpha.
+#[test]
+fn a_theme_takes_the_line_numbers_it_does_not_name_from_the_base() {
+    let config = config(
+        r#"
+        [mode]
+        theme.dark = "mine"
+
+        [themes.base]
+        editor.line_numbers.enabled = true
+        editor.line_numbers.alpha = 0.3
+
+        [themes.mine]
+        editor.line_numbers.enabled = false
+        "#,
+    );
+
+    let numbers = config.theme_for(Appearance::Dark).line_numbers;
+    assert!(!numbers.enabled);
+    assert_eq!(numbers.alpha, 0.3);
+}
+
+/// The reason every leaf is an `Option`: a theme naming the value that
+/// happens to be JumpPad's own default still has to beat a base theme
+/// that named something else.
+#[test]
+fn a_theme_can_show_numbers_a_base_theme_turned_off() {
+    let config = config(
+        r#"
+        [themes.base]
+        editor.line_numbers.enabled = false
+
+        [themes.light]
+        editor.line_numbers.enabled = true
+        "#,
+    );
+
+    assert!(config.theme_for(Appearance::Light).line_numbers.enabled);
 }
 
 /// The reason every leaf is an `Option`: a theme naming the value that
@@ -911,6 +962,11 @@ fn the_sample_files_parse() {
     // taken out of it.
     assert!(!config.words.separators.contains('-'));
     assert!(config.words.separators.contains('.'));
+    // And again: the sample turns the line numbers on, which is not the
+    // default, so a renamed key would show up here.
+    let numbers = config.theme_for(Appearance::Dark).line_numbers;
+    assert!(numbers.enabled);
+    assert_eq!(numbers.alpha, 0.45);
     let _: KeybindsConfig =
         toml::from_str(include_str!("../../../config/keybinds.sample.toml"))
             .unwrap();

@@ -1000,6 +1000,64 @@ fn a_wrapped_documents_lines_really_do_wrap() {
     assert!(rows > Some(1), "line 100 should wrap, laid out as {rows:?}");
 }
 
+/// One number to a line, on the row the line begins on - which is the whole
+/// point of numbering a document rather than a screen.
+#[test]
+fn a_wrapped_line_is_numbered_once_on_the_row_it_begins_on() {
+    let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+    let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+    shape_wrapped(&mut editor, bounds);
+
+    let rows: Vec<_> = crate::line_numbers::rows(editor.buffer()).collect();
+    let numbered: Vec<usize> = rows
+        .iter()
+        .filter(|row| row.starts_line)
+        .map(|row| row.line)
+        .collect();
+    let on_screen: std::collections::BTreeSet<usize> =
+        rows.iter().map(|row| row.line).collect();
+
+    assert!(
+        rows.len() > numbered.len(),
+        "nothing on screen wrapped, so this proves nothing"
+    );
+    assert_eq!(
+        numbered,
+        on_screen.into_iter().collect::<Vec<_>>(),
+        "every line on screen should be numbered exactly once, in order"
+    );
+    assert!(
+        rows[0].starts_line,
+        "a view at the top of the document starts on a line, not inside one"
+    );
+}
+
+/// The rows above the top edge are dropped without a word, so the first row
+/// `layout_runs` yields is as likely to be a continuation as a beginning -
+/// and numbering it would put a number halfway down a paragraph.
+#[test]
+fn a_view_scrolled_into_a_wrapped_line_leaves_the_top_row_blank() {
+    let bounds = Size::new(400.0, VIEW_ROWS as f32 * LINE_HEIGHT);
+    let mut editor = graphics::text::Editor::with_text(&wrapped_text());
+    shape_wrapped(&mut editor, bounds);
+    editor.perform(Action::Scroll { lines: 1 });
+    shape_wrapped(&mut editor, bounds);
+
+    let scroll = editor.buffer().scroll();
+    assert_eq!(scroll.line, 0, "the view should still be inside line 0");
+    assert!(scroll.vertical > 0.0, "the view should be inside a line");
+
+    let top = crate::line_numbers::rows(editor.buffer())
+        .next()
+        .expect("a row on screen");
+
+    assert_eq!(top.line, 0);
+    assert!(
+        !top.starts_line,
+        "the top row is a row line 0 wrapped onto, and carries no number"
+    );
+}
+
 #[test]
 fn a_line_moved_down_a_wrapped_document_leaves_the_view_alone() {
     // The report: cursor anywhere inside the safe area, move the line,

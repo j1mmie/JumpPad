@@ -24,26 +24,28 @@ use iced_core::layout::{self, Layout};
 use iced_core::mouse;
 use iced_core::renderer;
 use iced_core::text::editor::Editor as _;
-use iced_core::text::{self, Text};
+use iced_core::text::{self, Paragraph as _, Text};
 use iced_core::widget::{self, Widget};
 use iced_core::window;
 use iced_core::{
     Background, Border, Element, Event, Length, Point, Rectangle, Shell, Size,
 };
 
-use crate::drag_scroll;
+use crate::{drag_scroll, line_numbers};
 
 use binding::{Ime, Update};
-use geometry::{scrollbar_layout, text_clip};
+use geometry::{TextInset, scrollbar_layout, text_clip};
 use scroll_restore::shape_and_reveal;
-use state::Focus;
+use state::{Focus, MeasuredColumn};
 
 pub use binding::{Binding, KeyPress};
 pub use builder::{TextEditor, text_editor};
 pub use content::Content;
 pub use scroll_restore::CapturedView;
 pub use state::State;
-pub use theme::{Catalog, Status, Style, StyleFn, default};
+pub use theme::{
+    Catalog, DEFAULT_LINE_NUMBER_ALPHA, Status, Style, StyleFn, default,
+};
 pub use text::editor::{
     Action, Cursor, Direction, Edit, Line, LineEnding, Motion, Position,
     Selection,
@@ -67,6 +69,174 @@ where
             .0
     }
 
+    /// The line-number column beside the document, or `None` when the
+    /// document isn't numbered - or when the text area is too narrow to spare
+    /// the room the numbers would take.
+    ///
+    /// Answered from the state's own cache. The width is asked for at least
+    /// three times a frame - to wrap the text, to place a pointer in it, and
+    /// to draw it - and answering it means shaping a row of digits, which is
+    /// only worth doing again when the document has grown a digit or the face
+    /// it is drawn in has changed.
+    fn line_number_column(
+        &self,
+        state: &State<Highlighter>,
+        renderer: &Renderer,
+        line_count: usize,
+        text_area_width: f32,
+    ) -> Option<line_numbers::Column> {
+        if !self.line_numbers {
+            return None;
+        }
+
+        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let text_size =
+            self.text_size.unwrap_or_else(|| renderer.default_size());
+        let digits = line_numbers::Column::digits_for(line_count);
+
+        let column = match state.line_numbers.get() {
+            Some(measured)
+                if measured.still_stands_for(digits, font, text_size.0) =>
+            {
+                measured.column
+            }
+            _ => {
+                let column = line_numbers::Column::new(
+                    digits,
+                    self.measure_digits(digits, font, text_size),
+                );
+                state.line_numbers.set(Some(MeasuredColumn {
+                    digits,
+                    font,
+                    text_size: text_size.0,
+                    column,
+                }));
+
+                column
+            }
+        };
+
+        column.leaves_room_in(text_area_width).then_some(column)
+    }
+
+    /// How wide `digits` digits draw in the document's own face. Zeros
+    /// because they are the widest digit in most faces and the same width as
+    /// every other one in the rest, which is what lets one measurement stand
+    /// for every number of that length.
+    fn measure_digits(
+        &self,
+        digits: u32,
+        font: iced_core::Font,
+        text_size: iced_core::Pixels,
+    ) -> f32 {
+        Renderer::Paragraph::with_text(Text {
+            content: "0".repeat(digits as usize).as_str(),
+            bounds: Size::INFINITE,
+            size: text_size,
+            line_height: self.line_height,
+            font,
+            align_x: text::Alignment::Default,
+            align_y: alignment::Vertical::Top,
+            shaping: text::Shaping::Basic,
+            wrapping: text::Wrapping::None,
+        })
+        .min_bounds()
+        .width
+    }
+
+    /// How much of `bounds` sits above and to the left of the document's own
+    /// text - see [`TextInset`], which is where every coordinate in the text
+    /// is measured from.
+    fn text_inset(
+        &self,
+        state: &State<Highlighter>,
+        renderer: &Renderer,
+        bounds: Rectangle,
+    ) -> TextInset {
+        TextInset::new(
+            self.padding,
+            self.line_number_column(
+                state,
+                renderer,
+                self.content.line_count(),
+                bounds.shrink(self.padding).width,
+            ),
+        )
+    }
+
+    /// The numbers themselves, right-aligned down the left of everything
+    /// inside the widget's padding - whose top edge the text shares, so a
+    /// row's own offset places its number without any further arithmetic.
+    ///
+    /// One number to a line rather than one to a row: a line long enough to
+    /// wrap is numbered on the row it begins on and left blank down the rows
+    /// it wrapped onto, so the numbers count the document rather than the
+    /// screen. The line the caret is on is drawn at full strength, which is
+    /// how the eye finds its place again after looking away.
+    ///
+    /// Nothing at all when the document isn't numbered.
+    ///
+    /// Drawn inside a layer of their own, and that is what clips them. The
+    /// rows the top and bottom edges cut through are drawn whole - that is
+    /// what scrolling by pixels means - so the overhang has to be masked off
+    /// or it lands on whatever the widget sits under (see [`text_clip`], and
+    /// AGENTS.md for what that costs on Windows). `fill_text` cannot do it:
+    /// the software renderer measures a `Text` it is handed against the
+    /// *layer* it is in rather than against the clip it was given, so a clip
+    /// passed here alone would be read as advice and ignored. A layer a
+    /// sliver shorter than the numbers may paint is what it does act on.
+    fn draw_line_numbers(
+        &self,
+        renderer: &mut Renderer,
+        editor: &graphics::text::Editor,
+        style: &Style,
+        inset: TextInset,
+        bounds: Rectangle,
+    ) {
+        let Some(column) = inset.line_numbers() else {
+            return;
+        };
+
+        let font = self.font.unwrap_or_else(|| renderer.default_font());
+        let text_size =
+            self.text_size.unwrap_or_else(|| renderer.default_size());
+        let caret_line = editor.cursor().position.line;
+        let inside = inset.inside(bounds);
+
+        renderer.with_layer(text_clip(inside), |renderer| {
+            for row in line_numbers::rows(editor.buffer())
+                .filter(|row| row.starts_line)
+            {
+                let color = if row.line == caret_line {
+                    style.value
+                } else {
+                    style.line_number
+                };
+
+                let number = (row.line + 1).to_string();
+                let left =
+                    column.number_left_edge(number.len() as u32, inside.x);
+
+                renderer.fill_text(
+                    Text {
+                        content: number,
+                        bounds: Size::new(column.width(), row.height),
+                        size: text_size,
+                        line_height: self.line_height,
+                        font,
+                        align_x: text::Alignment::Default,
+                        align_y: alignment::Vertical::Top,
+                        shaping: text::Shaping::Basic,
+                        wrapping: text::Wrapping::None,
+                    },
+                    Point::new(left, inside.y + row.top),
+                    color,
+                    inside,
+                );
+            }
+        });
+    }
+
     /// The text a selection drag is walking over: the rows it is scrolling,
     /// where the top edge is cutting through them, and the speed the config
     /// asks for.
@@ -88,15 +258,24 @@ where
     }
 
     /// The scrollbar's geometry against the widget's laid-out bounds.
+    ///
+    /// Measured against the text rather than the whole widget, so the rows it
+    /// counts are the rows the text actually wraps to once the line-number
+    /// column has taken its room. The track keeps the right edge either way -
+    /// the column takes from the left.
     fn scrollbar(
         &self,
-        state: &crate::scrollbar::State,
+        state: &State<Highlighter>,
         layout: Layout<'_>,
+        renderer: &Renderer,
         width: f32,
     ) -> Option<crate::scrollbar::Layout> {
-        let text_bounds = layout.bounds().shrink(self.padding);
+        let text_bounds = self
+            .text_inset(state, renderer, layout.bounds())
+            .text_bounds(layout.bounds());
+
         scrollbar_layout(
-            state,
+            &state.scrollbar,
             &self.content.0.borrow().editor,
             text_bounds,
             width,
@@ -105,17 +284,37 @@ where
 
     fn is_over_thumb(
         &self,
-        state: &crate::scrollbar::State,
+        state: &State<Highlighter>,
         layout: Layout<'_>,
+        renderer: &Renderer,
         cursor: mouse::Cursor,
         width: f32,
     ) -> bool {
         let Some(position) = cursor.position() else {
             return false;
         };
-        self.scrollbar(state, layout, width)
+        self.scrollbar(state, layout, renderer, width)
             .and_then(|scrollbar| scrollbar.thumb)
             .is_some_and(|thumb| thumb.contains(position))
+    }
+
+    /// Whether the pointer is on the line numbers rather than on the text -
+    /// the strip between the widget's own left padding and the first
+    /// character of every line.
+    fn is_over_line_numbers(
+        &self,
+        state: &State<Highlighter>,
+        layout: Layout<'_>,
+        renderer: &Renderer,
+        cursor: mouse::Cursor,
+    ) -> bool {
+        let bounds = layout.bounds();
+        let inset = self.text_inset(state, renderer, bounds);
+
+        cursor.is_over(Rectangle {
+            width: inset.line_numbers_width(),
+            ..inset.inside(bounds)
+        })
     }
 
     /// Carries a selection drag held past the top or bottom edge of the text
@@ -242,6 +441,7 @@ where
             selection_drag: None,
             partial_scroll: 0.0,
             scrollbar: crate::scrollbar::State::default(),
+            line_numbers: std::cell::Cell::default(),
             last_theme: std::cell::RefCell::default(),
             highlighter: std::cell::RefCell::new(Highlighter::new(
                 &self.highlighter_settings,
@@ -264,7 +464,6 @@ where
         renderer: &Renderer,
         limits: &layout::Limits,
     ) -> iced_core::layout::Node {
-        let mut internal = self.content.0.borrow_mut();
         let state = tree.state.downcast_mut::<State<Highlighter>>();
 
         if state.highlighter_format_address != self.highlighter_format as usize
@@ -289,7 +488,25 @@ where
             .min_height(self.min_height)
             .max_height(self.max_height);
 
-        let text_bounds = limits.shrink(self.padding).max();
+        // Before the document is borrowed: measuring the column reads the
+        // line count off it, and shaping below holds it mutably.
+        let inside = limits.shrink(self.padding).max();
+        let column = self.line_number_column(
+            state,
+            renderer,
+            self.content.line_count(),
+            inside.width,
+        );
+
+        let mut internal = self.content.0.borrow_mut();
+
+        // The column takes its room out of the width the text wraps at, so a
+        // numbered document wraps where it draws.
+        let text_bounds = Size {
+            width: column
+                .map_or(inside.width, |column| column.text_width(inside.width)),
+            ..inside
+        };
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         let text_size =
             self.text_size.unwrap_or_else(|| renderer.default_size());
@@ -413,9 +630,10 @@ where
         // The scrollbar gets first look at the pointer, so a press on the
         // thumb never also lands as a click in the document.
         let now = iced_core::time::Instant::now();
-        let text_bounds = layout.bounds().shrink(self.padding);
+        let inset = self.text_inset(state, renderer, layout.bounds());
+        let text_bounds = inset.text_bounds(layout.bounds());
         let width = state.scrollbar.width(now);
-        let scrollbar = self.scrollbar(&state.scrollbar, layout, width);
+        let scrollbar = self.scrollbar(state, layout, renderer, width);
 
         if let Some(redrawing_at) = redrawing_at {
             if let Some(scrollbar) = scrollbar {
@@ -493,7 +711,7 @@ where
             event,
             state,
             layout.bounds(),
-            self.padding,
+            inset,
             cursor,
             self.scroll_sensitivity,
             self.key_binding.as_deref(),
@@ -517,6 +735,25 @@ where
                             });
 
                     shell.publish(on_edit(action));
+                    shell.capture_event();
+                }
+                Update::SelectLineAt(position) => {
+                    state.focus = Some(Focus::now());
+                    // A press on a number is not a click in the text, so it
+                    // ends whatever multi-click run was in progress rather
+                    // than counting toward the next one.
+                    state.last_click = None;
+                    state.selection_drag =
+                        Some(drag_scroll::Drag::new(position, now));
+
+                    // The click puts the caret on the line pressed, and
+                    // `SelectLine` takes the whole of it - whole logical
+                    // lines, so a wrapped line comes as one. The drag that
+                    // follows goes through the ordinary path: cosmic-text
+                    // holds a line selection at line granularity, so it
+                    // keeps taking whole lines however far it is dragged.
+                    shell.publish(on_edit(Action::Click(position)));
+                    shell.publish(on_edit(Action::SelectLine));
                     shell.capture_event();
                 }
                 Update::Drag(position) => {
@@ -703,7 +940,7 @@ where
             self.last_status = Some(status);
 
             shell.request_input_method(
-                &self.input_method(state, renderer, layout),
+                &self.input_method(state, renderer, text_bounds),
             );
         } else if self
             .last_status
@@ -725,8 +962,13 @@ where
     ) {
         let bounds = layout.bounds();
 
-        let mut internal = self.content.0.borrow_mut();
         let state = tree.state.downcast_ref::<State<Highlighter>>();
+
+        // Before the document is borrowed, the same as in `layout`: measuring
+        // the line numbers reads the line count off it.
+        let inset = self.text_inset(state, renderer, bounds);
+
+        let mut internal = self.content.0.borrow_mut();
 
         let font = self.font.unwrap_or_else(|| renderer.default_font());
 
@@ -761,7 +1003,7 @@ where
             style.background,
         );
 
-        let text_bounds = bounds.shrink(self.padding);
+        let text_bounds = inset.text_bounds(bounds);
 
         if internal.editor.is_empty() {
             if let Some(placeholder) = self.placeholder.clone() {
@@ -792,6 +1034,14 @@ where
                 text_clip(text_bounds),
             );
         }
+
+        self.draw_line_numbers(
+            renderer,
+            &internal.editor,
+            &style,
+            inset,
+            bounds,
+        );
 
         let translation = text_bounds.position() - Point::ORIGIN;
 
@@ -878,7 +1128,7 @@ where
         layout: Layout<'_>,
         cursor: mouse::Cursor,
         _viewport: &Rectangle,
-        _renderer: &Renderer,
+        renderer: &Renderer,
     ) -> mouse::Interaction {
         let is_disabled = self.on_edit.is_none();
         let state = tree.state.downcast_ref::<State<Highlighter>>();
@@ -887,7 +1137,7 @@ where
         // An I-beam over the thumb would suggest the text underneath is what
         // the click lands on, and it isn't.
         if state.scrollbar.is_dragging()
-            || self.is_over_thumb(&state.scrollbar, layout, cursor, width)
+            || self.is_over_thumb(state, layout, renderer, cursor, width)
         {
             return mouse::Interaction::Idle;
         }
@@ -895,6 +1145,11 @@ where
         if cursor.is_over(layout.bounds()) {
             if is_disabled {
                 mouse::Interaction::NotAllowed
+            } else if self.is_over_line_numbers(state, layout, renderer, cursor)
+            {
+                // Same reason as the thumb: a press on a number takes the
+                // whole line, it doesn't put a caret between two characters.
+                mouse::Interaction::default()
             } else {
                 mouse::Interaction::Text
             }
