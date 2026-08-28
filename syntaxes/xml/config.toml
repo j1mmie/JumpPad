@@ -1,0 +1,4 @@
+name = "XML"
+extensions = ["xml", "xsl", "xsd", "svg"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"

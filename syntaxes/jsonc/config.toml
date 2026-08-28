@@ -1,0 +1,8 @@
+# Highlighted by the json grammar - the comments JSONC adds are this
+# language's own business, not a different parser's.
+
+name = "JSONC"
+syntax = "json"
+extensions = ["jsonc"]
+comment.multi.left = "/*"
+comment.multi.right = "*/"

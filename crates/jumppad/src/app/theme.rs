@@ -3,9 +3,9 @@ use super::*;
 /// Mirror of `build_editor_overrides` for comment styles - built here so
 /// `jumppad_textarea` doesn't need to depend on `jumppad_config`.
 pub(super) fn build_comment_styles(
-    config: &jumppad_config::Config,
+    languages: &jumppad_config::Languages,
 ) -> HashMap<String, jumppad_textarea::CommentStyle> {
-    config
+    languages
         .comment_styles_by_extension()
         .into_iter()
         .map(|(extension, style)| {

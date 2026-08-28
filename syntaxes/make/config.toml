@@ -1,0 +1,4 @@
+name = "Make"
+extensions = ["mk"]
+aliases = ["makefile"]
+comment.single = "# "

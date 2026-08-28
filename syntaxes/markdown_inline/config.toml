@@ -1,0 +1,6 @@
+# Never opened directly - Markdown injects it to color links, emphasis and
+# code spans, which its block-level grammar leaves bare. No extensions is
+# what says so.
+
+name = "Markdown (inline)"
+extensions = []

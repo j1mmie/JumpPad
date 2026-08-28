@@ -1,0 +1,4 @@
+name = "HTML"
+extensions = ["htm", "html", "xhtml"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"

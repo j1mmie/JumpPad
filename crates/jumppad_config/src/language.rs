@@ -1,14 +1,37 @@
 use serde::{Deserialize, Serialize};
 
-/// One `[[languages]]` entry: file extensions plus an optional grammar and
-/// an optional toggle-comment style. `name` is for the file's readability.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// One language's settings: the file extensions it covers, the grammar that
+/// highlights them, the names it answers to inside a fenced code block, and
+/// how its comments are written.
+///
+/// The same shape is read from two places. A bundled
+/// `syntaxes/<grammar>/config.toml` ships a language's defaults, and a
+/// `[[languages]]` entry in the user's `config.toml` patches them by `name`.
+/// Every field but `name` is optional so a patch can name the one setting it
+/// wants to change and leave the rest of the bundle's alone - an absent field
+/// means "keep the bundled value", not "clear it".
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LanguageConfig {
+    /// What a user entry and a bundle are matched on, ignoring case. Also
+    /// what the language is called anywhere JumpPad names it.
     pub name: String,
-    /// The `<syntax>.wasm` grammar these extensions highlight with.
+    /// The grammar directory under `syntaxes/` these extensions highlight
+    /// with. A bundle that leaves this out is named by its own directory.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub syntax: Option<String>,
-    pub extensions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Vec<String>>,
+    /// The names this language answers to in a Markdown fence's info string
+    /// (` ```js ` finding the `javascript` grammar). The grammar's own name
+    /// always works and needs no entry here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<Vec<String>>,
+    /// The symbol the `.wasm` exports its parser under, when it isn't
+    /// `tree_sitter_<syntax>` - the escape hatch for a grammar built
+    /// elsewhere under a name that doesn't match its directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comment: Option<CommentSyntax>,
 }

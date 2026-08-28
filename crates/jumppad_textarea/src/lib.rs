@@ -33,7 +33,6 @@ pub use text_editor::KeyPress;
 // them bound here by name, the same way it needs everything else in this
 // file (same pattern as the `jumppad_config` and `app.rs` splits).
 #[cfg(test)]
-use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::Arc;
 

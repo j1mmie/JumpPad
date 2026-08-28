@@ -1,0 +1,4 @@
+name = "C++"
+extensions = ["cpp", "hpp", "cc", "hh", "cxx"]
+aliases = ["c++"]
+comment.single = "// "

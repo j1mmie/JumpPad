@@ -1,0 +1,4 @@
+name = "JavaScript"
+extensions = ["js", "mjs", "cjs", "jsx"]
+aliases = ["node"]
+comment.single = "// "

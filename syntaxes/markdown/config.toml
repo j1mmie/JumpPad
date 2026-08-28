@@ -1,0 +1,5 @@
+# Needs the markdown_inline, yaml, toml and html bundles beside it: everything
+# inline, both flavors of frontmatter, and embedded HTML come from those.
+
+name = "Markdown"
+extensions = ["md", "markdown", "mdown", "mkdn", "mkd", "mdwn", "mdtxt", "mdtext"]

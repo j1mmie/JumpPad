@@ -200,6 +200,12 @@ pub struct JumpPadApp {
     /// The config in effect - the baseline `apply_config` diffs a reloaded
     /// file against.
     config: jumppad_config::Config,
+    /// The bundles under `syntaxes/` with `config.languages` patched over
+    /// them - what every extension and comment-style lookup actually reads.
+    languages: jumppad_config::Languages,
+    /// Where those bundles were found, kept so a config reload can resolve
+    /// them again against the file it just read.
+    grammar_search_dirs: Vec<PathBuf>,
     /// Same, for `apply_keybinds`.
     keybinds: jumppad_config::KeybindsConfig,
     /// Editor settings shared with every open tab's `TextArea` - the handle
@@ -465,7 +471,9 @@ impl JumpPadApp {
             Task::done(Message::OpenPaths(paths))
         };
         let search_dirs = crate::grammar_paths::default_search_dirs();
-        crate::grammar_paths::log_wasm_files_found(&search_dirs);
+        let languages =
+            jumppad_config::Languages::resolve(&config.languages, &search_dirs);
+        crate::grammar_paths::log_bundles_found(&search_dirs, &languages);
         // No push-based wake-up needed (unlike egui's `ctx.request_repaint()`) -
         // the highlighting-poll subscription below re-checks periodically instead.
         let keybinds = jumppad_config::load_keybinds();
@@ -483,15 +491,15 @@ impl JumpPadApp {
         editor_config.set_drag_speed(config.scroll.drag_speed);
         editor_config.set_undo_depth(config.history.depth);
         editor_config
-            .set_comment_styles(theme::build_comment_styles(&config));
+            .set_comment_styles(theme::build_comment_styles(&languages));
         editor_config.set_indentation(theme::build_indentation(&config));
         editor_config.set_word_separators(
             jumppad_textarea::WordSeparators::new(&config.words.separators),
         );
 
         let registry = syntax_registry::SyntaxRegistry::new(
-            search_dirs,
-            config.extension_to_grammar(),
+            search_dirs.clone(),
+            crate::grammar_paths::grammar_lookup(&languages),
             || {},
         );
         // Which `TextEditorWidget` implementation new tabs are created with.
@@ -524,6 +532,8 @@ impl JumpPadApp {
         };
 
         let mut app = Self {
+            languages,
+            grammar_search_dirs: search_dirs,
             tabs: Vec::new(),
             active: 0,
             next_id: 0,

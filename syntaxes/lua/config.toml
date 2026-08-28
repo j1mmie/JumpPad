@@ -1,0 +1,3 @@
+name = "Lua"
+extensions = ["lua"]
+comment.single = "-- "

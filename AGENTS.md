@@ -112,7 +112,7 @@ crates/
   jumppad_config/    config.toml loading + defaults; no iced dependency
   jumppad_actions/   every action the product can perform; NO dependencies at all
   jumppad_keybinds/  default key chords, mapping presses onto actions
-syntaxes/            *.wasm grammar files + *.injections.scm queries (see below)
+syntaxes/<grammar>/  one bundle per language: config.toml + syntax.wasm + injections.scm
 ```
 
 Dependency direction is one-way: `jumppad` depends on everything;
@@ -869,6 +869,27 @@ the caret moved in between. Left as-is.
 
 ## Syntax highlighting (`syntax_registry`)
 
+- **A language is a directory.** `syntaxes/<grammar>/` holds a `config.toml`
+  (extensions, comment style, fence aliases), the `syntax.wasm` that
+  highlights them, and an `injections.scm` if the grammar embeds others. The
+  directory name *is* the grammar name, and it is load-bearing in two
+  directions: an injection query names its targets by it
+  (`injection.language "markdown_inline"` finds `syntaxes/markdown_inline`),
+  and the wasm is loaded under `tree_sitter_<directory>` unless the config
+  names a `symbol`. Renaming a directory renames the grammar, silently.
+- **The `.wasm` file name carries nothing.** `WasmStore::load_language` takes
+  bytes and a symbol; the path never reaches wasmtime. Hence `syntax.wasm`
+  for every bundle.
+- **Bundles are the defaults; `[[languages]]` is a patch over them**
+  (`jumppad_config::Languages::merge`). A user entry is matched to a bundle
+  by `name` ignoring case and overrides only the fields it names, so
+  changing one language's extensions doesn't cost it its comment style. A
+  named list *replaces* rather than appends. An entry matching no bundle is
+  a new language, appended last so it wins any extension it contests.
+- **A bundle needs no `.wasm`, and a language needs no extensions.** Rust and
+  Python ship `config.toml` alone - comment toggling with no grammar behind
+  it. `markdown_inline` ships `extensions = []` - a grammar only ever
+  reached through an injection, never by opening a file.
 - Grammars are tree-sitter parsers compiled to WASM, run through
   `wasmtime` - not loaded as native shared libraries. This trades some
   speed for sandboxing untrusted grammar code and for being trivially
@@ -882,8 +903,24 @@ the caret moved in between. Left as-is.
 - Grammars are cached and refcounted by *grammar name*, not file
   extension (`yaml`/`yml` share one grammar). Dropping the last `Handle`
   referencing a grammar evicts it. Injection targets (e.g. embedded YAML
-  inside Markdown, via `<grammar>.injections.scm`) are just more grammars
+  inside Markdown, via `<grammar>/injections.scm`) are just more grammars
   acquired recursively through the same path.
+- **Two kinds of injection, resolved at different times.** Most patterns name
+  their language outright (`(#set! injection.language "yaml")`) and are
+  acquired when the injecting grammar loads. A Markdown code fence instead
+  captures the name out of the document (` ```rust `), which can only be read
+  while highlighting - `Grammar::fence_language` acquires those on first
+  sight and remembers them, misses included. Only names in
+  `GrammarLookup::by_fence_language` are tried at all: a document full of
+  fences in languages nobody ships must not cost a loader thread each.
+- **Gotcha - a grammar can inject itself.** A ```markdown fence inside a
+  Markdown file resolves to the very grammar part-way through parsing it,
+  and recursing would re-enter a parser this thread already holds -
+  `Mutex` is not reentrant, so it hangs rather than failing. `grammar.rs`
+  keeps a thread-local of the grammars currently being highlighted and skips
+  an injection into any of them, which also covers a longer cycle between
+  two grammars' queries. That fence goes uncolored; the alternative was a
+  deadlock.
 - **Gotcha - an injection target loads *after* the grammar that injects
   it,** so a grammar going `Ready` is not the end of the story. Markdown is
   the visible case: `markdown.wasm` resolves first and colors headings and
@@ -962,8 +999,9 @@ two `[[bin]]` entries). This produces two binaries from the same
 Each `[[bin]]` has `required-features` set to the matching Cargo feature,
 so plain `cargo build`/`cargo run` (default features) only ever touches
 `jumppad`; building `jumppad-gpu` requires
-`--no-default-features --features wgpu` explicitly (see
-`scripts/build-release.sh`/`.ps1`). Since only one backend is ever
+`--no-default-features --features wgpu` explicitly (see the build commands
+in `README.md`, or the `run_*_gpu` aliases in `.cargo/config.toml`). Since
+only one backend is ever
 compiled into a given binary, there's no `ICED_BACKEND` env var or other
 runtime selection to worry about - `iced_renderer` picks its `Renderer`
 type solely from which feature(s) are active (both features enabled at
@@ -2428,17 +2466,20 @@ the compositor compares, and `a_theme_change_repaints_the_editor` in
 executable first, then `./syntaxes` for `cargo run` convenience -
 mirroring `config_paths()`'s search order in `jumppad_config`.
 
-`syntaxes/` is gitignored, not committed - these are compiled binaries
-built from *other projects'* tree-sitter grammar sources, not something
-derived from code in this repo. Run `./scripts/build-grammars.sh` (needs
-`git` and `npx`) to populate it: it clones each upstream grammar repo
-listed in the script and compiles it with `tree-sitter build --wasm`. If
-a grammar ever needs updating (new file type, upstream fix), edit that
-script rather than hand-placing a `.wasm` file.
+Each `syntaxes/<grammar>/config.toml` is committed; the `syntax.wasm` and
+`injections.scm` beside it are gitignored, because those are compiled from
+*other projects'* tree-sitter grammar sources rather than derived from code
+in this repo. Run `cargo build_grammars` (needs `git` and Node) to produce
+them: `crates/grammar_builder` clones each upstream repo in its `GRAMMARS`
+table, compiles it with `tree-sitter build --wasm`, and assembles
+`syntaxes/output` - every bundle together, the folder to ship. If a grammar
+ever needs updating (new file type, upstream fix), edit that table rather
+than hand-placing a `.wasm` file; a new language needs a `config.toml`
+first, which the builder refuses to build without.
 
 The app still starts and runs fine with `syntaxes/` empty or missing
-entirely (see `log_wasm_files_found` in `app.rs`) - it just opens files
-unhighlighted, consistent with "highlighters are optional" in
+entirely (see `log_bundles_found` in `grammar_paths.rs`) - it just opens
+files unhighlighted, consistent with "highlighters are optional" in
 `README.md`. Don't mistake that startup diagnostic for a real error;
 only chase it if highlighting is actually expected to be working.
 

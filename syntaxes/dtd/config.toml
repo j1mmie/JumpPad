@@ -1,0 +1,4 @@
+name = "DTD"
+extensions = ["dtd"]
+comment.multi.left = "<!--"
+comment.multi.right = "-->"
