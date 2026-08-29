@@ -789,6 +789,7 @@ impl TextEditorWidget for TextArea {
         let resolve = self.settings.resolver();
         let background_alpha = self.settings.background_alpha();
         let foreground_alpha = foreground_alpha();
+        let line_numbers_alpha = self.settings.line_numbers_alpha();
         text_editor::text_editor(&self.content)
             .id(iced::advanced::widget::Id::new(
                 editor_core::EDITOR_WIDGET_ID,
@@ -800,8 +801,15 @@ impl TextEditorWidget for TextArea {
             .scroll_sensitivity(self.settings.scroll_sensitivity())
             .drag_speed(self.settings.drag_speed())
             .tab_width(self.settings.indentation().width())
+            .line_numbers(self.settings.line_numbers_padding())
             .style(move |theme, status| {
-                editor_style(theme, status, background_alpha, foreground_alpha)
+                editor_style(
+                    theme,
+                    status,
+                    background_alpha,
+                    foreground_alpha,
+                    line_numbers_alpha,
+                )
             })
             .highlight_with::<TreeSitterHighlighter>(settings, to_format)
             .key_binding(move |press| key_binding(press, resolve.as_ref()))

@@ -1293,6 +1293,57 @@ fn apply_config_reaches_the_shared_text_size() {
     assert_eq!(app.editor_config.font(), Font::MONOSPACE);
 }
 
+/// A theme property, so it takes the same road as the font - and an OS
+/// light/dark switch carries it as readily as a config reload does.
+#[test]
+fn apply_config_reaches_the_shared_line_numbers() {
+    let mut app = test_app(1);
+    assert!(!app.editor_config.line_numbers(), "on before anyone asked");
+
+    let _ = app.apply_config(config_with_theme(
+        "editor.line_numbers.enabled = true\neditor.line_numbers.alpha = 0.2",
+    ));
+
+    assert!(app.editor_config.line_numbers());
+    assert_eq!(app.editor_config.line_numbers_alpha(), 0.2);
+}
+
+/// The blank either side of the numbers is a theme property like the rest of
+/// them, and the widget reads it as one value - `None` while the document
+/// isn't numbered at all.
+#[test]
+fn apply_config_reaches_the_shared_line_number_padding() {
+    let mut app = test_app(1);
+    assert_eq!(app.editor_config.line_numbers_padding(), None);
+
+    let _ = app.apply_config(config_with_theme(
+        "editor.line_numbers.enabled = true\n\
+         editor.line_numbers.padding.left = 3.5\n\
+         editor.line_numbers.padding.right = 1.25",
+    ));
+
+    assert_eq!(
+        app.editor_config.line_numbers_padding(),
+        Some(jumppad_textarea::LineNumberPadding::new(3.5, 1.25))
+    );
+}
+
+/// A theme that turns the numbers back off has to reach the open tabs too -
+/// a setter called only on the way up would leave them numbered for the rest
+/// of the session.
+#[test]
+fn apply_config_turns_the_line_numbers_back_off() {
+    let mut app = test_app(1);
+    let _ = app
+        .apply_config(config_with_theme("editor.line_numbers.enabled = true"));
+    assert!(app.editor_config.line_numbers());
+
+    let _ = app
+        .apply_config(config_with_theme("editor.line_numbers.enabled = false"));
+
+    assert!(!app.editor_config.line_numbers());
+}
+
 #[test]
 fn an_unreadable_configured_text_size_is_clamped_not_obeyed() {
     let mut app = test_app(1);

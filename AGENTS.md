@@ -654,6 +654,87 @@ saying it is unchanged when it isn't, once by saying it fits inside bounds it
 paints past. That crate is already in the patch set, so bounds that cover what
 is actually painted would retire `text_clip` outright.
 
+### The line numbers
+
+Off unless a theme turns them on (`editor.line_numbers.enabled`), and drawn
+by the editor widget itself rather than by anything beside it. They have to
+be: which logical line a row belongs to, where that row sits after a
+sub-pixel scroll, and where the text wraps all live on the cosmic-text
+buffer behind `Content`, which is the whole reason this fork exists.
+
+**The numbers count the document, not the screen.** A line long enough to
+wrap is numbered once, on the row it begins on; the rows it wrapped onto are
+blank. `line_numbers::rows` is the walk that decides which is which, over
+`Buffer::layout_runs` - the same iterator the scrollbar reads, and the reason
+only the rows on screen are ever considered however long the document is.
+
+**The first row on screen is the awkward one.** `layout_runs` starts at the
+line the view is scrolled into and drops that line's earlier rows without
+saying how many, so the row it yields first is as likely to be a
+continuation as a beginning, and there is no row before it to compare
+against. What settles it is the scroll itself: the first row of that line is
+the one sitting exactly `scroll().vertical` above the text.
+`a_view_scrolled_into_a_wrapped_line_leaves_the_top_row_blank` pins it, and
+it has to shape with `Wrapping::Word` to mean anything - see the warning
+above about tests that shape flat.
+
+**The column is an inset, not a widget.** `geometry::TextInset` holds the
+padding and the numbers together, and everything that has to agree about
+where the text is goes through it: the width the text wraps at, the origin
+it draws from, a pointer's position in it, the scrollbar's track. Splitting
+those apart is how the text ends up drawing somewhere other than where
+clicking it lands.
+
+**How wide it is, is a measurement plus a padding either side.** The
+measurement is a row of zeros shaped in the document's own face - a digit's
+width is the typeface's business - cached on the widget's `State` against the
+digit count, the font and the text size, since it is asked for three times a
+frame and shaping it each time is not free. `line_numbers::Padding` is the
+other half: `editor.line_numbers.padding.left` and `.right`, in
+**characters**, where a character is that same measured digit. So the column
+is `left + digits + right` characters, and no text size comes into it - the
+face settles the whole thing. A proportional face has no one character width
+to speak of, which is why the digit stands in for it and the spacing there is
+a fair guess rather than an exact one.
+
+**Nothing floors the digit count.** The column follows the number of digits,
+so a document's text shifts sideways by a character the first time it passes
+9 lines, then 99. There was a three-digit floor for exactly that reason and it
+was taken out deliberately; put it back only on the owner's say-so.
+
+**The cache holds the measurement, not the finished `Column`.** Holding the
+column instead would mean a `config.toml` reload of either padding going
+unnoticed until the font or the digit count happened to move. Rebuilding the
+column per call is two multiplies.
+
+**Two things about drawing them that look arbitrary and are not:**
+
+- **They get a layer of their own.** `fill_editor` and `fill_paragraph` both
+  honour the clip they are handed; `fill_text` does not - `iced_tiny_skia`
+  measures a `Text` against the *layer* it is in and treats the clip as a
+  description of where it already is (`Text::Cached` in
+  `tiny_skia/src/engine.rs`). So the overhang that "Clipping the text" is
+  about would land on the tab bar again. A layer a sliver shorter than the
+  clip they are given is what actually masks them.
+- **They are positioned by hand rather than right-aligned.**
+  `Column::number_left_edge` works out where a number starts so it ends
+  flush with the rest. `align_x: Right` would do the same thing visually and
+  then damage the wrong region: iced takes a `Text`'s damage from
+  `Rectangle::new(position, bounds)`, and right-alignment draws the glyphs
+  to the *left* of `position`, so the region reported is one nothing paints
+  in. The numbers are then painted once and never repainted, and whatever
+  covers them stays. `a_numbered_editor_repaints_its_numbers_where_it_draws_them`
+  is that bug, caught by comparing a damage-tracked frame against a freshly
+  painted one.
+
+Pressing a number selects its whole line, and dragging from there takes
+whole lines - which costs almost nothing, because `Action::SelectLine` sets
+cosmic-text's `Selection::Line` and that stays line-granular under the
+ordinary `Action::Drag` the existing drag machinery already sends. So the
+press publishes a click and a `SelectLine`, sets `selection_drag`, and the
+rest - including the view walking while the pointer is held past an edge -
+is the same code a selection drag in the text uses.
+
 ### Revealing the cursor after a change
 
 `safe_area.rs` defines the region all of this aims at: the rows of the viewport

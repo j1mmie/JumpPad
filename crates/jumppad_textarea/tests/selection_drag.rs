@@ -16,6 +16,7 @@ use iced_core::{
     Event, Font, Point, Rectangle, Shell, Size, Theme, Vector, mouse, window,
 };
 
+use jumppad_textarea::LineNumberPadding;
 use jumppad_textarea::text_editor::{Action, Content, TextEditor, text_editor};
 
 /// Where the editor sits in the window. Deliberately not the corner - a tab
@@ -49,6 +50,10 @@ struct Window {
     redraw_request: window::RedrawRequest,
     /// `[scroll] drag_speed`, as the app would have set it.
     drag_speed: f32,
+    /// The line numbers down the left, if any - they put a strip between the
+    /// padding and the text that presses land in differently, and how wide
+    /// that strip is is a setting.
+    line_numbers: Option<LineNumberPadding>,
 }
 
 impl Window {
@@ -57,8 +62,26 @@ impl Window {
     }
 
     fn at_drag_speed(drag_speed: f32) -> Self {
+        Self::numbering(drag_speed, None)
+    }
+
+    /// The same window with its document numbered, at the width JumpPad
+    /// ships.
+    fn numbered() -> Self {
+        Self::numbering(1.0, Some(LineNumberPadding::default()))
+    }
+
+    /// Numbered with a padding of this test's own choosing, in characters.
+    fn numbered_with(left: f32, right: f32) -> Self {
+        Self::numbering(1.0, Some(LineNumberPadding::new(left, right)))
+    }
+
+    fn numbering(
+        drag_speed: f32,
+        line_numbers: Option<LineNumberPadding>,
+    ) -> Self {
         let content = Content::with_text(&document());
-        let tree = Tree::new(&editor(&content, drag_speed)
+        let tree = Tree::new(&editor(&content, drag_speed, line_numbers)
             as &dyn Widget<Message, Theme, Renderer>);
 
         let mut window = Self {
@@ -69,6 +92,7 @@ impl Window {
             now: Instant::now(),
             redraw_request: window::RedrawRequest::Wait,
             drag_speed,
+            line_numbers,
         };
         // The first shape, which is what gives the document the line metrics
         // that hit tests and scrolls are measured against.
@@ -83,7 +107,8 @@ impl Window {
 
         {
             let mut shell = Shell::new(&mut messages);
-            let mut widget = editor(&self.content, self.drag_speed);
+            let mut widget =
+                editor(&self.content, self.drag_speed, self.line_numbers);
 
             widget.update(
                 &mut self.tree,
@@ -114,7 +139,8 @@ impl Window {
 
     fn lay_out(&mut self) {
         let node = {
-            let mut widget = editor(&self.content, self.drag_speed);
+            let mut widget =
+                editor(&self.content, self.drag_speed, self.line_numbers);
 
             widget.layout(
                 &mut self.tree,
@@ -205,9 +231,11 @@ fn document() -> String {
 fn editor(
     content: &Content<Renderer>,
     drag_speed: f32,
+    line_numbers: Option<LineNumberPadding>,
 ) -> TextEditor<'_, highlighter::PlainText, Message, Theme, Renderer> {
     text_editor(content)
         .drag_speed(drag_speed)
+        .line_numbers(line_numbers)
         .font(Font::MONOSPACE)
         .size(14.0)
         .line_height(LineHeight::Absolute(LINE_HEIGHT.into()))
@@ -229,6 +257,109 @@ fn scrolled_by(messages: &[Message]) -> Option<f32> {
         Message::Scroll(pixels) => Some(*pixels),
         _ => None,
     })
+}
+
+/// The middle of the row `line` sits on, in window coordinates - `x` is
+/// measured from the left of the area inside the widget's padding, so a
+/// small one lands on the numbers and a large one in the text.
+fn row(line: usize, x: f32) -> Point {
+    Point::new(
+        ORIGIN.x + PADDING + x,
+        ORIGIN.y + PADDING + (line as f32 + 0.5) * LINE_HEIGHT,
+    )
+}
+
+fn selected_line(messages: &[Message]) -> bool {
+    messages
+        .iter()
+        .any(|message| matches!(message, Message::Action(Action::SelectLine)))
+}
+
+#[test]
+fn a_press_on_a_line_number_selects_the_whole_line() {
+    let mut window = Window::numbered();
+    window.pointer = row(2, 1.0);
+
+    let messages = window.press();
+
+    assert!(
+        selected_line(&messages),
+        "a press on a number should select its line, got {messages:?}"
+    );
+    assert_eq!(window.selection(), "line 2");
+}
+
+/// The strip is only as wide as the numbers: past it the pointer is in the
+/// text, where a press puts a caret the way it always did.
+#[test]
+fn a_press_past_the_line_numbers_puts_a_caret_in_the_text() {
+    let mut window = Window::numbered();
+    // Well clear of a three-digit column at 14px monospace, and still on the
+    // first few characters of the line.
+    window.pointer = row(2, 60.0);
+
+    let messages = window.press();
+
+    assert!(
+        !selected_line(&messages),
+        "a press in the text should not select a line, got {messages:?}"
+    );
+    assert!(window.content.selection().is_none());
+}
+
+/// cosmic-text holds a line selection at line granularity, so the ordinary
+/// drag that follows the press keeps taking whole lines - including the
+/// whole of a line the pointer only reaches the middle of.
+#[test]
+fn a_drag_down_the_line_numbers_takes_whole_lines() {
+    let mut window = Window::numbered();
+    window.pointer = row(1, 1.0);
+    let _ = window.press();
+
+    window.pointer = row(3, 1.0);
+    let _ = window.feed(Event::Mouse(mouse::Event::CursorMoved {
+        position: window.pointer,
+    }));
+
+    assert_eq!(window.selection(), "line 1\nline 2\nline 3");
+}
+
+/// The strip is as wide as the padding says, and a press decides which side
+/// of it the pointer is on - so a padding wide enough puts the numbers under
+/// an x that would otherwise have been a caret in the text. What proves the
+/// characters reach the layout rather than only the arithmetic.
+#[test]
+fn a_wider_padding_pushes_the_text_out_from_under_the_pointer() {
+    let press_at = |window: &mut Window| {
+        window.pointer = row(2, 60.0);
+        window.press()
+    };
+
+    // At the shipped padding the column is five characters of a 14px
+    // monospace face, so 60 pixels in is past it and lands in the text.
+    let mut narrow = Window::numbered();
+    assert!(!selected_line(&press_at(&mut narrow)));
+
+    // Six characters of padding after the numbers puts the same x inside the
+    // strip, where a press takes the whole line.
+    let mut wide = Window::numbered_with(1.0, 6.0);
+    assert!(selected_line(&press_at(&mut wide)));
+    assert_eq!(wide.selection(), "line 2");
+}
+
+/// Nothing is numbered by default, so the strip isn't there to press on and
+/// the coordinates every other case in this file uses are unchanged.
+#[test]
+fn a_press_where_the_numbers_would_be_is_an_ordinary_click_without_them() {
+    let mut window = Window::new();
+    window.pointer = row(2, 1.0);
+
+    let messages = window.press();
+
+    assert!(
+        !selected_line(&messages),
+        "an unnumbered document has no strip to press, got {messages:?}"
+    );
 }
 
 #[test]

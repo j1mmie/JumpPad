@@ -15,13 +15,16 @@ pub(crate) fn apply_alpha(color: iced::Color, alpha: f32) -> iced::Color {
 /// iced's default `text_editor` style draws a border that changes color on
 /// hover/focus - dropped here so there's no color-change effect to notice.
 /// Also drops its background on a transparent window and scales the base text
-/// color by `foreground_alpha` (both plain parameters, for testability -
-/// syntax-highlighted text instead goes through `color_for`).
+/// color by `foreground_alpha`, and the line numbers by `line_numbers_alpha`
+/// on top of that - so the numbers stay a step back from the text however
+/// faint the text itself is set. All plain parameters, for testability;
+/// syntax-highlighted text instead goes through `color_for`.
 pub(crate) fn editor_style(
     theme: &Theme,
     status: text_editor::Status,
     background_alpha: f32,
     foreground_alpha: f32,
+    line_numbers_alpha: f32,
 ) -> text_editor::Style {
     let default = text_editor::default(theme, status);
     // The window background is already this exact color; repainting it
@@ -40,6 +43,7 @@ pub(crate) fn editor_style(
         },
         background,
         value,
+        line_number: apply_alpha(value, line_numbers_alpha),
         scrollbar_thumb: scrollbar_thumb_style(theme),
         ..default
     }

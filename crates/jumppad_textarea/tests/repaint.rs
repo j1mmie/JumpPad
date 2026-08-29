@@ -15,6 +15,7 @@ use iced_core::{
 use iced_tiny_skia::Renderer;
 use iced_tiny_skia::graphics::{Viewport, damage};
 
+use jumppad_textarea::LineNumberPadding;
 use jumppad_textarea::text_editor::{Content, TextEditor, text_editor};
 
 const WINDOW: Size<u32> = Size::new(500, 400);
@@ -47,6 +48,9 @@ struct Window {
     /// which is what `softbuffer` reports as its age. Windows and X11 say 1.
     age: usize,
     theme: Theme,
+    /// Whether the document is numbered down the left, which puts paint
+    /// outside the text's own clip.
+    line_numbers: bool,
 }
 
 impl Window {
@@ -56,10 +60,20 @@ impl Window {
 
     /// A window whose platform presents through `age` buffers in rotation.
     fn with_buffers(age: usize) -> Self {
+        Self::numbering(age, false)
+    }
+
+    /// The same window with its document numbered.
+    fn numbered() -> Self {
+        Self::numbering(1, true)
+    }
+
+    fn numbering(age: usize, line_numbers: bool) -> Self {
         let content = Content::with_text(&document());
         let renderer = Renderer::new(Font::MONOSPACE, Pixels(14.0));
         let tree =
-            Tree::new(&editor(&content) as &dyn Widget<Message, Theme, _>);
+            Tree::new(&editor(&content, line_numbers)
+                as &dyn Widget<Message, Theme, _>);
 
         let mut window = Self {
             content,
@@ -73,6 +87,7 @@ impl Window {
             layer_stack: Vec::new(),
             age,
             theme: Theme::Dark,
+            line_numbers,
         };
         window.lay_out();
 
@@ -81,7 +96,7 @@ impl Window {
 
     fn lay_out(&mut self) {
         let node = {
-            let mut widget = editor(&self.content);
+            let mut widget = editor(&self.content, self.line_numbers);
 
             widget.layout(
                 &mut self.tree,
@@ -101,7 +116,7 @@ impl Window {
             .reset(Rectangle::with_size(self.viewport.logical_size()));
 
         {
-            let widget = editor(&self.content);
+            let widget = editor(&self.content, self.line_numbers);
 
             widget.draw(
                 &self.tree,
@@ -196,6 +211,23 @@ impl Window {
             .collect()
     }
 
+    /// The leftmost column carrying anything drawn over the widget's own
+    /// background, in the band the first few lines of text sit in. Started
+    /// inside the border, which is a color of its own, the same way
+    /// [`Self::painted_on_the_padding`] is.
+    fn leftmost_painted_column(&self) -> Option<u32> {
+        let inset = 3;
+        let left = ORIGIN.x as u32 + inset;
+        let background =
+            self.pixel(left, (ORIGIN.y + SIZE.height / 2.0) as u32);
+
+        let top = (ORIGIN.y + PADDING) as u32;
+        let bottom = (ORIGIN.y + PADDING + LINE_HEIGHT * 3.0) as u32;
+
+        (left..(ORIGIN.x + SIZE.width) as u32 - inset)
+            .find(|x| (top..bottom).any(|y| self.pixel(*x, y) != background))
+    }
+
     fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let at = (y as usize * WINDOW.width as usize + x as usize) * 4;
 
@@ -241,6 +273,7 @@ fn document() -> String {
 
 fn editor(
     content: &Content<Renderer>,
+    line_numbers: bool,
 ) -> TextEditor<'_, highlighter::PlainText, Message, Theme, Renderer> {
     text_editor(content)
         .font(Font::MONOSPACE)
@@ -248,6 +281,7 @@ fn editor(
         .line_height(LineHeight::Absolute(Pixels(LINE_HEIGHT)))
         .padding(PADDING)
         .height(SIZE.height)
+        .line_numbers(line_numbers.then(LineNumberPadding::default))
 }
 
 /// The editor draws the rows the top and bottom edges cut through *whole* -
@@ -276,6 +310,90 @@ fn an_editor_at_the_top_of_its_document_paints_nothing_outside_itself() {
     assert_eq!(window.painted_above_the_widget(), Vec::new());
     assert_eq!(window.painted_below_the_widget(), Vec::new());
     assert_eq!(window.painted_on_the_padding(), Vec::new());
+}
+
+/// The numbers are drawn beside the text rather than inside it, so they get
+/// a clip of their own - and it has to be the one that makes the renderer
+/// build a mask, or the rows the edges cut through overhang exactly the way
+/// the text used to.
+#[test]
+fn a_numbered_editor_paints_nothing_outside_itself() {
+    let mut window = Window::numbered();
+    let _ = window.present();
+
+    window.content.scroll_by(LINE_HEIGHT / 2.0);
+    let _ = window.present();
+
+    assert_eq!(window.painted_above_the_widget(), Vec::new());
+    assert_eq!(window.painted_below_the_widget(), Vec::new());
+    assert_eq!(window.painted_on_the_padding(), Vec::new());
+}
+
+/// Without this the case above would pass just as well on an editor that
+/// drew no numbers at all.
+#[test]
+fn a_numbered_editor_draws_its_numbers_left_of_its_text() {
+    let mut plain = Window::new();
+    let mut numbered = Window::numbered();
+    let _ = plain.present();
+    let _ = numbered.present();
+
+    let plain_left = plain.leftmost_painted_column().expect("text on screen");
+    let numbered_left =
+        numbered.leftmost_painted_column().expect("numbers on screen");
+
+    // The numbers are right-aligned in a column three digits wide and these
+    // are one and two digits long, so the leftmost of them starts further in
+    // than the text it replaced.
+    assert!(
+        numbered_left > plain_left,
+        "numbers at {numbered_left} should start right of the text's \
+         {plain_left}"
+    );
+}
+
+/// The same long scroll as the case below, with numbers in the way: their
+/// layer damages differently from the text's, so it gets its own run.
+#[test]
+fn the_band_above_a_numbered_editor_stays_clean_across_a_long_scroll() {
+    let mut window = Window::numbered();
+    let _ = window.present();
+
+    for _ in 0..30 {
+        window.content.scroll_by(LINE_HEIGHT / 3.0);
+        let _ = window.present();
+    }
+
+    let smeared = window.painted_above_the_widget();
+    assert!(
+        smeared.is_empty(),
+        "{} pixels of old numbers left above the editor",
+        smeared.len()
+    );
+    assert_eq!(window.painted_on_the_padding(), Vec::new());
+}
+
+/// A damage-tracked frame has to leave the numbers exactly where a full
+/// repaint would. iced works a `Text`'s damage out from the rectangle it is
+/// handed, so a number drawn anywhere other than inside that rectangle
+/// damages a region it never paints - and is then painted once and never
+/// again, while whatever covers it stays.
+#[test]
+fn a_numbered_editor_repaints_its_numbers_where_it_draws_them() {
+    let mut tracked = Window::numbered();
+    let _ = tracked.present();
+    tracked.content.scroll_by(LINE_HEIGHT * 3.0);
+    let _ = tracked.present();
+
+    let mut whole = Window::numbered();
+    whole.content.scroll_by(LINE_HEIGHT * 3.0);
+    let _ = whole.present();
+
+    assert_eq!(
+        changed_pixels(&tracked.pixels, &whole.pixels),
+        0,
+        "a repainted frame differs from a freshly painted one"
+    );
 }
 
 /// The failure this is really about. Windows keeps the last frame's buffer,

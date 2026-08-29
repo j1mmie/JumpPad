@@ -1989,7 +1989,7 @@ fn apply_alpha_scales_the_alpha_channel_only() {
 fn editor_style_leaves_background_and_value_alone_at_full_solid() {
     let theme = Theme::ALL[0].clone();
     let default = text_editor::default(&theme, text_editor::Status::Active);
-    let style = editor_style(&theme, text_editor::Status::Active, 1.0, 1.0);
+    let style = editor_style(&theme, text_editor::Status::Active, 1.0, 1.0, 1.0);
     assert_eq!(style.background, default.background);
     assert_eq!(style.value, default.value);
 }
@@ -1999,13 +1999,34 @@ fn editor_style_drops_its_background_when_translucent_but_keeps_the_value()
 {
     let theme = Theme::ALL[0].clone();
     let default = text_editor::default(&theme, text_editor::Status::Active);
-    let style = editor_style(&theme, text_editor::Status::Active, 0.5, 1.0);
+    let style = editor_style(&theme, text_editor::Status::Active, 0.5, 1.0, 1.0);
     assert_eq!(style.background, Background::Color(Color::TRANSPARENT));
     assert_eq!(style.value, default.value); // foreground untouched
 
-    let style = editor_style(&theme, text_editor::Status::Active, 1.0, 0.3);
+    let style = editor_style(&theme, text_editor::Status::Active, 1.0, 0.3, 1.0);
     assert_eq!(style.background, default.background); // background untouched
     assert_ne!(style.value, default.value);
+}
+
+/// The numbers are dimmed against the text they sit beside rather than
+/// against the palette, so a faint document doesn't end up with numbers
+/// brighter than itself.
+#[test]
+fn editor_style_dims_the_line_numbers_below_the_text() {
+    let theme = Theme::ALL[0].clone();
+    let style =
+        editor_style(&theme, text_editor::Status::Active, 1.0, 0.5, 0.4);
+
+    assert_eq!(
+        (
+            style.line_number.r,
+            style.line_number.g,
+            style.line_number.b
+        ),
+        (style.value.r, style.value.g, style.value.b)
+    );
+    assert!(style.line_number.a < style.value.a);
+    assert!((style.line_number.a - style.value.a * 0.4).abs() < 1e-6);
 }
 
 #[test]

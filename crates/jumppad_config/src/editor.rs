@@ -1,12 +1,89 @@
 use serde::{Deserialize, Serialize};
 
-use crate::font::FontConfig;
+use crate::font::{
+    DEFAULT_LINE_NUMBERS_ALPHA, DEFAULT_LINE_NUMBERS_PADDING,
+    DEFAULT_LINE_NUMBERS_SHOWN, FontConfig,
+};
+use crate::theme::ResolvedLineNumbers;
 
 /// A theme's half for the documents themselves.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorConfig {
     pub font: FontConfig,
+    pub line_numbers: LineNumbersConfig,
+}
+
+/// The column of line numbers down the left of a document.
+///
+/// Off unless a theme asks for it: JumpPad opens notes and config files as
+/// often as it opens code, and a number beside every line is noise there.
+///
+/// `alpha` scales the theme's own text color rather than naming a color of
+/// its own, so the numbers read as a step back from the document in every
+/// palette - and stay in step with a theme the user swaps underneath them.
+///
+/// `padding` is the blank either side of the numbers, in **characters** -
+/// one character of the document's own face - so it keeps its proportions at
+/// any text size and reads the same beside any face.
+///
+/// Every property is matched and clamped where applied, not here, so this
+/// crate doesn't need an `iced` dependency.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LineNumbersConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha: Option<f32>,
+    #[serde(skip_serializing_if = "crate::is_default")]
+    pub padding: LineNumbersPaddingConfig,
+}
+
+/// The blank either side of the line numbers, in characters. `left` is
+/// between the window's edge and the first digit; `right` is between the
+/// last digit and the first character of every line.
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LineNumbersPaddingConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right: Option<f32>,
+}
+
+impl LineNumbersConfig {
+    /// These line numbers with `base` supplying whichever property they
+    /// don't name - so a base alpha survives a theme that only turns the
+    /// numbers off.
+    pub(crate) fn with_defaults_from(
+        &self,
+        base: &LineNumbersConfig,
+    ) -> LineNumbersConfig {
+        LineNumbersConfig {
+            enabled: self.enabled.or(base.enabled),
+            alpha: self.alpha.or(base.alpha),
+            padding: LineNumbersPaddingConfig {
+                left: self.padding.left.or(base.padding.left),
+                right: self.padding.right.or(base.padding.right),
+            },
+        }
+    }
+
+    pub(crate) fn resolved(&self) -> ResolvedLineNumbers {
+        ResolvedLineNumbers {
+            enabled: self.enabled.unwrap_or(DEFAULT_LINE_NUMBERS_SHOWN),
+            alpha: self.alpha.unwrap_or(DEFAULT_LINE_NUMBERS_ALPHA),
+            padding_left: self
+                .padding
+                .left
+                .unwrap_or(DEFAULT_LINE_NUMBERS_PADDING),
+            padding_right: self
+                .padding
+                .right
+                .unwrap_or(DEFAULT_LINE_NUMBERS_PADDING),
+        }
+    }
 }
 
 /// A theme's half for the app's own chrome around them - tab titles, the

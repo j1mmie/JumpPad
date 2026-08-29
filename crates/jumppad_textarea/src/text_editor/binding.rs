@@ -3,10 +3,10 @@ use std::ops;
 use iced_core::keyboard::key;
 use iced_core::text::editor::Motion;
 use iced_core::{
-    Event, Padding, Rectangle, SmolStr, Vector, input_method, keyboard, mouse,
+    Event, Rectangle, SmolStr, Vector, input_method, keyboard, mouse,
 };
 
-use super::geometry::{text_position, wheel_lines};
+use super::geometry::{TextInset, text_position, wheel_lines};
 use super::state::State;
 use super::theme::Status;
 
@@ -152,6 +152,8 @@ impl<Message> Binding<Message> {
 
 pub(super) enum Update<Message> {
     Click(mouse::Click),
+    /// A press on a line number: select the whole line it belongs to.
+    SelectLineAt(iced_core::Point),
     Drag(iced_core::Point),
     Release,
     Scroll(f32),
@@ -173,12 +175,13 @@ impl<Message> Update<Message> {
         event: &Event,
         state: &State<H>,
         bounds: Rectangle,
-        padding: Padding,
+        inset: TextInset,
         cursor: mouse::Cursor,
         scroll_sensitivity: f32,
         key_binding: Option<&dyn Fn(KeyPress) -> Option<Binding<Message>>>,
     ) -> Option<Self> {
         let binding = |binding| Some(Update::Binding(binding));
+        let padding = inset.padding();
 
         match event {
             Event::Mouse(event) => match event {
@@ -186,6 +189,10 @@ impl<Message> Update<Message> {
                     if let Some(cursor_position) = cursor.position_in(bounds) {
                         let cursor_position = cursor_position
                             - Vector::new(padding.left, padding.top);
+
+                        if inset.is_on_line_numbers(cursor_position) {
+                            return Some(Update::SelectLineAt(cursor_position));
+                        }
 
                         let click = mouse::Click::new(
                             cursor_position,

@@ -156,6 +156,10 @@ impl ThemeConfig {
             },
             editor: EditorConfig {
                 font: self.editor.font.with_defaults_from(&base.editor.font),
+                line_numbers: self
+                    .editor
+                    .line_numbers
+                    .with_defaults_from(&base.editor.line_numbers),
             },
             ui: UiConfig {
                 font: self.ui.font.with_defaults_from(&base.ui.font),
@@ -176,6 +180,7 @@ impl ThemeConfig {
             background_blur: self.background.blur.unwrap_or(DEFAULT_BLUR),
             foreground_alpha: self.foreground.alpha.unwrap_or(DEFAULT_ALPHA),
             editor_font: self.editor.font.resolved(),
+            line_numbers: self.editor.line_numbers.resolved(),
             ui_font: self.ui.font.resolved(),
         }
     }
@@ -192,7 +197,30 @@ pub struct ResolvedTheme {
     pub background_blur: Blur,
     pub foreground_alpha: f32,
     pub editor_font: ResolvedFont,
+    pub line_numbers: ResolvedLineNumbers,
     pub ui_font: ResolvedFont,
+}
+
+/// Whether a document shows line numbers, how far back from its text they
+/// are drawn, and the blank either side of them. Settled, like the rest of a
+/// [`ResolvedTheme`]; the paddings are in characters.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedLineNumbers {
+    pub enabled: bool,
+    pub alpha: f32,
+    pub padding_left: f32,
+    pub padding_right: f32,
+}
+
+impl Default for ResolvedLineNumbers {
+    fn default() -> Self {
+        Self {
+            enabled: crate::font::DEFAULT_LINE_NUMBERS_SHOWN,
+            alpha: crate::font::DEFAULT_LINE_NUMBERS_ALPHA,
+            padding_left: crate::font::DEFAULT_LINE_NUMBERS_PADDING,
+            padding_right: crate::font::DEFAULT_LINE_NUMBERS_PADDING,
+        }
+    }
 }
 
 /// One surface's typeface and text size, settled. `family` stays optional

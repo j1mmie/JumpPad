@@ -278,6 +278,14 @@ impl JumpPadApp {
             Font::MONOSPACE,
         ));
         self.editor_config.set_font_size(theme.editor_font.size);
+        self.editor_config
+            .set_line_numbers(theme.line_numbers.enabled);
+        self.editor_config
+            .set_line_numbers_alpha(theme.line_numbers.alpha);
+        self.editor_config
+            .set_line_numbers_padding_left(theme.line_numbers.padding_left);
+        self.editor_config
+            .set_line_numbers_padding_right(theme.line_numbers.padding_right);
         self.ui_text = ui_text(&theme.ui_font);
 
         let translucency = if self.background_alpha < 1.0 && !was_translucent {
