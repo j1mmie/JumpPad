@@ -1308,23 +1308,23 @@ fn apply_config_reaches_the_shared_line_numbers() {
     assert_eq!(app.editor_config.line_numbers_alpha(), 0.2);
 }
 
-/// How much room the numbers take is a theme property like the rest of them,
-/// and the widget reads it as one value - `None` while the document isn't
-/// numbered at all.
+/// The blank either side of the numbers is a theme property like the rest of
+/// them, and the widget reads it as one value - `None` while the document
+/// isn't numbered at all.
 #[test]
-fn apply_config_reaches_the_shared_line_number_sizing() {
+fn apply_config_reaches_the_shared_line_number_padding() {
     let mut app = test_app(1);
-    assert_eq!(app.editor_config.line_numbers_sizing(), None);
+    assert_eq!(app.editor_config.line_numbers_padding(), None);
 
     let _ = app.apply_config(config_with_theme(
         "editor.line_numbers.enabled = true\n\
-         editor.line_numbers.min_width = 3.5\n\
-         editor.line_numbers.gap = 1.25",
+         editor.line_numbers.padding.left = 3.5\n\
+         editor.line_numbers.padding.right = 1.25",
     ));
 
     assert_eq!(
-        app.editor_config.line_numbers_sizing(),
-        Some(jumppad_textarea::LineNumberSizing::new(3.5, 1.25))
+        app.editor_config.line_numbers_padding(),
+        Some(jumppad_textarea::LineNumberPadding::new(3.5, 1.25))
     );
 }
 

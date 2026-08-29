@@ -57,10 +57,10 @@ pub struct TextEditor<
     /// Columns between tab stops, for drawing - see
     /// [`TextEditor::tab_width`].
     pub(super) tab_width: u16,
-    /// The column of line numbers down the left, and how much room it takes -
-    /// `None` for a document that isn't numbered. See
+    /// The column of line numbers down the left, and the blank either side of
+    /// it - `None` for a document that isn't numbered. See
     /// [`TextEditor::line_numbers`].
-    pub(super) line_numbers: Option<line_numbers::Sizing>,
+    pub(super) line_numbers: Option<line_numbers::Padding>,
     pub(super) class: Theme::Class<'a>,
     #[allow(clippy::type_complexity)]
     pub(super) key_binding:
@@ -258,17 +258,18 @@ where
         self
     }
 
-    /// Numbers each line down the left of the document, in a column sized by
-    /// the given [`Sizing`]. `None` leaves it unnumbered.
+    /// Numbers each line down the left of the document, with the given
+    /// blank either side of them. `None` leaves it unnumbered.
     ///
     /// The numbers count the document, not the screen: a line long enough to
     /// wrap is numbered once, on the row it begins on. They take their room
     /// from the text, so turning them on rewraps whatever is open.
     ///
-    /// [`Sizing`]: line_numbers::Sizing
+    /// Not to be confused with [`padding`](Self::padding), which is the
+    /// widget's own inset around everything it draws.
     pub fn line_numbers(
         mut self,
-        line_numbers: Option<line_numbers::Sizing>,
+        line_numbers: Option<line_numbers::Padding>,
     ) -> Self {
         self.line_numbers = line_numbers;
         self

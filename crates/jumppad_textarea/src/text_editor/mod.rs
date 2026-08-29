@@ -77,9 +77,9 @@ where
     /// asked for at least three times a frame - to wrap the text, to place a
     /// pointer in it, and to draw it - and answering it means shaping a row
     /// of digits, which is only worth doing again when the document has grown
-    /// a digit or the face it is drawn in has changed. Holding that width
-    /// against the theme's minimum and gap is arithmetic, and happens every
-    /// time, so a reload of either lands on the next frame.
+    /// a digit or the face it is drawn in has changed. Laying the theme's
+    /// padding out either side of that width is arithmetic, and happens every
+    /// time, so a reload of it lands on the next frame.
     fn line_number_column(
         &self,
         state: &State<Highlighter>,
@@ -87,7 +87,7 @@ where
         line_count: usize,
         text_area_width: f32,
     ) -> Option<line_numbers::Column> {
-        let sizing = self.line_numbers?;
+        let padding = self.line_numbers?;
 
         let font = self.font.unwrap_or_else(|| renderer.default_font());
         let text_size =
@@ -113,8 +113,7 @@ where
             }
         };
 
-        let column =
-            line_numbers::Column::new(digits, width, sizing, text_size.0);
+        let column = line_numbers::Column::new(digits, width, padding);
 
         column.leaves_room_in(text_area_width).then_some(column)
     }

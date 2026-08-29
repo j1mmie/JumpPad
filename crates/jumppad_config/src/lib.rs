@@ -18,12 +18,11 @@ use serde::{Deserialize, Serialize};
 
 pub use editor::{
     EditorConfig, FilesConfig, HistoryConfig, LineNumbersConfig,
-    SaveConflictResolution, ScrollConfig, UiConfig,
+    LineNumbersPaddingConfig, SaveConflictResolution, ScrollConfig, UiConfig,
 };
 pub use font::{
     FontConfig, DEFAULT_ALPHA, DEFAULT_FONT_SIZE, DEFAULT_LINE_NUMBERS_ALPHA,
-    DEFAULT_LINE_NUMBERS_GAP, DEFAULT_LINE_NUMBERS_MIN_WIDTH,
-    DEFAULT_LINE_NUMBERS_SHOWN,
+    DEFAULT_LINE_NUMBERS_PADDING, DEFAULT_LINE_NUMBERS_SHOWN,
 };
 pub use gpu::{GpuConfig, GpuPower};
 pub use indentation::{

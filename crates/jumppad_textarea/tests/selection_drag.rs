@@ -16,7 +16,7 @@ use iced_core::{
     Event, Font, Point, Rectangle, Shell, Size, Theme, Vector, mouse, window,
 };
 
-use jumppad_textarea::LineNumberSizing;
+use jumppad_textarea::LineNumberPadding;
 use jumppad_textarea::text_editor::{Action, Content, TextEditor, text_editor};
 
 /// Where the editor sits in the window. Deliberately not the corner - a tab
@@ -53,7 +53,7 @@ struct Window {
     /// The line numbers down the left, if any - they put a strip between the
     /// padding and the text that presses land in differently, and how wide
     /// that strip is is a setting.
-    line_numbers: Option<LineNumberSizing>,
+    line_numbers: Option<LineNumberPadding>,
 }
 
 impl Window {
@@ -68,17 +68,17 @@ impl Window {
     /// The same window with its document numbered, at the width JumpPad
     /// ships.
     fn numbered() -> Self {
-        Self::numbering(1.0, Some(LineNumberSizing::default()))
+        Self::numbering(1.0, Some(LineNumberPadding::default()))
     }
 
-    /// Numbered at a width of this test's own choosing, in ems.
-    fn numbered_with(minimum: f32, gap: f32) -> Self {
-        Self::numbering(1.0, Some(LineNumberSizing::new(minimum, gap)))
+    /// Numbered with a padding of this test's own choosing, in characters.
+    fn numbered_with(left: f32, right: f32) -> Self {
+        Self::numbering(1.0, Some(LineNumberPadding::new(left, right)))
     }
 
     fn numbering(
         drag_speed: f32,
-        line_numbers: Option<LineNumberSizing>,
+        line_numbers: Option<LineNumberPadding>,
     ) -> Self {
         let content = Content::with_text(&document());
         let tree = Tree::new(&editor(&content, drag_speed, line_numbers)
@@ -231,7 +231,7 @@ fn document() -> String {
 fn editor(
     content: &Content<Renderer>,
     drag_speed: f32,
-    line_numbers: Option<LineNumberSizing>,
+    line_numbers: Option<LineNumberPadding>,
 ) -> TextEditor<'_, highlighter::PlainText, Message, Theme, Renderer> {
     text_editor(content)
         .drag_speed(drag_speed)
@@ -324,25 +324,25 @@ fn a_drag_down_the_line_numbers_takes_whole_lines() {
     assert_eq!(window.selection(), "line 1\nline 2\nline 3");
 }
 
-/// The strip is as wide as the settings say, and a press decides which side
-/// of it the pointer is on - so a gap wide enough puts the numbers under an
-/// x that would otherwise have been a caret in the text. What proves the ems
-/// reach the layout rather than only the arithmetic.
+/// The strip is as wide as the padding says, and a press decides which side
+/// of it the pointer is on - so a padding wide enough puts the numbers under
+/// an x that would otherwise have been a caret in the text. What proves the
+/// characters reach the layout rather than only the arithmetic.
 #[test]
-fn a_wider_gap_pushes_the_text_out_from_under_the_pointer() {
+fn a_wider_padding_pushes_the_text_out_from_under_the_pointer() {
     let press_at = |window: &mut Window| {
-        window.pointer = row(2, 40.0);
+        window.pointer = row(2, 60.0);
         window.press()
     };
 
-    // At the shipped width, 40 pixels in is past a three-digit column at
-    // 14px text and lands in the text.
+    // At the shipped padding the column is five characters of a 14px
+    // monospace face, so 60 pixels in is past it and lands in the text.
     let mut narrow = Window::numbered();
     assert!(!selected_line(&press_at(&mut narrow)));
 
-    // Four ems of gap on top of the numbers puts the same x inside the
+    // Six characters of padding after the numbers puts the same x inside the
     // strip, where a press takes the whole line.
-    let mut wide = Window::numbered_with(1.8, 4.0);
+    let mut wide = Window::numbered_with(1.0, 6.0);
     assert!(selected_line(&press_at(&mut wide)));
     assert_eq!(wide.selection(), "line 2");
 }

@@ -51,18 +51,14 @@ editor.line_numbers.enabled = true
 # read as a step back from it. The line the caret is on ignores this and
 # draws at full strength.
 editor.line_numbers.alpha = 0.45
-# How much room the numbers take, in ems - multiples of `editor.font.size`,
-# so both keep their proportions whatever size the text is set at.
-#
-#   min_width  the narrowest the numbers themselves are drawn. A floor keeps
-#              a file being typed into from shifting sideways the moment it
-#              passes nine lines. 1.8 is three digits of a typical monospace
-#              face; 0 lets the column be exactly as wide as its digits.
-#   gap        the blank between the numbers and the first character of every
-#              line. Added on top of `min_width`, so widening it never eats
-#              into the numbers.
-editor.line_numbers.min_width = 1.8
-editor.line_numbers.gap = 0.6
+# The blank either side of the numbers, in characters - one character of the
+# face the document is drawn in, so it keeps its proportions whatever size
+# the text is set at. `left` is between the window's edge and the first
+# digit; `right` is between the last digit and the first character of every
+# line. A proportional face has no one character width, so a digit stands in
+# for it and the spacing is a fair guess rather than an exact one.
+editor.line_numbers.padding.left = 1.0
+editor.line_numbers.padding.right = 1.0
 ui.font.family = "Comic Sans MS"
 
 # The two slots show `light` and `dark` unless `[mode]` names something else,

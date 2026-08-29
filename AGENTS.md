@@ -685,23 +685,27 @@ it draws from, a pointer's position in it, the scrollbar's track. Splitting
 those apart is how the text ends up drawing somewhere other than where
 clicking it lands.
 
-**How wide it is, is a measurement held against two settings.** The
+**How wide it is, is a measurement plus a padding either side.** The
 measurement is a row of zeros shaped in the document's own face - a digit's
 width is the typeface's business - cached on the widget's `State` against the
 digit count, the font and the text size, since it is asked for three times a
-frame and shaping it each time is not free. `line_numbers::Sizing` is the
-other half: `editor.line_numbers.min_width` floors the numbers' own width and
-`editor.line_numbers.gap` is added beside them, both in **ems**, so a setting
-keeps its proportions at any text size and means the same thing in any face.
-The floor is what keeps a file being typed into from shifting sideways the
-moment it passes nine lines; the defaults are three digits and one digit of a
-typical monospace face, which is what the column was hard-coded to before
-either was a setting.
+frame and shaping it each time is not free. `line_numbers::Padding` is the
+other half: `editor.line_numbers.padding.left` and `.right`, in
+**characters**, where a character is that same measured digit. So the column
+is `left + digits + right` characters, and no text size comes into it - the
+face settles the whole thing. A proportional face has no one character width
+to speak of, which is why the digit stands in for it and the spacing there is
+a fair guess rather than an exact one.
+
+**Nothing floors the digit count.** The column follows the number of digits,
+so a document's text shifts sideways by a character the first time it passes
+9 lines, then 99. There was a three-digit floor for exactly that reason and it
+was taken out deliberately; put it back only on the owner's say-so.
 
 **The cache holds the measurement, not the finished `Column`.** Holding the
-column instead would mean a `config.toml` reload of `min_width` or `gap` going
+column instead would mean a `config.toml` reload of either padding going
 unnoticed until the font or the digit count happened to move. Rebuilding the
-column per call is two multiplies and a `max`.
+column per call is two multiplies.
 
 **Two things about drawing them that look arbitrary and are not:**
 

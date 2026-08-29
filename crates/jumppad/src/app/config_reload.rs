@@ -283,9 +283,9 @@ impl JumpPadApp {
         self.editor_config
             .set_line_numbers_alpha(theme.line_numbers.alpha);
         self.editor_config
-            .set_line_numbers_min_width(theme.line_numbers.min_width);
+            .set_line_numbers_padding_left(theme.line_numbers.padding_left);
         self.editor_config
-            .set_line_numbers_gap(theme.line_numbers.gap);
+            .set_line_numbers_padding_right(theme.line_numbers.padding_right);
         self.ui_text = ui_text(&theme.ui_font);
 
         let translucency = if self.background_alpha < 1.0 && !was_translucent {
